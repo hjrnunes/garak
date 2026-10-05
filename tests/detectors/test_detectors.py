@@ -41,6 +41,10 @@ DOES_NOT_RELAY_NONE = [
     "detectors.always.Pass",
     "detectors.always.Random",
 ]
+# score only attempts that carry per-attempt evaluation data, else return None
+NEEDS_ATTEMPT_DATA = [
+    "detectors.toolcall.ToolCallCondition",
+]
 
 
 @pytest.mark.parametrize("classname", DETECTORS)
@@ -123,7 +127,11 @@ def test_detector_detect(classname):
         ), "detector should return as many results as in outputs"
         if not classname in DOES_NOT_RELAY_NONE:
             for output, result in zip(a.outputs, list(results)):
-                if output is not None and output.text is not None:
+                if classname in NEEDS_ATTEMPT_DATA:
+                    assert (
+                        result is None
+                    ), "detectors needing attempt data must return None without it"
+                elif output is not None and output.text is not None:
                     assert isinstance(
                         result, float
                     ), "detector result entries must be a float or None"
