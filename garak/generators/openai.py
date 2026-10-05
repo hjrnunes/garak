@@ -509,6 +509,22 @@ class OpenAIResponsesGenerator(OpenAICompatible):
         system_texts = [t.content.text for t in prompt.turns if t.role == "system"]
         return "\n".join(system_texts) if system_texts else None
 
+    @staticmethod
+    def _flatten_function_entry(entry):
+        """Convert a chat-completions function tool or tool_choice to the Responses shape.
+
+        ``{"type": "function", "function": {"name": ...}}`` becomes
+        ``{"type": "function", "name": ...}``; anything else is returned unchanged.
+        """
+        if (
+            isinstance(entry, dict)
+            and entry.get("type") == "function"
+            and isinstance(entry.get("function"), dict)
+        ):
+            flat = {k: v for k, v in entry.items() if k != "function"}
+            return {**entry["function"], **flat}
+        return entry
+
     @backoff.on_exception(
         backoff.fibo,
         (
@@ -538,6 +554,23 @@ class OpenAIResponsesGenerator(OpenAICompatible):
             create_args["tools"] = self.tools
         for k, v in self.extra_params.items():
             create_args[k] = v
+
+        # per-conversation tool definitions (and optional tool_choice) travel on
+        # Conversation.notes so each injected conversation carries its own schema
+        if isinstance(prompt, Conversation):
+            if prompt.notes.get("tools"):
+                create_args["tools"] = prompt.notes["tools"]
+            if prompt.notes.get("tool_choice") is not None:
+                create_args["tool_choice"] = prompt.notes["tool_choice"]
+
+        if "tools" in create_args:
+            create_args["tools"] = [
+                self._flatten_function_entry(tool) for tool in create_args["tools"]
+            ]
+        if "tool_choice" in create_args:
+            create_args["tool_choice"] = self._flatten_function_entry(
+                create_args["tool_choice"]
+            )
 
         try:
             response = self.client.responses.create(**create_args)
@@ -588,10 +621,12 @@ class OpenAIResponsesGenerator(OpenAICompatible):
             notes["tool_calls"] = tool_calls
         if reasoning_parts:
             notes["reasoning"] = "\n".join(reasoning_parts)
+        # detectors need the status to tell a finished turn from a truncated one
+        status = getattr(response, "status", None)
+        if isinstance(status, str):
+            notes["response_status"] = status
 
-        if text is not None or notes:
-            return [Message(text, notes=notes)]
-        return [None]
+        return [Message(text, notes=notes)]
 
 
 DEFAULT_CLASS = "OpenAIGenerator"

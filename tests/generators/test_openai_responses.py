@@ -12,7 +12,6 @@ import openai
 from garak.attempt import Message, Turn, Conversation
 from garak.generators.openai import OpenAIResponsesGenerator
 
-
 FAKE_API_KEY = "sk-test-fake-key"
 
 
@@ -83,6 +82,7 @@ def _make_response_with_reasoning(message_text: str, reasoning_text: str):
 
 # ── init & defaults ───────────────────────────────────────────────────────────
 
+
 def test_defaults(set_fake_env, mock_openai_client):
     gen = OpenAIResponsesGenerator(name="my-model")
     assert gen.name == "my-model"
@@ -101,7 +101,9 @@ def test_custom_uri_and_tools(set_fake_env, mock_openai_client):
                 "openai": {
                     "OpenAIResponsesGenerator": {
                         "uri": "http://localhost:8321/v1/",
-                        "tools": [{"type": "mcp", "server_url": "http://localhost:8888/sse"}],
+                        "tools": [
+                            {"type": "mcp", "server_url": "http://localhost:8888/sse"}
+                        ],
                     }
                 }
             }
@@ -115,8 +117,11 @@ def test_custom_uri_and_tools(set_fake_env, mock_openai_client):
 
 # ── _call_model ───────────────────────────────────────────────────────────────
 
+
 def test_call_model_returns_message(generator):
-    generator.client.responses.create.return_value = _make_response("The balance is $100.")
+    generator.client.responses.create.return_value = _make_response(
+        "The balance is $100."
+    )
 
     result = generator._call_model(
         Conversation([Turn(role="user", content=Message("What is the balance?"))])
@@ -153,15 +158,23 @@ def test_call_model_max_tokens_mapped_to_max_output_tokens(generator):
     assert "max_tokens" not in kwargs
 
 
-def test_call_model_empty_output_returns_none(generator):
+def test_call_model_empty_output_returns_empty_message(generator):
     response = MagicMock()
     response.output = []
+    response.status = "completed"
     generator.client.responses.create.return_value = response
 
     result = generator._call_model(
         Conversation([Turn(role="user", content=Message("Hello"))])
     )
-    assert result == [None]
+    assert len(result) == 1
+    assert isinstance(
+        result[0], Message
+    ), "a returned response yields a Message even when empty"
+    assert result[0].text is None
+    assert result[0].notes == {
+        "response_status": "completed"
+    }, "an empty response carries only its status"
 
 
 def test_call_model_bad_request_returns_none(generator):
@@ -208,7 +221,10 @@ def test_call_model_multiple_system_turns_concatenated(generator):
     )
 
     kwargs = generator.client.responses.create.call_args[1]
-    assert kwargs["instructions"] == "You are a banking assistant.\nAlways respond in French."
+    assert (
+        kwargs["instructions"]
+        == "You are a banking assistant.\nAlways respond in French."
+    )
 
 
 def test_call_model_explicit_instructions_takes_precedence(generator):
@@ -229,6 +245,7 @@ def test_call_model_explicit_instructions_takes_precedence(generator):
 
 
 # ── reasoning ─────────────────────────────────────────────────────────────────
+
 
 def test_reasoning_excluded_from_text(generator):
     """Reasoning summaries do not appear in Message.text."""
@@ -270,7 +287,9 @@ def test_unknown_output_item_type_ignored(generator):
         Conversation([Turn(role="user", content=Message("Generate an image"))])
     )
 
-    assert result == [None]
+    assert isinstance(result[0], Message), "unknown items still yield a Message"
+    assert result[0].text is None, "unknown items contribute no text"
+    assert "tool_calls" not in result[0].notes, "unknown items are not tool calls"
 
 
 def test_tool_calls_stored_in_notes_and_serializable(generator):
@@ -388,3 +407,136 @@ def test_tool_calls_only_returns_message_not_none(generator):
     assert result[0].text is None
     assert result[0].notes["tool_calls"][0]["name"] == "get_balance"
 
+
+# ── response status & per-conversation tools ──────────────────────────────────
+
+
+def test_response_status_recorded_in_notes(generator):
+    response = _make_response("partial")
+    response.status = "incomplete"
+    generator.client.responses.create.return_value = response
+
+    result = generator._call_model(
+        Conversation([Turn(role="user", content=Message("hi"))])
+    )
+
+    assert (
+        result[0].notes["response_status"] == "incomplete"
+    ), "the API response status is recorded"
+    json.dumps(asdict(result[0]))
+
+
+def test_non_string_status_not_recorded(generator):
+    response = _make_response("ok")
+    response.status = None
+    generator.client.responses.create.return_value = response
+
+    result = generator._call_model(
+        Conversation([Turn(role="user", content=Message("hi"))])
+    )
+
+    assert "response_status" not in result[0].notes, "absent status is not recorded"
+
+
+def test_conversation_tools_override_configured_tools(generator):
+    generator.tools = [{"type": "mcp", "server_url": "http://localhost:8888/sse"}]
+    generator.extra_params = {"tool_choice": "none"}
+    generator.client.responses.create.return_value = _make_response("ok")
+    conv_tools = [{"type": "function", "name": "send_email", "parameters": {}}]
+
+    generator._call_model(
+        Conversation(
+            [Turn(role="user", content=Message("hi"))],
+            notes={"tools": conv_tools, "tool_choice": "required"},
+        )
+    )
+
+    kwargs = generator.client.responses.create.call_args[1]
+    assert kwargs["tools"] == conv_tools, "conversation tools replace configured tools"
+    assert (
+        kwargs["tool_choice"] == "required"
+    ), "conversation tool_choice overrides extra_params"
+
+
+def test_configured_tools_kept_without_conversation_tools(generator):
+    generator.tools = [{"type": "mcp", "server_url": "http://localhost:8888/sse"}]
+    generator.client.responses.create.return_value = _make_response("ok")
+
+    generator._call_model(
+        Conversation([Turn(role="user", content=Message("hi"))], notes={"other": 1})
+    )
+
+    kwargs = generator.client.responses.create.call_args[1]
+    assert kwargs["tools"] == generator.tools, "configured tools are the fallback"
+    assert "tool_choice" not in kwargs, "no tool_choice unless one is given"
+
+
+def test_chat_shaped_conversation_tools_are_flattened(generator):
+    generator.client.responses.create.return_value = _make_response("ok")
+    params = {"type": "object", "properties": {"recipient": {"type": "string"}}}
+    chat_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "send_email",
+                "description": "Send an email",
+                "parameters": params,
+            },
+        }
+    ]
+
+    generator._call_model(
+        Conversation(
+            [Turn(role="user", content=Message("hi"))],
+            notes={
+                "tools": chat_tools,
+                "tool_choice": {"type": "function", "function": {"name": "send_email"}},
+            },
+        )
+    )
+
+    kwargs = generator.client.responses.create.call_args[1]
+    assert kwargs["tools"] == [
+        {
+            "type": "function",
+            "name": "send_email",
+            "description": "Send an email",
+            "parameters": params,
+        }
+    ], "chat-completions function tools are sent in the Responses shape"
+    assert kwargs["tool_choice"] == {
+        "type": "function",
+        "name": "send_email",
+    }, "chat-completions tool_choice is sent in the Responses shape"
+
+
+@pytest.mark.parametrize("tool_choice", ["auto", {"type": "function", "name": "f"}])
+def test_flat_tools_and_tool_choice_pass_through(generator, tool_choice):
+    generator.client.responses.create.return_value = _make_response("ok")
+    flat_tools = [
+        {"type": "function", "name": "f", "parameters": {"type": "object"}},
+        {"type": "mcp", "server_label": "bank", "server_url": "http://localhost:8888"},
+    ]
+
+    generator._call_model(
+        Conversation(
+            [Turn(role="user", content=Message("hi"))],
+            notes={"tools": flat_tools, "tool_choice": tool_choice},
+        )
+    )
+
+    kwargs = generator.client.responses.create.call_args[1]
+    assert kwargs["tools"] == flat_tools, "flat and non-function tools are unchanged"
+    assert kwargs["tool_choice"] == tool_choice, "flat tool_choice is unchanged"
+
+
+def test_configured_chat_shaped_tools_are_flattened(generator):
+    generator.tools = [{"type": "function", "function": {"name": "f"}}]
+    generator.client.responses.create.return_value = _make_response("ok")
+
+    generator._call_model(Conversation([Turn(role="user", content=Message("hi"))]))
+
+    kwargs = generator.client.responses.create.call_args[1]
+    assert kwargs["tools"] == [
+        {"type": "function", "name": "f"}
+    ], "configured tools use the same conversion"
