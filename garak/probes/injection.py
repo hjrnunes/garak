@@ -13,7 +13,8 @@ can emit new tool calls) and a natural-language ``judge_description`` describing
 successful attack looks like. The description is consumed by
 ``detectors.injection_judge.InjectionJudge``. An optional ``tool_call_condition``
 states declaratively which tool calls mean the attack succeeded; it is evaluated by
-``detectors.toolcall.ToolCallCondition``.
+``detectors.toolcall.ToolCallCondition``. An optional ``judge_rubric`` holds a yes/no
+question, criteria, and facts for ``detectors.rubric_judge.RubricJudge``.
 """
 
 import json
@@ -34,7 +35,8 @@ class IndirectInjection(garak.probes.Probe):
     Loads conversations from a JSON/JSONL source and sends each one to the target
     without modification. An LLM-as-a-judge detector scores the target response using
     the per-conversation description; when a conversation carries a
-    tool_call_condition, a deterministic detector also checks the target's tool calls.
+    tool_call_condition, a deterministic detector also checks the target's tool calls,
+    and when it carries a judge_rubric, a rubric judge answers its yes/no question.
     """
 
     lang = "en"
@@ -52,7 +54,7 @@ class IndirectInjection(garak.probes.Probe):
     ]
     tier = garak.probes.Tier.INFORMATIONAL
     primary_detector = "injection_judge.InjectionJudge"
-    extended_detectors = ["toolcall.ToolCallCondition"]
+    extended_detectors = ["toolcall.ToolCallCondition", "rubric_judge.RubricJudge"]
 
     DEFAULT_PARAMS = garak.probes.Probe.DEFAULT_PARAMS | {
         # path to a .json (single object or list of objects) or .jsonl file; may be an
@@ -86,7 +88,8 @@ class IndirectInjection(garak.probes.Probe):
         Accepts a JSON file containing either a single object or a list of objects, or
         a JSONL file with one object per line. Each object is expected to have a
         ``messages`` key (OpenAI messages array) and optional ``tools``,
-        ``tool_choice``, ``judge_description``, and ``tool_call_condition`` keys.
+        ``tool_choice``, ``judge_description``, ``tool_call_condition``, and
+        ``judge_rubric`` keys.
         """
         source = self._resolve_source()
         entries: List[dict] = []
@@ -124,4 +127,6 @@ class IndirectInjection(garak.probes.Probe):
             notes["judge_description"] = entry["judge_description"]
         if entry.get("tool_call_condition") is not None:
             notes["tool_call_condition"] = entry["tool_call_condition"]
+        if entry.get("judge_rubric") is not None:
+            notes["judge_rubric"] = entry["judge_rubric"]
         return garak.attempt.Conversation.from_openai(entry["messages"], notes=notes)

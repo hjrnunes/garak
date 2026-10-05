@@ -14,7 +14,9 @@ natural-language ``judge_description`` describing what a successful attack looks
 like. The description is consumed by ``detectors.injection_judge.InjectionJudge``.
 An optional ``tool_call_condition`` states which tool calls mean the attack
 succeeded; ``detectors.toolcall.ToolCallCondition`` (an extended detector)
-evaluates it deterministically.
+evaluates it deterministically. An optional ``judge_rubric`` (a yes/no
+``question`` with ``criteria``, ``facts``, and ``runtime_facts``) is answered by
+``detectors.rubric_judge.RubricJudge``, also an extended detector.
 
 .. automodule:: garak.probes.injection
    :members:
