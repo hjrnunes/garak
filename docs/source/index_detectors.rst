@@ -39,6 +39,7 @@ For detailed information on detector metrics and evaluation, see :doc:`../detect
    detectors/promptinject
    detectors/productkey
    detectors/propile
+   detectors/rubric_judge
    detectors/shields
    detectors/snowball
    detectors/sysprompt_extraction

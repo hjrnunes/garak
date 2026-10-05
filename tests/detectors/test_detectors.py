@@ -43,6 +43,7 @@ DOES_NOT_RELAY_NONE = [
 ]
 # score only attempts that carry per-attempt evaluation data, else return None
 NEEDS_ATTEMPT_DATA = [
+    "detectors.rubric_judge.RubricJudge",
     "detectors.toolcall.ToolCallCondition",
 ]
 
