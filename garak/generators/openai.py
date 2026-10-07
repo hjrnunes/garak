@@ -202,6 +202,9 @@ class OpenAICompatible(Generator):
     * ``retry_condition``: callable taking the error and returning whether to
       retry; without it, the errors the backoff retries qualify. Set it from
       Python, not from a configuration file.
+    * ``client_options``: extra keyword arguments for ``openai.OpenAI``, such
+      as ``timeout`` or ``http_client``; they override the options this class
+      sets itself.
     """
 
     ENV_VAR = "OpenAICompatible_API_KEY".upper()  # Placeholder override when extending
@@ -225,13 +228,15 @@ class OpenAICompatible(Generator):
         "max_retries": None,
         "retry_delay": 1.0,
         "retry_condition": None,
+        "client_options": {},
     }
 
     _unsafe_attributes = ["client", "generator"]
 
     def _sdk_client_options(self) -> dict:
         # once this generator owns the retries, the SDK must not add its own
-        return {} if self.max_retries is None else {"max_retries": 0}
+        owned_retries = {} if self.max_retries is None else {"max_retries": 0}
+        return owned_retries | self.client_options
 
     def _should_retry(self, error: Exception) -> bool:
         if self.retry_condition is None:
@@ -525,6 +530,7 @@ class OpenAIReasoningGenerator(OpenAIGenerator):
         "max_retries": None,
         "retry_delay": 1.0,
         "retry_condition": None,
+        "client_options": {},
     }
 
 
