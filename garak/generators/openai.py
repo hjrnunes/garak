@@ -11,10 +11,12 @@ Sources:
 * https://platform.openai.com/docs/model-index-for-researchers
 """
 
+import functools
 import inspect
 import json
 import logging
 import re
+import time
 from typing import List, Union
 
 import openai
@@ -130,9 +132,59 @@ context_lengths = {
 audio_formats = ["wav", "mp3"]
 audio_pattern = re.compile("|".join(audio_formats))
 
+# errors the unbounded backoff retries, and the bounded retry when it has no condition
+_TRANSIENT_ERRORS = (
+    openai.RateLimitError,
+    openai.InternalServerError,
+    openai.APITimeoutError,
+    openai.APIConnectionError,
+    garak.exception.GeneratorBackoffTrigger,
+)
+
+
+def _retrying(call):
+    """Decorate a ``_call_model`` with the retry policy its generator configures.
+
+    Without ``max_retries`` the call retries transient errors under Fibonacci
+    backoff with no limit on attempts. With ``max_retries`` set, a failed call
+    is retried at most that many times, after ``retry_delay`` seconds each, and
+    only when ``retry_condition(error)`` is true; a generator with no
+    ``retry_condition`` retries the errors the backoff retries. The last error
+    is raised once the retries are spent or the condition declines.
+    """
+
+    unbounded = backoff.on_exception(backoff.fibo, _TRANSIENT_ERRORS, max_value=70)(
+        call
+    )
+
+    @functools.wraps(call)
+    def retrying(self, *args, **kwargs):
+        if self.max_retries is None:
+            return unbounded(self, *args, **kwargs)
+        retries = 0
+        while True:
+            try:
+                return call(self, *args, **kwargs)
+            except (openai.OpenAIError, garak.exception.GeneratorBackoffTrigger) as e:
+                if retries >= self.max_retries or not self._should_retry(e):
+                    raise
+            retries += 1
+            time.sleep(self.retry_delay)
+
+    return retrying
+
 
 class OpenAICompatible(Generator):
-    """Generator base class for OpenAI compatible text2text restful API. Implements shared initialization and execution methods."""
+    """Generator base class for OpenAI compatible text2text restful API. Implements shared initialization and execution methods.
+
+    * ``max_retries``: retry a failed call at most this many times and send
+      one request per attempt. Without it, transient errors retry under backoff
+      with no limit on attempts.
+    * ``retry_delay``: seconds to wait before each retry.
+    * ``retry_condition``: callable taking the error and returning whether to
+      retry; without it, the errors the backoff retries qualify. Set it from
+      Python, not from a configuration file.
+    """
 
     ENV_VAR = "OpenAICompatible_API_KEY".upper()  # Placeholder override when extending
 
@@ -152,14 +204,28 @@ class OpenAICompatible(Generator):
         "suppressed_params": set(),
         "retry_json": True,
         "extra_params": {},
+        "max_retries": None,
+        "retry_delay": 1.0,
+        "retry_condition": None,
     }
 
     _unsafe_attributes = ["client", "generator"]
 
+    def _sdk_client_options(self) -> dict:
+        # once this generator owns the retries, the SDK must not add its own
+        return {} if self.max_retries is None else {"max_retries": 0}
+
+    def _should_retry(self, error: Exception) -> bool:
+        if self.retry_condition is None:
+            return isinstance(error, _TRANSIENT_ERRORS)
+        return bool(self.retry_condition(error))
+
     def _load_unsafe(self):
         # When extending `OpenAICompatible` this method is a likely location for target application specific
         # customization and must populate self.generator with an openai api compliant object
-        self.client = openai.OpenAI(base_url=self.uri, api_key=self.api_key)
+        self.client = openai.OpenAI(
+            base_url=self.uri, api_key=self.api_key, **self._sdk_client_options()
+        )
         if self.name in ("", None):
             raise ValueError(
                 f"{self.generator_family_name} requires model name to be set, e.g. --target_name org/private-model-name"
@@ -251,17 +317,7 @@ class OpenAICompatible(Generator):
         return turn_list
 
     # noinspection PyArgumentList
-    @backoff.on_exception(
-        backoff.fibo,
-        (
-            openai.RateLimitError,
-            openai.InternalServerError,
-            openai.APITimeoutError,
-            openai.APIConnectionError,
-            garak.exception.GeneratorBackoffTrigger,
-        ),
-        max_value=70,
-    )
+    @_retrying
     def _call_model(
         self, prompt: Union[Conversation, List[dict]], generations_this_call: int = 1
     ) -> List[Union[Message, None]]:
@@ -394,7 +450,7 @@ class OpenAIGenerator(OpenAICompatible):
     }
 
     def _load_unsafe(self):
-        self.client = openai.OpenAI(api_key=self.api_key)
+        self.client = openai.OpenAI(api_key=self.api_key, **self._sdk_client_options())
 
         if self.name == "":
             openai_model_list = sorted([m.id for m in self.client.models.list().data])
@@ -448,6 +504,9 @@ class OpenAIReasoningGenerator(OpenAIGenerator):
         "suppressed_params": set(["n", "temperature", "max_tokens", "stop"]),
         "retry_json": True,
         "max_completion_tokens": 1500,
+        "max_retries": None,
+        "retry_delay": 1.0,
+        "retry_condition": None,
     }
 
 
@@ -487,7 +546,7 @@ class OpenAIResponsesGenerator(OpenAICompatible):
         kwargs = {"api_key": getattr(self, "api_key", None)}
         if getattr(self, "uri", None):
             kwargs["base_url"] = self.uri
-        self.client = openai.OpenAI(**kwargs)
+        self.client = openai.OpenAI(**kwargs, **self._sdk_client_options())
         self.generator = self.client.responses
 
     @staticmethod
@@ -525,17 +584,7 @@ class OpenAIResponsesGenerator(OpenAICompatible):
             return {**entry["function"], **flat}
         return entry
 
-    @backoff.on_exception(
-        backoff.fibo,
-        (
-            openai.RateLimitError,
-            openai.InternalServerError,
-            openai.APITimeoutError,
-            openai.APIConnectionError,
-            garak.exception.GeneratorBackoffTrigger,
-        ),
-        max_value=70,
-    )
+    @_retrying
     def _call_model(
         self, prompt: Union[Conversation, List[dict]], generations_this_call: int = 1
     ) -> List[Union[Message, None]]:
