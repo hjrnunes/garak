@@ -142,6 +142,23 @@ _TRANSIENT_ERRORS = (
 )
 
 
+def _failed_generation(error: openai.APIStatusError) -> Message:
+    """Return the output for a generation the API rejected.
+
+    The output has no text. Its ``error`` note names the error type and, when
+    the API sent a response, its status code and body text as received.
+    """
+
+    note = {"type": type(error).__name__}
+    response = getattr(error, "response", None)
+    if response is not None:
+        note["status_code"] = response.status_code
+        body = getattr(response, "text", None)
+        if isinstance(body, str):
+            note["body"] = body
+    return Message(None, notes={"error": note})
+
+
 def _retrying(call):
     """Decorate a ``_call_model`` with the retry policy its generator configures.
 
@@ -389,7 +406,7 @@ class OpenAICompatible(Generator):
             msg = "Bad request: " + str(repr(prompt))
             logging.exception(e)
             logging.error(msg)
-            return [None]
+            return [_failed_generation(e)]
         except json.decoder.JSONDecodeError as e:
             logging.exception(e)
             if self.retry_json:
@@ -626,7 +643,7 @@ class OpenAIResponsesGenerator(OpenAICompatible):
         except openai.BadRequestError as e:
             logging.exception(e)
             logging.error("Bad request: %s", repr(prompt))
-            return [None]
+            return [_failed_generation(e)]
         except json.decoder.JSONDecodeError as e:
             logging.exception(e)
             raise garak.exception.GeneratorBackoffTrigger from e

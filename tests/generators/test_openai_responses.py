@@ -177,7 +177,7 @@ def test_call_model_empty_output_returns_empty_message(generator):
     }, "an empty response carries only its status"
 
 
-def test_call_model_bad_request_returns_none(generator):
+def test_call_model_bad_request_returns_textless_message(generator):
     generator.client.responses.create.side_effect = openai.BadRequestError(
         message="bad", response=MagicMock(status_code=400), body={}
     )
@@ -185,7 +185,9 @@ def test_call_model_bad_request_returns_none(generator):
     result = generator._call_model(
         Conversation([Turn(role="user", content=Message("Hello"))])
     )
-    assert result == [None]
+    assert len(result) == 1
+    assert result[0].text is None, "a rejected request yields no text"
+    assert result[0].notes["error"]["type"] == "BadRequestError"
 
 
 def test_call_model_promotes_system_turn(generator):
