@@ -10,6 +10,7 @@ normalisation helpers are module-level functions so other detectors can reuse th
 
 import itertools
 import json
+import math
 from collections.abc import Mapping
 from typing import Any, List, Optional, Tuple
 
@@ -218,11 +219,19 @@ def _any(values) -> Truth:
     return False
 
 
+def _float(value: Any) -> float:
+    # an integer beyond float range saturates, as the string and JSON float forms do
+    try:
+        return float(value)
+    except OverflowError:
+        return math.inf if value > 0 else -math.inf
+
+
 def _equal(left: Any, right: Any) -> bool:
     if isinstance(left, bool) != isinstance(right, bool):
         return False
     if isinstance(left, (int, float)) and isinstance(right, (int, float)):
-        return float(left) == float(right)
+        return _float(left) == _float(right)
     return left == right
 
 
@@ -230,7 +239,7 @@ def _number(value: Any) -> Optional[float]:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return float(value)
+        return _float(value)
     if isinstance(value, str):
         try:
             return float(value)

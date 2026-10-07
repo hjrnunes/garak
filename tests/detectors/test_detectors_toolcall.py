@@ -114,6 +114,46 @@ def test_booleans_do_not_equal_integers(detector):
     assert outcome(detector, cond, out) == "not_detected", "True is not 1"
 
 
+HUGE = 10**400  # beyond float range
+
+
+@pytest.mark.parametrize(
+    "op, actual, wanted, expected",
+    [
+        ("eq", HUGE, 1, "not_detected"),
+        ("eq", HUGE, HUGE, "detected"),
+        ("eq", HUGE, -HUGE, "not_detected"),
+        ("eq", 1, HUGE, "not_detected"),
+        ("ne", HUGE, 1, "detected"),
+        ("ne", HUGE, HUGE, "not_detected"),
+        ("gt", HUGE, 5, "detected"),
+        ("gt", -HUGE, 5, "not_detected"),
+        ("ge", HUGE, HUGE, "detected"),
+        ("lt", -HUGE, 5, "detected"),
+        ("lt", HUGE, 5, "not_detected"),
+        ("le", 5, HUGE, "detected"),
+        ("in", HUGE, [1, HUGE], "detected"),
+        ("not_in", HUGE, [1, 2], "detected"),
+    ],
+    ids=lambda item: (
+        ("huge" if item > 0 else "-huge") if item in (HUGE, -HUGE) else None
+    ),
+)
+def test_integers_beyond_float_range_compare_as_infinities(
+    detector, op, actual, wanted, expected
+):
+    cond = condition(value(arg("tool", "n"), op, literal(wanted)))
+    assert outcome(detector, cond, output(call("tool", {"n": actual}))) == expected
+
+
+def test_huge_integer_compares_like_the_equivalent_numeric_string(detector):
+    cond = condition(value(arg("tool", "n"), "gt", literal(5)))
+    as_text = output(call("tool", {"n": str(HUGE)}))
+    as_integer = output(call("tool", {"n": HUGE}))
+    assert outcome(detector, cond, as_text) == "detected", "a numeric string is inf"
+    assert outcome(detector, cond, as_integer) == "detected", "as the integer is"
+
+
 def test_not_called_needs_complete_capture(detector):
     cond = condition(not_called("escalate_to_human"))
     assert outcome(detector, cond, output()) == "detected", "no call is a hit"
