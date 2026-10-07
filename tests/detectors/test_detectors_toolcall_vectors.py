@@ -23,7 +23,7 @@ VECTOR_DIR = (
 
 VECTOR_SHA256 = {
     "validate.json": "d91e7964a0333460c34b1a22cde0a1132d707b8eb9aa0a9983deb06ceddc4d63",
-    "evaluate.json": "6b77d658f782fde919090f872e48a4f1479454eecd34681fc90f5c30ce5d05d4",
+    "evaluate.json": "8c9674bf6dd53364859bb9a67c7564844d65b17b706ececf43d07848e9cbb710",
 }
 
 
