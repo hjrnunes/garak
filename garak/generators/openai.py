@@ -11,6 +11,7 @@ Sources:
 * https://platform.openai.com/docs/model-index-for-researchers
 """
 
+import copy
 import functools
 import inspect
 import json
@@ -572,12 +573,23 @@ class OpenAIResponsesGenerator(OpenAICompatible):
 
         System turns are excluded — callers should promote them to ``instructions``
         via :meth:`_extract_system_prompt` before calling this method.
+
+        A turn whose message carries a list of Responses output items (for example
+        ``mcp_call``) in ``notes["output_items"]`` sends those items just before
+        the turn's own message, so a later request can include the tool calls and
+        results an earlier response produced.
         """
         turns = OpenAICompatible._conversation_to_list(prompt)
-        non_system = [t for t in turns if t.get("role") != "system"]
-        if len(non_system) == 1 and isinstance(non_system[0].get("content"), str):
-            return non_system[0]["content"]
-        return non_system
+        items = []
+        for turn, entry in zip(prompt.turns, turns):
+            if entry.get("role") == "system":
+                continue
+            notes = turn.content.notes or {}
+            items.extend(copy.deepcopy(notes.get("output_items", [])))
+            items.append(entry)
+        if len(items) == 1 and isinstance(items[0].get("content"), str):
+            return items[0]["content"]
+        return items
 
     @staticmethod
     def _extract_system_prompt(prompt: Conversation) -> Union[str, None]:
