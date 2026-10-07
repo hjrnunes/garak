@@ -341,6 +341,29 @@ def test_validation_failures(detector, cond, problem):
     assert reason.startswith("invalid condition: "), "reason names the problem"
 
 
+@pytest.mark.parametrize(
+    "cond, problem",
+    [
+        (condition({"kind": []}), "comparisons[0] has unknown kind []"),
+        (condition({"kind": {"a": 1}}), "comparisons[0] has unknown kind {'a': 1}"),
+        (
+            condition(value({"source": ["argument"]}, "eq", literal(1))),
+            "comparisons[0].left has unknown source ['argument']",
+        ),
+        (
+            condition(value(arg("t", "a"), "eq", {"source": {}})),
+            "comparisons[0].right has unknown source {}",
+        ),
+    ],
+)
+def test_unhashable_discriminator_is_a_validation_problem(detector, cond, problem):
+    assert validate_condition(cond) == problem, "a list or object kind or source"
+    a = attempt_with(cond, [output()])
+    assert detector.detect(a) == [None], "an invalid condition is inconclusive"
+    reason = a.notes["tool_call_condition_results"][0]["reason"]
+    assert reason == f"invalid condition: {problem}", "reason names the problem"
+
+
 def test_validation_happens_before_reading_calls(detector):
     a = attempt_with({"comparisons": []}, [Message(None, notes={"tool_calls": "x"})])
     detector.detect(a)

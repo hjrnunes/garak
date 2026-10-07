@@ -113,7 +113,7 @@ def _validate_operand(operand: Any, where: str) -> Optional[str]:
     if not isinstance(operand, Mapping):
         return f"{where} is not an object"
     source = operand.get("source")
-    if source not in _OPERAND_KEYS:
+    if not isinstance(source, str) or source not in _OPERAND_KEYS:
         return f"{where} has unknown source {source!r}"
     expected = _OPERAND_KEYS[source]
     keys = set(operand)
@@ -141,7 +141,7 @@ def _validate_comparison(comparison: Any, where: str) -> Optional[str]:
     if not isinstance(comparison, Mapping):
         return f"{where} is not an object"
     kind = comparison.get("kind")
-    if kind not in _COMPARISON_KEYS:
+    if not isinstance(kind, str) or kind not in _COMPARISON_KEYS:
         return f"{where} has unknown kind {kind!r}"
     required, optional = _COMPARISON_KEYS[kind]
     problem = _validate_keys(comparison, required, optional, where)
