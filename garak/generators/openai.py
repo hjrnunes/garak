@@ -541,6 +541,11 @@ class OpenAIResponsesGenerator(OpenAICompatible):
     Unlike the chat-completions generators, the Responses API runs the full
     agentic loop (tool calls → execution → follow-up) on the server side,
     returning only the final text to garak.
+
+    The returned message's notes hold the response's tool calls in
+    ``tool_calls`` and its ``mcp_call`` items, as sent by the API, in
+    ``output_items``; a later turn whose message carries that note sends the
+    items again (see :meth:`_build_input`).
     """
 
     ENV_VAR = "OPENAI_API_KEY"
@@ -669,6 +674,7 @@ class OpenAIResponsesGenerator(OpenAICompatible):
         text_parts = []
         reasoning_parts = []
         tool_calls = []
+        output_items = []
 
         _TOOL_CALL_ATTRS = (
             "call_id",
@@ -689,6 +695,10 @@ class OpenAIResponsesGenerator(OpenAICompatible):
                     if val is not None:
                         entry[attr] = val
                 tool_calls.append(entry)
+                # an mcp_call item holds its own result, so resending it whole lets
+                # a later request carry this turn's calls without server state
+                if item_type == "mcp_call" and isinstance(item, openai.BaseModel):
+                    output_items.append(item.model_dump(mode="json", by_alias=True))
                 continue
             if item_type == "message":
                 for part in item.content:
@@ -703,6 +713,8 @@ class OpenAIResponsesGenerator(OpenAICompatible):
         notes = {}
         if tool_calls:
             notes["tool_calls"] = tool_calls
+        if output_items:
+            notes["output_items"] = output_items
         if reasoning_parts:
             notes["reasoning"] = "\n".join(reasoning_parts)
         # detectors need the status to tell a finished turn from a truncated one
