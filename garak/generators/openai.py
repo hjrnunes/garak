@@ -539,7 +539,8 @@ class OpenAIResponsesGenerator(OpenAICompatible):
     The returned message's notes hold the response's tool calls in
     ``tool_calls`` and its ``mcp_call`` items, as sent by the API, in
     ``output_items``; a later turn whose message carries that note sends the
-    items again (see :meth:`_build_input`).
+    items again (see :meth:`_build_input`). The ``response`` note records the
+    response's id, model and token usage (see :meth:`_response_record`).
     """
 
     ENV_VAR = "OPENAI_API_KEY"
@@ -715,8 +716,30 @@ class OpenAIResponsesGenerator(OpenAICompatible):
         status = getattr(response, "status", None)
         if isinstance(status, str):
             notes["response_status"] = status
+        record = self._response_record(response)
+        if record:
+            notes["response"] = record
 
         return [Message(text, notes=notes)]
+
+    @staticmethod
+    def _response_record(response) -> dict:
+        """Return what the report keeps of a response besides its output.
+
+        The record holds the response ``id``, the ``model`` that served it and its
+        token ``usage``, plus its ``error`` and ``incomplete_details`` when set.
+        It is not an input item, so :meth:`_build_input` never sends it again.
+        """
+        record = {}
+        for attr in ("id", "model"):
+            value = getattr(response, attr, None)
+            if isinstance(value, str):
+                record[attr] = value
+        for attr in ("usage", "error", "incomplete_details"):
+            value = getattr(response, attr, None)
+            if isinstance(value, openai.BaseModel):
+                record[attr] = value.model_dump(mode="json", by_alias=True)
+        return record
 
 
 DEFAULT_CLASS = "OpenAIGenerator"

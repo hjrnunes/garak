@@ -4,8 +4,11 @@
 """Tests for the sequential injection probe, which sends scripted user turns one by one."""
 
 import json
+from unittest.mock import MagicMock, patch
 
 import pytest
+from openai._models import construct_type
+from openai.types.responses import Response
 
 import garak._plugins
 from garak import _config
@@ -237,3 +240,71 @@ def test_conversations_run_side_by_side(tmp_path, report):
         for a in attempts
     ] == [(0, 0), (1, 0), (0, 1)], "turns advance breadth first"
     assert [t.content.text for t in target.prompts[2].turns] == ["a1", "1", "a2"]
+
+
+def _api_response(response_id, text, *items):
+    """Build a Responses object the way the SDK does, without validation."""
+    message = {
+        "type": "message",
+        "id": f"msg_{response_id}",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": text, "annotations": []}],
+    }
+    return construct_type(
+        type_=Response,
+        value={
+            "id": response_id,
+            "object": "response",
+            "created_at": 0,
+            "model": "test-model",
+            "status": "completed",
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+            "output": [*items, message],
+            "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+        },
+    )
+
+
+def test_report_links_each_turns_response_to_its_attempt(
+    tmp_path, report, monkeypatch
+):
+    call = {
+        **_call("get_orders", "fc_1"),
+        "arguments": "{}",
+        "output": "[]",
+        "server_label": "target",
+        "approval_request_id": None,
+        "status": "completed",
+    }
+    monkeypatch.setenv(OpenAIResponsesGenerator.ENV_VAR, "sk-test-fake-key")
+    with patch("garak.generators.openai.openai.OpenAI") as client:
+        client.return_value = MagicMock()
+        target = OpenAIResponsesGenerator(name="test-model")
+    create = target.client.responses.create
+    create.side_effect = [
+        _api_response("resp_1", "Your orders.", call),
+        _api_response("resp_2", "Refund issued."),
+    ]
+    probe = _probe(tmp_path, _entry("Show my orders", "Refund ORD-104"))
+    probe.generations = 1
+    attempts = probe.probe(target)
+
+    assert create.call_args_list[1].kwargs["input"] == [
+        {"role": "user", "content": "Show my orders"},
+        call,
+        {"role": "assistant", "content": "Your orders."},
+        {"role": "user", "content": "Refund ORD-104"},
+    ], "the next request resends the earlier mcp_call items and nothing else"
+
+    report.seek(0)
+    entries = [json.loads(line) for line in report.read().splitlines()]
+    assert [
+        (e["uuid"], e["notes"]["sequence"]["turn_index"]) for e in entries
+    ] == [(str(a.uuid), i) for i, a in enumerate(attempts)]
+    responses = [e["outputs"][0]["notes"]["response"] for e in entries]
+    assert [r["id"] for r in responses] == ["resp_1", "resp_2"], "one per turn"
+    assert responses[0]["usage"]["total_tokens"] == 12
+    assert entries[0]["outputs"][0]["notes"]["output_items"][0]["output"] == "[]"
