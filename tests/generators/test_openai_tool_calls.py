@@ -26,43 +26,18 @@ def set_fake_env(request) -> None:
     request.addfinalizer(restore_env)
 
 
-TOOL_CONVERSATION = [
-    {"role": "user", "content": "summarise my email"},
-    {
-        "role": "assistant",
-        "content": None,
-        "tool_calls": [
-            {
-                "id": "call_1",
-                "type": "function",
-                "function": {"name": "read_email", "arguments": "{}"},
-            }
-        ],
-    },
-    {
-        "role": "tool",
-        "tool_call_id": "call_1",
-        "name": "read_email",
-        "content": "malicious payload",
-    },
-]
-
-
-def test_conversation_to_list_serializes_tool_turns():
-    conv = Conversation.from_openai(TOOL_CONVERSATION)
-    out = OpenAICompatible._conversation_to_list(conv)
-
-    assert out[0] == {"role": "user", "content": "summarise my email"}
-
-    assert out[1]["role"] == "assistant"
-    assert out[1]["content"] is None
-    assert out[1]["tool_calls"][0]["id"] == "call_1"
-    assert out[1]["tool_calls"][0]["function"]["name"] == "read_email"
-
-    assert out[2]["role"] == "tool"
-    assert out[2]["tool_call_id"] == "call_1"
-    assert out[2]["name"] == "read_email"
-    assert out[2]["content"] == "malicious payload"
+def test_conversation_to_list_sends_role_and_text_only():
+    reply = Message(None, notes={"tool_calls": [{"id": "call_1"}]})
+    conv = Conversation(
+        [
+            Turn(role="user", content=Message("summarise my email")),
+            Turn(role="assistant", content=reply),
+        ]
+    )
+    assert OpenAICompatible._conversation_to_list(conv) == [
+        {"role": "user", "content": "summarise my email"},
+        {"role": "assistant", "content": None},
+    ], "message notes are not sent as message keys"
 
 
 class _FakeToolCall:
@@ -97,8 +72,9 @@ def test_call_model_captures_tool_calls_and_forwards_tools(mocker):
     mocker.patch.object(gen.generator, "create", side_effect=fake_create)
 
     tools = [{"type": "function", "function": {"name": "send_email"}}]
-    conv = Conversation.from_openai(
-        TOOL_CONVERSATION, notes={"tools": tools, "tool_choice": "auto"}
+    conv = Conversation(
+        [Turn(role="user", content=Message("summarise my email"))],
+        notes={"tools": tools, "tool_choice": "auto"},
     )
 
     outputs = gen._call_model(conv)

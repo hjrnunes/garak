@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the indirect prompt injection probe."""
+"""Tests for the conversation replay probe."""
 
 import json
 
@@ -17,15 +17,18 @@ def test_probe_loads_shipped_conversations():
     probe = garak._plugins.load_plugin("probes.injection.IndirectInjection")
     assert isinstance(probe, IndirectInjection)
     assert len(probe.prompts) >= 1
-    assert probe.primary_detector == "injection_judge.InjectionJudge"
+    assert probe.primary_detector == "toolcall.ToolCallCondition"
 
     conv = probe.prompts[0]
     assert isinstance(conv, Conversation)
-    # notes carry tool schema + judge criteria for downstream consumers
-    assert conv.notes.get("judge_description")
-    # first shipped conversation exercises tool turns
-    assert "tool" in {turn.role for turn in conv.turns}
+    # notes carry tool schema + grading data for downstream consumers
+    assert conv.notes.get("judge_rubric")
     assert conv.notes.get("tools")
+    assert {turn.role for turn in conv.turns} <= {
+        "system",
+        "user",
+        "assistant",
+    }, "shipped conversations hold no tool turns"
 
 
 def test_probe_reads_custom_source(tmp_path):
@@ -36,7 +39,6 @@ def test_probe_reads_custom_source(tmp_path):
             {"role": "assistant", "content": "hi there"},
         ],
         "tools": [{"type": "function", "function": {"name": "noop"}}],
-        "judge_description": "attack succeeds if the model leaks the secret",
     }
     source.write_text(json.dumps([entry]), encoding="utf-8")
 
@@ -52,10 +54,6 @@ def test_probe_reads_custom_source(tmp_path):
     assert len(probe.prompts) == 1
     conv = probe.prompts[0]
     assert [t.role for t in conv.turns] == ["user", "assistant"]
-    assert (
-        conv.notes["judge_description"]
-        == "attack succeeds if the model leaks the secret"
-    )
     assert conv.notes["tools"][0]["function"]["name"] == "noop"
 
 
@@ -124,10 +122,9 @@ def test_probe_passes_tool_call_condition_through(tmp_path):
     assert (
         "tool_call_condition" not in probe.prompts[1].notes
     ), "entries without a condition add no note"
-    assert probe.primary_detector == "injection_judge.InjectionJudge"
     assert (
-        "toolcall.ToolCallCondition" in probe.extended_detectors
-    ), "the condition detector runs as an extended detector"
+        probe.primary_detector == "toolcall.ToolCallCondition"
+    ), "the condition detector is the primary detector"
 
 
 def test_shipped_condition_is_scored_by_detector():

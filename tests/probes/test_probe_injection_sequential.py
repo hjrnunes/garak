@@ -180,7 +180,6 @@ def test_judge_turns_selects_the_judged_turns(tmp_path, report, judge_turns, jud
             "c",
             tool_call_condition=CONDITION,
             judge_rubric=RUBRIC,
-            judge_description="d",
         ),
         judge_turns=judge_turns,
     )
@@ -189,9 +188,6 @@ def test_judge_turns_selects_the_judged_turns(tmp_path, report, judge_turns, jud
     assert [
         "judge_rubric" in a.prompt.notes for a in attempts
     ] == judged, "the rubric travels on the judged turns only"
-    assert [
-        "judge_description" in a.prompt.notes for a in attempts
-    ] == judged, "so does the judge description"
     assert all(
         a.prompt.notes["tool_call_condition"] == CONDITION for a in attempts
     ), "the tool-call condition costs no request, so every turn carries it"
@@ -206,7 +202,7 @@ def test_scripts_with_non_user_messages_are_skipped(tmp_path):
     source = tmp_path / "script.jsonl"
     entries = [
         _entry("a", "b"),
-        {"messages": [{"role": "user", "content": "a"}, {"role": "tool"}]},
+        {"messages": [{"role": "user", "content": "a"}, {"role": "assistant"}]},
         {"messages": []},
         {"no_messages": True},
     ]

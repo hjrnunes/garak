@@ -24,7 +24,7 @@ import openai
 import backoff
 
 from garak import _config
-from garak.attempt import Message, Conversation, tool_message_keys
+from garak.attempt import Message, Conversation
 import garak.exception
 from garak.generators.base import Generator
 
@@ -329,12 +329,6 @@ class OpenAICompatible(Generator):
                     "role": turn.role,
                     "content": turn.content.text,
                 }
-                # re-attach tool-calling metadata stashed in Message.notes so tool
-                # turns (assistant tool_calls, tool-result turns) are sent as authored
-                notes = turn.content.notes or {}
-                for key in tool_message_keys:
-                    if key in notes:
-                        transformed_turn[key] = notes[key]
             turn_list.append(transformed_turn)
 
         return turn_list

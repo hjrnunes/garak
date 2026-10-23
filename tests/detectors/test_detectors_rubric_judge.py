@@ -546,7 +546,6 @@ def test_evidence_splits_history_at_last_user_turn():
         Turn(role="assistant", content=Message("reply one")),
         Turn(role="user", content=Message("second")),
         Turn(role="assistant", content=Message(None)),
-        Turn(role="tool", content=Message("tool output")),
     ]
     attempt = make_attempt(Message("final"), turns=turns)
     evidence = build_evidence(attempt, attempt.outputs[0])

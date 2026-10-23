@@ -1,18 +1,14 @@
 # SPDX-FileCopyrightText: Portions Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Indirect prompt injection probes.
+"""Conversation replay probes.
 
-Replays pre-built conversations (authored offline in OpenAI chat-completion format)
-against a target **unchanged**. The conversations may contain tool calls and
-tool-call results, so a harmful payload can be injected anywhere -- including as the
-result of a tool call, modelling indirect prompt injection.
+Replays pre-built conversations (authored offline in OpenAI chat-completion format,
+with system, user and assistant messages) against a target **unchanged**.
 
-Each conversation carries an optional ``tools`` schema (forwarded to the target so it
-can emit new tool calls) and a natural-language ``judge_description`` describing what a
-successful attack looks like. The description is consumed by
-``detectors.injection_judge.InjectionJudge``. An optional ``tool_call_condition``
-states declaratively which tool calls mean the attack succeeded; it is evaluated by
+Each conversation carries an optional ``tools`` schema, forwarded to the target so it
+can call tools. An optional ``tool_call_condition`` states declaratively which tool
+calls mean the attack succeeded; it is evaluated by
 ``detectors.toolcall.ToolCallCondition``. An optional ``judge_rubric`` holds a yes/no
 question, criteria, and facts for ``detectors.rubric_judge.RubricJudge``.
 
@@ -38,12 +34,11 @@ import garak.probes
 _ENTRY_NOTES = (
     "tools",
     "tool_choice",
-    "judge_description",
     "tool_call_condition",
     "judge_rubric",
 )
 # notes a judge reads; a sequential probe sends them on the judged turns only
-_JUDGE_NOTES = ("judge_description", "judge_rubric")
+_JUDGE_NOTES = ("judge_rubric",)
 _GRADING_NOTES = ("tool_call_condition", *_JUDGE_NOTES)
 JUDGE_TURNS = ("final", "all")
 
@@ -97,7 +92,7 @@ def entry_notes(entry: dict) -> dict:
     notes = {}
     for key in _ENTRY_NOTES:
         value = entry.get(key)
-        if key in ("tools", "judge_description"):
+        if key == "tools":
             if value:
                 notes[key] = value
         elif value is not None:
@@ -106,13 +101,12 @@ def entry_notes(entry: dict) -> dict:
 
 
 class IndirectInjection(garak.probes.Probe):
-    """Replay pre-built (possibly tool-calling) conversations to model indirect prompt injection
+    """Replay pre-built conversations against a target, unchanged
 
     Loads conversations from a JSON/JSONL source and sends each one to the target
-    without modification. An LLM-as-a-judge detector scores the target response using
-    the per-conversation description; when a conversation carries a
-    tool_call_condition, a deterministic detector also checks the target's tool calls,
-    and when it carries a judge_rubric, a rubric judge answers its yes/no question.
+    without modification. When a conversation carries a tool_call_condition, a
+    deterministic detector checks the target's tool calls; when it carries a
+    judge_rubric, a rubric judge answers its yes/no question.
     """
 
     lang = "en"
@@ -129,8 +123,8 @@ class IndirectInjection(garak.probes.Probe):
         "quality:Security:PromptStability",
     ]
     tier = garak.probes.Tier.INFORMATIONAL
-    primary_detector = "injection_judge.InjectionJudge"
-    extended_detectors = ["toolcall.ToolCallCondition", "rubric_judge.RubricJudge"]
+    primary_detector = "toolcall.ToolCallCondition"
+    extended_detectors = ["rubric_judge.RubricJudge"]
 
     DEFAULT_PARAMS = garak.probes.Probe.DEFAULT_PARAMS | {
         # path to a .json (single object or list of objects) or .jsonl file; may be an
@@ -156,13 +150,12 @@ class IndirectInjection(garak.probes.Probe):
         Accepts a JSON file containing either a single object or a list of objects, or
         a JSONL file with one object per line. Each object is expected to have a
         ``messages`` key (OpenAI messages array) and optional ``tools``,
-        ``tool_choice``, ``judge_description``, ``tool_call_condition``, and
-        ``judge_rubric`` keys.
+        ``tool_choice``, ``tool_call_condition``, and ``judge_rubric`` keys.
         """
         return load_entries(self._resolve_source(), self.__class__.__name__)
 
     def _build_conversation(self, entry: dict) -> garak.attempt.Conversation:
-        """Build a Conversation from a raw entry, stashing tools + judge criteria in notes."""
+        """Build a Conversation from a raw entry, stashing tools + grading data in notes."""
         return garak.attempt.Conversation.from_openai(
             entry["messages"], notes=entry_notes(entry)
         )
@@ -225,10 +218,10 @@ class SequentialInjection(garak.probes.IterativeProbe):
     ``turn_index`` (from 0), ``turn_count``, and ``call_offset`` (the tool calls
     made by earlier turns). Each output's ``tool_calls`` note holds every call
     made so far in the conversation, so the detectors see the whole conversation.
-    The ``tool_call_condition`` travels on every turn; ``judge_rubric`` and
-    ``judge_description`` on the final turn, or on every turn when
-    ``judge_turns`` is ``all``. The scripts, not ``max_calls_per_conv``, bound
-    each conversation; with several generations, the first one continues it.
+    The ``tool_call_condition`` travels on every turn; ``judge_rubric`` on the
+    final turn, or on every turn when ``judge_turns`` is ``all``. The scripts, not
+    ``max_calls_per_conv``, bound each conversation; with several generations, the
+    first one continues it.
     """
 
     lang = "en"
@@ -245,8 +238,8 @@ class SequentialInjection(garak.probes.IterativeProbe):
         "quality:Security:PromptStability",
     ]
     tier = garak.probes.Tier.INFORMATIONAL
-    primary_detector = "injection_judge.InjectionJudge"
-    extended_detectors = ["toolcall.ToolCallCondition", "rubric_judge.RubricJudge"]
+    primary_detector = "toolcall.ToolCallCondition"
+    extended_detectors = ["rubric_judge.RubricJudge"]
 
     DEFAULT_PARAMS = garak.probes.IterativeProbe.DEFAULT_PARAMS | {
         # a .json or .jsonl file, as for IndirectInjection
