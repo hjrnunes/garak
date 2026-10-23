@@ -404,7 +404,10 @@ def _record(
     reason: str,
     request: Optional[dict] = None,
     raw_response: Optional[str] = None,
+    sent: Optional[dict] = None,
 ) -> dict:
+    """Return one output's record; ``sent`` holds the judge ``model`` and ``prompt``."""
+    sent = sent or {}
     return {
         "verdict": verdict,
         "evidence_refs": refs,
@@ -412,6 +415,8 @@ def _record(
         "prompt_version": PROMPT_VERSION,
         "request": request,
         "raw_response": raw_response,
+        "model": sent.get("model"),
+        "prompt": sent.get("prompt"),
     }
 
 
@@ -423,7 +428,11 @@ class RubricJudge(ModelAsJudge):
     establishes that the answer is yes, 0.0 when it establishes no, and None when the
     verdict is unresolved, the judge cites no usable captured evidence, the judge call
     fails, or the attempt carries no rubric. Per-output records are written to
-    ``attempt.notes["rubric_judge_results"]``.
+    ``attempt.notes["rubric_judge_results"]``, one per output in output order, so the
+    report keeps them beside the detector results. Each holds the verdict, its
+    ``reason`` and the ``request``; when the judge was asked, also the ``prompt``
+    sent (a list of role and content messages), the judge ``model`` and its
+    ``raw_response``.
     """
 
     doc_uri = "https://genai.owasp.org/llmrisk/llm01-prompt-injection/"
@@ -495,22 +504,33 @@ class RubricJudge(ModelAsJudge):
                 Turn(role="user", content=Message(request_text(request))),
             ]
         )
+        sent = {
+            "model": self.evaluation_generator.name,
+            "prompt": [
+                {"role": turn.role, "content": turn.content.text}
+                for turn in conversation.turns
+            ],
+        }
         try:
             responses = self.evaluation_generator.generate(conversation)
         except (openai.OpenAIError, GarakException, json.JSONDecodeError) as exc:
             reason = f"judge_failed:{type(exc).__name__}"
-            return _record("unresolved", [], reason, request)
+            return _record("unresolved", [], reason, request, sent=sent)
         content = responses[0].text if responses and responses[0] else None
         if isinstance(content, bytes):
             try:
                 content = content.decode("utf-8")
             except UnicodeDecodeError:
-                return _record("unresolved", [], "judge_parse_failed", request)
+                return _record(
+                    "unresolved", [], "judge_parse_failed", request, sent=sent
+                )
         if not isinstance(content, str):
-            return _record("unresolved", [], "judge_parse_failed", request)
+            return _record("unresolved", [], "judge_parse_failed", request, sent=sent)
         try:
             parsed = json.loads(content)
         except json.JSONDecodeError:
-            return _record("unresolved", [], "judge_parse_failed", request, content)
+            return _record(
+                "unresolved", [], "judge_parse_failed", request, content, sent
+            )
         verdict, refs, reason = assess_response(parsed, evidence)
-        return _record(verdict, refs, reason, request, content)
+        return _record(verdict, refs, reason, request, content, sent)

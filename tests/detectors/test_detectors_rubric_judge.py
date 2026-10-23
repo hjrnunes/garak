@@ -677,8 +677,11 @@ def test_no_request_without_rubric(judge, mocker):
     attempt = make_attempt(Message("X"), None, rubric=None)
     assert judge.detect(attempt) == [None, None]
     assert fake.conversations == [], "no judge request without a rubric"
-    reasons = [r["reason"] for r in attempt.notes["rubric_judge_results"]]
-    assert reasons == ["judge_not_declared", "judge_not_declared"]
+    records = attempt.notes["rubric_judge_results"]
+    assert [r["reason"] for r in records] == ["judge_not_declared"] * 2
+    assert all(
+        r["prompt"] is None and r["model"] is None for r in records
+    ), "no prompt or model without a request"
 
 
 @pytest.mark.parametrize("rubric", [["Q?"], "Q?", {"question": 7}, {"criteria": []}])
@@ -717,6 +720,8 @@ def test_transport_failure(judge, mocker, error, name):
     record = attempt.notes["rubric_judge_results"][0]
     assert record["reason"] == f"judge_failed:{name}"
     assert record["request"] is not None, "the request is kept for audit"
+    assert record["prompt"] is not None, "so is the prompt that was sent"
+    assert record["model"] == judge.evaluation_generator.name
     assert record["raw_response"] is None
 
 
@@ -753,6 +758,8 @@ def test_results_note(judge, mocker):
         "prompt_version": PROMPT_VERSION,
         "request": record["request"],
         "raw_response": CONTRADICTED,
+        "model": judge.evaluation_generator.name,
+        "prompt": record["prompt"],
     }
     assert PROMPT_VERSION == "garak-rubric-judge-v1"
     assert record["request"]["evidence"]["messages"] == [
@@ -788,3 +795,38 @@ def test_multiple_outputs(judge, mocker):
         "judge_completed",
     ]
     assert records[2]["request"]["evidence"]["messages"][0]["content"] == "not X"
+
+
+def test_record_keeps_prompt_response_and_model(judge_config, mocker):
+    judge_config["detectors"]["rubric_judge"]["detector_model_name"] = "judge-model"
+    detector = RubricJudge(config_root=judge_config)
+    fake = use_fake(mocker, detector, CONTRADICTED)
+    attempt = make_attempt(Message("Widget orders ship Monday to Friday."))
+    detector.detect(attempt)
+
+    record = attempt.notes["rubric_judge_results"][0]
+    sent = fake.conversations[0].turns
+    assert record["prompt"] == [
+        {"role": turn.role, "content": turn.content.text} for turn in sent
+    ], "the prompt is the messages sent to the judge"
+    assert record["prompt"][0] == {"role": "system", "content": SYSTEM_PROMPT}
+    assert record["prompt"][1]["content"] == request_text(record["request"])
+    assert record["raw_response"] == CONTRADICTED, "the judge's response"
+    assert record["model"] == "judge-model", "the judge model asked"
+    assert record["verdict"] == "contradicted", "verdict keeps its meaning"
+
+
+def test_records_reach_the_report_entry(judge, mocker):
+    use_fake(mocker, judge, SUPPORTED, CONTRADICTED)
+    attempt = make_attempt(Message("X"), Message("not X"))
+    attempt.detector_results["rubric_judge.RubricJudge"] = judge.detect(attempt)
+
+    entry = json.loads(json.dumps(attempt.as_dict()))
+    assert entry["detector_results"]["rubric_judge.RubricJudge"] == [1.0, 0.0]
+    records = entry["notes"]["rubric_judge_results"]
+    assert [r["raw_response"] for r in records] == [
+        SUPPORTED,
+        CONTRADICTED,
+    ], "one record per output, in output order"
+    assert [r["prompt"][1]["role"] for r in records] == ["user", "user"]
+    assert {r["model"] for r in records} == {judge.evaluation_generator.name}
