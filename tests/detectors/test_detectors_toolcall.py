@@ -290,6 +290,38 @@ def test_attempt_without_condition_gives_none(detector):
     assert all("no tool_call_condition" in r["reason"] for r in records)
 
 
+def configured(cond):
+    return ToolCallCondition(
+        config_root={
+            "detectors": {"toolcall": {"ToolCallCondition": {"condition": cond}}}
+        }
+    )
+
+
+def test_configured_condition_judges_an_attempt_without_one():
+    cond = condition(value(arg("refund", "amount"), "gt", literal(80)))
+    a = attempt_with(None, [output(call("refund", {"amount": 100})), output()])
+    assert configured(cond).detect(a) == [1.0, 0.0], "configured condition applies"
+    assert [r["outcome"] for r in a.notes["tool_call_condition_results"]] == [
+        "detected",
+        "not_detected",
+    ]
+
+
+def test_attempt_condition_takes_precedence_over_configured_one():
+    own = condition(value(arg("refund", "amount"), "gt", literal(500)))
+    fallback = condition(value(arg("refund", "amount"), "gt", literal(80)))
+    a = attempt_with(own, [output(call("refund", {"amount": 100}))])
+    assert configured(fallback).detect(a) == [0.0], "the attempt's own condition wins"
+
+
+def test_invalid_configured_condition_is_inconclusive():
+    a = attempt_with(None, [output(call("refund", {"amount": 100}))])
+    assert configured({"comparisons": []}).detect(a) == [None]
+    reason = a.notes["tool_call_condition_results"][0]["reason"]
+    assert reason.startswith("invalid condition"), "validated like an attempt's own"
+
+
 def test_results_notes_record_shape(detector):
     cond = condition(not_called("x"))
     a = attempt_with(cond, [output()])
