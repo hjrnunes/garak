@@ -473,6 +473,20 @@ def test_configured_tools_kept_without_conversation_tools(generator):
     assert "tool_choice" not in kwargs, "no tool_choice unless one is given"
 
 
+def test_conversation_without_notes_is_treated_as_empty_notes(generator):
+    generator.tools = [{"type": "mcp", "server_url": "http://localhost:8888/sse"}]
+    generator.client.responses.create.return_value = _make_response("ok")
+
+    result = generator._call_model(
+        Conversation([Turn(role="user", content=Message("hi"))], notes=None)
+    )
+
+    assert result[0].text == "ok", "a prompt whose notes are None is still sent"
+    kwargs = generator.client.responses.create.call_args[1]
+    assert kwargs["tools"] == generator.tools, "configured tools are the fallback"
+    assert "tool_choice" not in kwargs, "no tool_choice unless one is given"
+
+
 def test_chat_shaped_conversation_tools_are_flattened(generator):
     generator.client.responses.create.return_value = _make_response("ok")
     params = {"type": "object", "properties": {"recipient": {"type": "string"}}}

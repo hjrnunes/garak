@@ -641,11 +641,13 @@ class OpenAIResponsesGenerator(OpenAICompatible):
 
         # per-conversation tool definitions (and optional tool_choice) travel on
         # Conversation.notes so each injected conversation carries its own schema
+        # (a prompt minted with notes=None has no such notes)
         if isinstance(prompt, Conversation):
-            if prompt.notes.get("tools"):
-                create_args["tools"] = prompt.notes["tools"]
-            if prompt.notes.get("tool_choice") is not None:
-                create_args["tool_choice"] = prompt.notes["tool_choice"]
+            conv_notes = prompt.notes or {}
+            if conv_notes.get("tools"):
+                create_args["tools"] = conv_notes["tools"]
+            if conv_notes.get("tool_choice") is not None:
+                create_args["tool_choice"] = conv_notes["tool_choice"]
 
         if "tools" in create_args:
             create_args["tools"] = [
