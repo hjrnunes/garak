@@ -299,7 +299,7 @@ class EarlyStopHarness(Harness):
         try:
             attacked_attempts = list(baseline_probe.probe(model))
         except Exception as e:
-            logging.error(f"Failed to collect baseline metrics {e}")
+            logging.error(f"Failed to collect baseline metrics {e}", exc_info=True)
             return accepted_attempts, rejected_attempts
 
         return self._update_attempt_status(attacked_attempts, accepted_attempts, rejected_attempts, detectors,

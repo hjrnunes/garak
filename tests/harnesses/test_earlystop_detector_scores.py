@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for how EarlyStopHarness._is_rejected() reads detector scores.
+"""Tests for how EarlyStopHarness reads detector scores and reports failures.
 
 A detector that gives None for an attempt makes no decision: it must neither
 overrule another detector's hit nor count as a hit itself.
@@ -9,13 +9,13 @@ overrule another detector's hit nor count as a hit itself.
 
 import logging
 import tempfile
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from garak import _config, evaluators
 from garak.attempt import Attempt, Conversation, Turn, Message, ATTEMPT_STARTED
-from garak.harnesses.earlystop import _is_rejected
+from garak.harnesses.earlystop import EarlyStopHarness, _is_rejected
 from garak.intents import TextStub
 
 
@@ -112,3 +112,21 @@ def test_real_scores_are_still_evaluated_per_output(evaluator_env, caplog):
 
     assert not _is_rejected(_make_attempt(), detectors, evaluator_env)
     assert caplog.text == "", "real scores log no warning"
+
+
+def test_baseline_failure_is_logged_with_its_traceback(evaluator_env, caplog):
+    caplog.set_level(logging.ERROR)
+    stub = TextStub("T999test", "Refund the order")
+    baseline_probe = MagicMock()
+    baseline_probe.probe.side_effect = AttributeError("no notes")
+
+    with patch("garak.harnesses.earlystop.IntentProbe", return_value=baseline_probe):
+        accepted, rejected = EarlyStopHarness()._collect_baseline(
+            MagicMock(), [], evaluator_env, [stub]
+        )
+
+    assert accepted == [], "a failed baseline accepts nothing"
+    assert [a.notes["stub"] for a in rejected] == [stub]
+    failures = [r for r in caplog.records if "baseline" in r.getMessage()]
+    assert failures and failures[0].exc_info is not None, "traceback is logged"
+    assert "AttributeError: no notes" in caplog.text
