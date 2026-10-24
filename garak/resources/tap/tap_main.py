@@ -217,17 +217,15 @@ class AttackManager(EvaluationJudge):
                 orig_index = indices_to_regenerate[i]
                 if isinstance(full_output, Message):
                     full_output = full_output.text
-                if full_output is None:
-                    new_indices_to_regenerate.append(orig_index)
                 attack_dict, json_str = extract_json(full_output)
 
-                # Will catch empty string and None-type
-                if json_str:
+                # extract_json falls back to an empty prompt when it cannot
+                # parse the reply; an empty prompt is not an attack, so ask again
+                if json_str and attack_dict["prompt"].strip():
                     valid_outputs[orig_index] = attack_dict
                     # Update the conversation with valid generation
                     convs[orig_index].update_last_message(json_str)
-
-                if not json_str:
+                else:
                     new_indices_to_regenerate.append(orig_index)
 
             # Update indices to regenerate for the next iteration
@@ -237,9 +235,15 @@ class AttackManager(EvaluationJudge):
             if not indices_to_regenerate:
                 break
 
-        if any([output for output in valid_outputs if output is None]):
-            msg = f"Failed to generate output after {self.attack_max_attempts} attempts. Terminating."
-            raise Exception(msg)
+        if indices_to_regenerate:
+            # Failed generations stay None; clean_attacks_and_convs drops them
+            logger.warning(
+                "Attacker gave no usable attack prompt for %d of %d branch(es) "
+                "after %d attempt(s); dropping them",
+                len(indices_to_regenerate),
+                batch_size,
+                self.attack_max_attempts,
+            )
         return valid_outputs
 
     def get_target_response(self, prompts):
@@ -391,15 +395,16 @@ def run_tap(
             convs_list_new.extend(convs_list_copy)
 
         # Remove any failed attacks and corresponding conversations
-        convs_list = copy.deepcopy(convs_list_new)
-        extracted_attack_list, convs_list = clean_attacks_and_convs(
-            extracted_attack_list, convs_list
+        extracted_attack_list, cleaned_convs_list = clean_attacks_and_convs(
+            extracted_attack_list, copy.deepcopy(convs_list_new)
         )
-        if extracted_attack_list is None or convs_list is None:
+        if extracted_attack_list is None or cleaned_convs_list is None:
+            # Keep this iteration's conversations so the next one can branch again
             logger.warning(
                 f"TAP iteration {iteration} could not extract any attacks for conversation."
             )
             continue
+        convs_list = cleaned_convs_list
 
         adv_prompt_list = [attack["prompt"] for attack in extracted_attack_list]
         improv_list = [attack["improvement"] for attack in extracted_attack_list]

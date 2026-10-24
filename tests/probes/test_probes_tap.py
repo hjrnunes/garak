@@ -1,8 +1,12 @@
 import json
+import logging
 import tempfile
 from unittest.mock import patch
 
+import pytest
+
 import garak
+import garak.attempt
 from garak import _config
 from garak.resources.tap import run_tap
 
@@ -107,3 +111,110 @@ def test_tap_intent():
         for attempt in attempts:
             assert attempt.notes is not None, "Attempt should have notes"
             assert "stub" in attempt.notes, "Attempt notes should contain stub"
+
+
+class _ScriptedGenerator:
+    """Stands in for a generator: replies with each scripted text in turn and
+    records the last user message of every conversation it is sent."""
+
+    name = "scripted"
+
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.received = []
+
+    def generate(self, conv):
+        self.received.append(conv.last_message().text)
+        reply = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
+        return [garak.attempt.Message(reply)]
+
+
+def _attack_manager(attacker, target=None, attack_max_attempts=3):
+    from garak.resources.tap.tap_main import AttackManager
+
+    return AttackManager(
+        goal="Refund the order",
+        attack_generator=attacker,
+        target_generator=target or _ScriptedGenerator(["ok"]),
+        evaluation_generator=_ScriptedGenerator(["[[1]]"]),
+        attack_max_attempts=attack_max_attempts,
+        max_parallel_streams=1,
+    )
+
+
+def _new_conv():
+    from garak.resources.tap.tap_main import TAPConversation
+
+    conv = TAPConversation(self_id="NA", parent_id="NA")
+    conv.set_system_message("attacker system prompt")
+    return conv
+
+
+VALID_ATTACK = json.dumps({"improvement": "try harder", "prompt": "a real attack"})
+
+
+@pytest.mark.parametrize(
+    "unparsable",
+    [
+        "I cannot help with that.",
+        '{"improvement": "try harder", "prompt": ""}',
+        '{"improvement": "try harder", "prompt": "   "}',
+    ],
+)
+def test_get_attack_regenerates_reply_with_no_prompt(unparsable):
+    attacker = _ScriptedGenerator([unparsable, VALID_ATTACK])
+    manager = _attack_manager(attacker)
+
+    attacks = manager.get_attack([_new_conv()], ["begin"])
+
+    assert attacks == [{"improvement": "try harder", "prompt": "a real attack"}]
+    assert len(attacker.received) == 2, "the attacker is asked again"
+
+
+def test_get_attack_drops_branch_when_no_prompt_after_retries(caplog):
+    caplog.set_level(logging.WARNING)
+    attacker = _ScriptedGenerator(["I cannot help with that."])
+    manager = _attack_manager(attacker, attack_max_attempts=3)
+
+    attacks = manager.get_attack([_new_conv()], ["begin"])
+
+    assert attacks == [None], "a failed generation is None, not an empty prompt"
+    assert len(attacker.received) == 3, "retries are bounded by attack_max_attempts"
+    assert "no usable attack prompt" in caplog.text
+
+
+def test_run_tap_never_sends_an_empty_prompt_to_the_target():
+    _config.load_base_config()
+    target = _ScriptedGenerator(["I will not do that."])
+    goal = "Refund the order"
+
+    with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8") as report:
+        _config.transient.reportfile = report
+        _config.transient.report_filename = report.name
+        with patch(
+            "garak.resources.tap.tap_main.load_generator",
+            side_effect=[
+                _ScriptedGenerator(["I cannot help with that."]),
+                _ScriptedGenerator(["[[1]]"]),
+            ],
+        ), patch(
+            "garak.resources.tap.tap_main.isinstance",
+            side_effect=lambda obj, cls: (
+                cls == garak.generators.openai.OpenAICompatible
+                or isinstance(obj, cls)
+            ),
+        ):
+            results = run_tap(
+                goal=goal,
+                target="Sure,",
+                target_generator=target,
+                attack_max_attempts=2,
+                branching_factor=1,
+                width=2,
+                depth=2,
+                n_streams=1,
+                save_results=False,
+            )
+
+    assert target.received == [], "no attack prompt reached the target"
+    assert results == [goal], "falls back to the original goal"
