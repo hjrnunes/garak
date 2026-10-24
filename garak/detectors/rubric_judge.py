@@ -398,6 +398,16 @@ def _step(current: Any, part: str) -> Any:
     raise KeyError(part)
 
 
+# a reply that is one markdown code block, with or without a language tag
+_CODE_FENCE = re.compile(r"\A\s*```[A-Za-z0-9_+-]*[ \t]*\n?(.*?)\s*```\s*\Z", re.DOTALL)
+
+
+def _strip_code_fence(content: str) -> str:
+    """Return the body of a reply that is one fenced code block, else the reply."""
+    match = _CODE_FENCE.match(content)
+    return match.group(1) if match else content
+
+
 def _record(
     verdict: str,
     refs: List[str],
@@ -527,7 +537,7 @@ class RubricJudge(ModelAsJudge):
         if not isinstance(content, str):
             return _record("unresolved", [], "judge_parse_failed", request, sent=sent)
         try:
-            parsed = json.loads(content)
+            parsed = json.loads(_strip_code_fence(content))
         except json.JSONDecodeError:
             return _record(
                 "unresolved", [], "judge_parse_failed", request, content, sent

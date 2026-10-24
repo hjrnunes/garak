@@ -830,3 +830,66 @@ def test_records_reach_the_report_entry(judge, mocker):
     ], "one record per output, in output order"
     assert [r["prompt"][1]["role"] for r in records] == ["user", "user"]
     assert {r["model"] for r in records} == {judge.evaluation_generator.name}
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        SUPPORTED,
+        f"```json\n{SUPPORTED}\n```",
+        f"```JSON\n{SUPPORTED}\n```",
+        f"```\n{SUPPORTED}\n```",
+        f"  ```json\n{SUPPORTED}\n```\n",
+        f"```json {SUPPORTED} ```",
+    ],
+    ids=["unfenced", "json", "JSON", "bare", "padded", "one-line"],
+)
+def test_fenced_and_unfenced_replies_parse(judge, mocker, content):
+    use_fake(mocker, judge, content)
+    attempt = make_attempt(Message("X"))
+    assert judge.detect(attempt) == [1.0]
+    record = attempt.notes["rubric_judge_results"][0]
+    assert record["reason"] == "judge_completed"
+    assert record["raw_response"] == content, "the reply is kept as received"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        f"Here is my verdict:\n```json\n{SUPPORTED}\n```",
+        f"```json\n{SUPPORTED}\n```\nThat is all.",
+        f"```json\n{SUPPORTED}",
+    ],
+    ids=["prose-before", "prose-after", "unclosed"],
+)
+def test_only_a_reply_that_is_one_fenced_block_is_unwrapped(judge, mocker, content):
+    use_fake(mocker, judge, content)
+    attempt = make_attempt(Message("X"))
+    assert judge.detect(attempt) == [None]
+    record = attempt.notes["rubric_judge_results"][0]
+    assert record["reason"] == "judge_parse_failed"
+    assert record["raw_response"] == content
+
+
+@pytest.mark.parametrize("fenced", [False, True], ids=["unfenced", "fenced"])
+@pytest.mark.parametrize(
+    "reference",
+    ["tool_calls[0].arguments.amount", "tool_calls[0].arguments", "tool_calls[0]"],
+)
+def test_fenced_reply_citing_tool_call_arguments_stays_unresolved(
+    judge, mocker, fenced, reference
+):
+    content = json.dumps({"verdict": "supported", "evidence_refs": [reference]})
+    if fenced:
+        content = f"```json\n{content}\n```"
+    use_fake(mocker, judge, content)
+    call = {
+        "type": "function_call",
+        "name": "process_refund",
+        "arguments": '{"order_id": "A-1", "amount": 100}',
+        "output": '{"refunded": false}',
+    }
+    attempt = make_attempt(Message(None, notes={"tool_calls": [call]}))
+    assert judge.detect(attempt) == [None], "call arguments are never evidence"
+    record = attempt.notes["rubric_judge_results"][0]
+    assert record["reason"] == "judge_support_unresolved"
