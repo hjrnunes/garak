@@ -160,6 +160,54 @@ def test_model_chat(mocker, hf_generator_config):
         assert isinstance(item, Message)
 
 
+def _stub_chat_model(decoded_prompt, decoded_output):
+    """A huggingface.Model with a chat template and no weights: records what
+    the tokenizer is asked to render"""
+    from unittest.mock import MagicMock
+    from types import SimpleNamespace
+
+    g = garak.generators.huggingface.Model.__new__(garak.generators.huggingface.Model)
+    g.model = MagicMock()
+    g.generation_config = SimpleNamespace()
+    g.max_tokens = 10
+    g.hf_args = {"do_sample": True}
+    g.temperature = None
+    g.top_k = None
+    g.device = "cpu"
+    g.use_chat = True
+    g.deprefix_prompt = False
+    g.tokenizer = MagicMock()
+    g.tokenizer.apply_chat_template.return_value = "rendered chat"
+    g.tokenizer.return_value.to.return_value = {"input_ids": [[1, 2]]}
+    g.tokenizer.decode.return_value = decoded_prompt
+    g.tokenizer.batch_decode.return_value = [decoded_output]
+    return g
+
+
+def test_model_chat_continues_a_trailing_assistant_turn():
+    g = _stub_chat_model("user: hi assistant: {", "user: hi assistant: {done}")
+    conv = Conversation([Turn("user", Message("hi")), Turn("assistant", Message("{"))])
+
+    output = g._call_model(conv)
+
+    kwargs = g.tokenizer.apply_chat_template.call_args.kwargs
+    assert kwargs["continue_final_message"] is True, "assistant turn is a prefill"
+    assert kwargs["add_generation_prompt"] is False, "no new assistant turn opened"
+    assert output[0].text == "done}", "output is the continuation of the prefill"
+
+
+def test_model_chat_opens_a_new_turn_after_a_user_turn():
+    g = _stub_chat_model("user: hi assistant:", "user: hi assistant: hello")
+    conv = Conversation([Turn("user", Message("hi"))])
+
+    output = g._call_model(conv)
+
+    kwargs = g.tokenizer.apply_chat_template.call_args.kwargs
+    assert kwargs["add_generation_prompt"] is True, "a new assistant turn is opened"
+    assert not kwargs.get("continue_final_message"), "nothing to continue"
+    assert output[0].text == "hello", "output is the new reply"
+
+
 def test_select_hf_device():
     from garak.generators.huggingface import HFCompatible
     import torch

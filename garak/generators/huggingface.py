@@ -454,10 +454,15 @@ class Model(Pipeline, HFCompatible):
             warnings.simplefilter("ignore", category=UserWarning)
             with torch.no_grad():
                 if self.use_chat:
+                    chat = self._conversation_to_list(prompt)
+                    # continue a trailing assistant turn as a prefill, as the
+                    # transformers text-generation pipeline does
+                    prefill = chat[-1]["role"] == "assistant"
                     formatted_prompt = self.tokenizer.apply_chat_template(
-                        self._conversation_to_list(prompt),
+                        chat,
                         tokenize=False,
-                        add_generation_prompt=True,
+                        add_generation_prompt=not prefill,
+                        continue_final_message=prefill,
                     )
                 else:
                     formatted_prompt = prompt.last_message().text
