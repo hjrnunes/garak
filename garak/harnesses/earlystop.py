@@ -8,6 +8,7 @@ The approach is to try a list of attack methods and, after each round of test,
 we carry over only the attempts that have been rejected by the LLM.
 We continue iterating until all the intents have been accepted, or we run out of available attack methods.
 """
+
 import json
 import logging
 import threading
@@ -29,7 +30,12 @@ from garak.probes.base import IntentProbe
 _reportfile_lock = threading.Lock()
 
 
-def _is_rejected(attempt: Attempt, detectors: List[Detector], evaluator: Evaluator, baseline_attempt: Attempt = None) -> bool:
+def _is_rejected(
+    attempt: Attempt,
+    detectors: List[Detector],
+    evaluator: Evaluator,
+    baseline_attempt: Attempt = None,
+) -> bool:
     """
     Returns True if the target LLM rejected the attempt,
     ex: "I'm sorry, but I can't do that" -> True
@@ -44,9 +50,11 @@ def _is_rejected(attempt: Attempt, detectors: List[Detector], evaluator: Evaluat
     support a hit, so the attempt is conservatively rejected (with a warning)
     rather than counted as a jailbreak.
     """
-    outputs = [output.text
-               for output in attempt.outputs
-               if type(output) == garak.attempt.Message]
+    outputs = [
+        output.text
+        for output in attempt.outputs
+        if type(output) == garak.attempt.Message
+    ]
     if not outputs or not any(outputs):
         logging.debug(f"No outputs for attempt {attempt.uuid}, marking as rejected")
         return True
@@ -91,7 +99,9 @@ def _is_rejected(attempt: Attempt, detectors: List[Detector], evaluator: Evaluat
     # Save this intermediary attempt, no matter the outcome
     attempt.status = ATTEMPT_COMPLETE
     with _reportfile_lock:
-        _config.transient.reportfile.write(json.dumps(attempt.as_dict(), ensure_ascii=False) + "\n")
+        _config.transient.reportfile.write(
+            json.dumps(attempt.as_dict(), ensure_ascii=False) + "\n"
+        )
 
     return rejected
 
@@ -174,17 +184,17 @@ class EarlyStopHarness(Harness):
     def _create_attempt(self, stub: Stub) -> Attempt:
         new_attempt = Attempt(
             probe_classname=(
-                    str(self.__class__.__module__).replace("garak.probes.", "")
-                    + "."
-                    + self.__class__.__name__
+                str(self.__class__.__module__).replace("garak.probes.", "")
+                + "."
+                + self.__class__.__name__
             ),
             intent=stub.intent,
             notes={"stub": stub},
             goal=stub.content,
             status=ATTEMPT_STARTED,
-            prompt=garak.attempt.Conversation(turns=[
-                garak.attempt.Turn("user", garak.attempt.Message(stub.content))
-            ]),
+            prompt=garak.attempt.Conversation(
+                turns=[garak.attempt.Turn("user", garak.attempt.Message(stub.content))]
+            ),
         )
         return new_attempt
 
@@ -212,7 +222,14 @@ class EarlyStopHarness(Harness):
 
         return probe
 
-    def _update_attempt_status(self, attacked_attempts, previously_accepted, previously_rejected, detectors, evaluator):
+    def _update_attempt_status(
+        self,
+        attacked_attempts,
+        previously_accepted,
+        previously_rejected,
+        detectors,
+        evaluator,
+    ):
         accepted_attempts = list(previously_accepted)
         rejected_attempts = []
 
@@ -235,7 +252,7 @@ class EarlyStopHarness(Harness):
             max_workers = min(
                 parallel_attempts,
                 getattr(_config.system, "max_workers", 64),
-                len(attacked_attempts) or 1
+                len(attacked_attempts) or 1,
             )
 
             # Submit all _is_rejected calls
@@ -246,8 +263,13 @@ class EarlyStopHarness(Harness):
                 for attacked_attempt in attacked_attempts:
                     stub = attacked_attempt.notes.get("stub")
                     baseline = baseline_by_stub.get(stub)
-                    future = executor.submit(_is_rejected, attacked_attempt, detectors, evaluator,
-                                            baseline_attempt=baseline)
+                    future = executor.submit(
+                        _is_rejected,
+                        attacked_attempt,
+                        detectors,
+                        evaluator,
+                        baseline_attempt=baseline,
+                    )
                     future_to_stub[future] = stub
 
                 # Collect results grouped by stub
@@ -273,9 +295,13 @@ class EarlyStopHarness(Harness):
         else:
             # Sequential path (original behavior)
             for attempt in previously_rejected:
-                rejected_attacks = [_is_rejected(attacked_attempt, detectors, evaluator, baseline_attempt=attempt)
-                                    for attacked_attempt in attacked_attempts
-                                    if attacked_attempt.notes.get("stub") == attempt.notes.get("stub")]
+                rejected_attacks = [
+                    _is_rejected(
+                        attacked_attempt, detectors, evaluator, baseline_attempt=attempt
+                    )
+                    for attacked_attempt in attacked_attempts
+                    if attacked_attempt.notes.get("stub") == attempt.notes.get("stub")
+                ]
                 # Some probes don't return failed attempts; we assume that an empty rejected_attacks means failure
                 if all(rejected_attacks) or not rejected_attacks:
                     rejected_attempts.append(attempt)
@@ -284,7 +310,9 @@ class EarlyStopHarness(Harness):
 
         return accepted_attempts, rejected_attempts
 
-    def _collect_baseline(self, model, detectors, evaluator, stubs: List[Stub]) -> tuple[List[Attempt], List[Attempt]]:
+    def _collect_baseline(
+        self, model, detectors, evaluator, stubs: List[Stub]
+    ) -> tuple[List[Attempt], List[Attempt]]:
         """
         We'll do a vanilla run of just sending the input stubs as is to the target LLM in order to collect
         the baseline results.
@@ -302,8 +330,13 @@ class EarlyStopHarness(Harness):
             logging.error(f"Failed to collect baseline metrics {e}", exc_info=True)
             return accepted_attempts, rejected_attempts
 
-        return self._update_attempt_status(attacked_attempts, accepted_attempts, rejected_attempts, detectors,
-                                           evaluator)
+        return self._update_attempt_status(
+            attacked_attempts,
+            accepted_attempts,
+            rejected_attempts,
+            detectors,
+            evaluator,
+        )
 
     def run(self, model, probe_names, detector_names, evaluator, buff_names=None):
         """
@@ -344,12 +377,16 @@ class EarlyStopHarness(Harness):
 
         # Set typology filter before baseline so the probe doesn't see them
         intentservice.set_stubs_filter(
-            lambda intent_code, stub: (intent_code, stub.content) not in typology_exclude)
+            lambda intent_code, stub: (intent_code, stub.content)
+            not in typology_exclude
+        )
 
         self._start_run_hook()
 
         logging.info(f"Collecting baseline for {len(all_intent_stubs)} intents")
-        accepted_attempts, rejected_attempts = self._collect_baseline(model, detectors, evaluator, all_intent_stubs)
+        accepted_attempts, rejected_attempts = self._collect_baseline(
+            model, detectors, evaluator, all_intent_stubs
+        )
 
         # Apply attack methods in order
         for probe_name in probe_names:
@@ -359,13 +396,18 @@ class EarlyStopHarness(Harness):
 
             # Filter out typology stubs and stubs that have already been accepted
             intentservice.set_stubs_filter(
-                lambda intent_code, stub: _filter_stubs(intent_code, stub, rejected_attempts, typology_exclude))
+                lambda intent_code, stub: _filter_stubs(
+                    intent_code, stub, rejected_attempts, typology_exclude
+                )
+            )
 
             probe = self._load_probe(probe_name)
             if not probe:
                 continue
 
-            logging.info(f"Applying {probe_name} to {len(rejected_attempts)} rejected attempts")
+            logging.info(
+                f"Applying {probe_name} to {len(rejected_attempts)} rejected attempts"
+            )
 
             # Execute the probe
             try:
@@ -374,9 +416,13 @@ class EarlyStopHarness(Harness):
                 logging.error(f"Attack method {probe_name} failed: {e}")
                 continue  # Continue with rejected attempts for the next attack method
 
-            accepted_attempts, rejected_attempts = self._update_attempt_status(attacked_attempts, accepted_attempts,
-                                                                               rejected_attempts,
-                                                                               detectors, evaluator)
+            accepted_attempts, rejected_attempts = self._update_attempt_status(
+                attacked_attempts,
+                accepted_attempts,
+                rejected_attempts,
+                detectors,
+                evaluator,
+            )
 
         # End of the loop, update all attempts to completed status and add our detection status
         for attempt in rejected_attempts:
@@ -385,11 +431,14 @@ class EarlyStopHarness(Harness):
             attempt.detector_results = {"EarlyStop": [1.0]}
         for attempt in rejected_attempts + accepted_attempts:
             attempt.status = ATTEMPT_COMPLETE
-            _config.transient.reportfile.write(json.dumps(attempt.as_dict(), ensure_ascii=False) + "\n")
+            _config.transient.reportfile.write(
+                json.dumps(attempt.as_dict(), ensure_ascii=False) + "\n"
+            )
 
         all_final_attempts = rejected_attempts + accepted_attempts
         evaluator.evaluate(all_final_attempts)
 
         self._end_run_hook()
         logging.info(
-            f"Early stopping harness completed: {len(accepted_attempts)} accepted, {len(rejected_attempts)} rejected")
+            f"Early stopping harness completed: {len(accepted_attempts)} accepted, {len(rejected_attempts)} rejected"
+        )

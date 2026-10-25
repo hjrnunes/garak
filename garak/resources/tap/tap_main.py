@@ -313,7 +313,7 @@ def run_tap(
     pruning: bool = True,
     save_results: bool = SAVE_RESULTS,
     outfile: Path = resources_tap_data_file,
-    probe_classname: str = "probes.tap.tap_main"
+    probe_classname: str = "probes.tap.tap_main",
 ):
     """Function for generating attacks using TAP where a generator has already been instantiated.
 
@@ -514,7 +514,7 @@ def run_tap(
         for i, conv in enumerate(convs_list):
             conv.add_message("user", improv_list[i])
             # Note that this does not delete the system prompt
-            conv.messages = conv.messages[-2 * keep_last_n:]
+            conv.messages = conv.messages[-2 * keep_last_n :]
 
         logger.debug(f"TAP iteration {iteration} complete")
 
