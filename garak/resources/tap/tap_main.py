@@ -9,6 +9,7 @@ from pathlib import Path
 from tqdm import tqdm
 from logging import getLogger
 
+import garak.generators.huggingface
 import garak.generators.openai
 from garak.attempt import Conversation, Message, Attempt
 from garak import _plugins, _config
@@ -122,6 +123,16 @@ class TAPConversation:
             self.add_message("assistant", message)
 
 
+def continues_assistant_turn(generator: garak.generators.Generator) -> bool:
+    """Whether the generator continues a trailing assistant turn as a prefill.
+    Only the chat path of the local Hugging Face generators does: their
+    non-chat path sends just the last turn, and chat APIs answer a trailing
+    assistant turn with a new reply"""
+    return isinstance(generator, garak.generators.huggingface.Pipeline) and bool(
+        getattr(generator, "use_chat", False)
+    )
+
+
 class AttackManager(EvaluationJudge):
     def __init__(
         self,
@@ -144,6 +155,7 @@ class AttackManager(EvaluationJudge):
         max_parallel_streams : Number of parallel attack generation attempts
         """
         self.attack_generator = attack_generator
+        self.seed_attacker = continues_assistant_turn(attack_generator)
         self.target_generator = target_generator
         self.evaluation_generator = evaluation_generator
         self.attack_max_attempts = attack_max_attempts
@@ -174,10 +186,10 @@ class AttackManager(EvaluationJudge):
         indices_to_regenerate = list(range(batch_size))
         valid_outputs = [None] * batch_size
 
-        # Initialize the attack model's generated output to match format.
-        # Root conversations have self_id "NA", so on the first turn every
-        # branch's parent_id is "NA"
-        if convs[0].parent_id == "NA":
+        # Initialize the attack model's generated output to match format, if
+        # it will continue it. Root conversations have self_id "NA", so on the
+        # first turn every branch's parent_id is "NA"
+        if self.seed_attacker and convs[0].parent_id == "NA":
             init_message = """{\"improvement\": \"\",\"prompt\": \""""
         else:
             init_message = None

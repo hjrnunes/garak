@@ -7,6 +7,8 @@ import pytest
 
 import garak
 import garak.attempt
+import garak.generators.huggingface
+import garak.generators.openai
 from garak import _config
 from garak.resources.tap import run_tap
 
@@ -146,6 +148,22 @@ class _ScriptedGenerator:
         return [garak.attempt.Message(reply)]
 
 
+def _scripted(generator_class, replies, **attrs):
+    """A scripted attacker that is an instance of generator_class, unloaded"""
+    klass = type(
+        f"Scripted{generator_class.__name__}", (_ScriptedGenerator, generator_class), {}
+    )
+    attacker = klass(replies)
+    for name, value in attrs.items():
+        setattr(attacker, name, value)
+    return attacker
+
+
+def _prefill_attacker(replies):
+    """A local chat model attacker, which continues a trailing assistant turn"""
+    return _scripted(garak.generators.huggingface.Pipeline, replies, use_chat=True)
+
+
 def _attack_manager(attacker, target=None, attack_max_attempts=3):
     from garak.resources.tap.tap_main import AttackManager
 
@@ -171,6 +189,9 @@ VALID_ATTACK = json.dumps({"improvement": "try harder", "prompt": "a real attack
 
 
 @pytest.mark.parametrize(
+    "make_attacker", [_ScriptedGenerator, _prefill_attacker], ids=["plain", "prefill"]
+)
+@pytest.mark.parametrize(
     "unparsable",
     [
         None,
@@ -179,13 +200,15 @@ VALID_ATTACK = json.dumps({"improvement": "try harder", "prompt": "a real attack
         '{"improvement": "try harder", "prompt": "   "}',
     ],
 )
-def test_get_attack_regenerates_reply_with_no_prompt(unparsable):
-    attacker = _ScriptedGenerator([unparsable, VALID_ATTACK])
+def test_get_attack_regenerates_reply_with_no_prompt(make_attacker, unparsable):
+    attacker = make_attacker([unparsable, VALID_ATTACK])
     manager = _attack_manager(attacker)
 
     attacks = manager.get_attack([_new_conv()], ["begin"])
 
-    assert attacks == [{"improvement": "try harder", "prompt": "a real attack"}]
+    assert attacks == [
+        {"improvement": "try harder", "prompt": "a real attack"}
+    ], "the retried reply is the attack"
     assert len(attacker.received) == 2, "the attacker is asked again"
 
 
@@ -207,41 +230,90 @@ ATTACK_SEED = '{"improvement": "","prompt": "'
 def test_get_attack_seeds_first_turn_and_parses_a_continuation():
     # A root conversation (parent "NA") gets an assistant turn that opens the
     # JSON reply; a prefill-style attacker returns only the continuation
-    attacker = _ScriptedGenerator(['a real attack"}'])
+    attacker = _prefill_attacker(['a real attack"}'])
     manager = _attack_manager(attacker)
     conv = _new_conv()
 
     attacks = manager.get_attack([conv], ["begin"])
 
     sent = attacker.conversations[0]
-    assert sent.turns[-1].role == "assistant"
-    assert sent.turns[-1].content.text == ATTACK_SEED
-    assert attacks == [{"improvement": "", "prompt": "a real attack"}]
-    assert [m["role"] for m in conv.messages] == ["system", "user", "assistant"]
-    assert json.loads(conv.messages[-1]["content"]) == attacks[0]
+    assert sent.turns[-1].role == "assistant", "first turn ends in the seed"
+    assert sent.turns[-1].content.text == ATTACK_SEED, "seed opens the JSON reply"
+    assert attacks == [
+        {"improvement": "", "prompt": "a real attack"}
+    ], "seed plus continuation parses"
+    assert [m["role"] for m in conv.messages] == [
+        "system",
+        "user",
+        "assistant",
+    ], "the reply takes the seed's place"
+    assert (
+        json.loads(conv.messages[-1]["content"]) == attacks[0]
+    ), "the stored reply is the full JSON"
 
 
 def test_get_attack_with_seed_still_parses_a_complete_reply():
-    attacker = _ScriptedGenerator([VALID_ATTACK])
+    attacker = _prefill_attacker([VALID_ATTACK])
     manager = _attack_manager(attacker)
     conv = _new_conv()
 
     attacks = manager.get_attack([conv], ["begin"])
 
-    assert attacker.conversations[0].turns[-1].content.text == ATTACK_SEED
-    assert attacks == [{"improvement": "try harder", "prompt": "a real attack"}]
-    assert conv.messages[-1] == {"role": "assistant", "content": VALID_ATTACK}
+    assert (
+        attacker.conversations[0].turns[-1].content.text == ATTACK_SEED
+    ), "first turn is seeded"
+    assert attacks == [
+        {"improvement": "try harder", "prompt": "a real attack"}
+    ], "a complete reply parses as it is"
+    assert conv.messages[-1] == {
+        "role": "assistant",
+        "content": VALID_ATTACK,
+    }, "the reply replaces the seed"
 
 
 def test_get_attack_does_not_seed_a_branched_conversation():
-    attacker = _ScriptedGenerator([VALID_ATTACK])
+    attacker = _prefill_attacker([VALID_ATTACK])
     manager = _attack_manager(attacker)
     conv = _new_conv()
     conv.parent_id = "some-parent-id"
 
     manager.get_attack([conv], ["begin"])
 
-    assert attacker.conversations[0].turns[-1].role == "user"
+    assert (
+        attacker.conversations[0].turns[-1].role == "user"
+    ), "only the first turn is seeded"
+
+
+@pytest.mark.parametrize(
+    "generator_class, use_chat, seeded",
+    [
+        (garak.generators.huggingface.Pipeline, True, True),
+        (garak.generators.huggingface.Model, True, True),
+        (garak.generators.huggingface.Pipeline, False, False),
+        (garak.generators.huggingface.Model, False, False),
+        (garak.generators.openai.OpenAICompatible, True, False),
+    ],
+    ids=["pipeline-chat", "model-chat", "pipeline", "model", "openai"],
+)
+def test_get_attack_seeds_only_an_attacker_that_continues_the_seed(
+    generator_class, use_chat, seeded
+):
+    attacker = _scripted(generator_class, [VALID_ATTACK], use_chat=use_chat)
+    manager = _attack_manager(attacker)
+    conv = _new_conv()
+
+    attacks = manager.get_attack([conv], ["begin"])
+
+    sent_roles = [turn.role for turn in attacker.conversations[0].turns]
+    expected_roles = ["system", "user"] + ["assistant"] * seeded
+    assert sent_roles == expected_roles, "seeded only if the seed is continued"
+    assert attacks == [
+        {"improvement": "try harder", "prompt": "a real attack"}
+    ], "a complete reply parses"
+    assert conv.messages[1:] == [
+        {"role": "user", "content": "begin"},
+        {"role": "assistant", "content": VALID_ATTACK},
+    ], "the user turn is kept and the reply stored after it"
 
 
 def test_get_attack_keeps_the_user_turn_of_a_branched_conversation():
