@@ -169,8 +169,10 @@ class AttackManager(EvaluationJudge):
         indices_to_regenerate = list(range(batch_size))
         valid_outputs = [None] * batch_size
 
-        # Initialize the attack model's generated output to match format
-        if len(convs[0].parent_id) == "NA":
+        # Initialize the attack model's generated output to match format.
+        # Root conversations have self_id "NA", so on the first turn every
+        # branch's parent_id is "NA"
+        if convs[0].parent_id == "NA":
             init_message = """{\"improvement\": \"\",\"prompt\": \""""
         else:
             init_message = None
@@ -218,6 +220,14 @@ class AttackManager(EvaluationJudge):
                 if isinstance(full_output, Message):
                     full_output = full_output.text
                 attack_dict, json_str = extract_json(full_output)
+                # A prefill-style attacker continues the seed rather than
+                # writing a whole reply, so put the seed back in front
+                if (
+                    init_message is not None
+                    and full_output is not None
+                    and not attack_dict["prompt"].strip()
+                ):
+                    attack_dict, json_str = extract_json(init_message + full_output)
 
                 # extract_json falls back to an empty prompt when it cannot
                 # parse the reply; an empty prompt is not an attack, so ask again

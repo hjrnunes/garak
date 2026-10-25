@@ -122,9 +122,11 @@ class _ScriptedGenerator:
     def __init__(self, replies):
         self.replies = list(replies)
         self.received = []
+        self.conversations = []
 
     def generate(self, conv):
-        self.received.append(conv.last_message().text)
+        self.received.append(conv.last_message("user").text)
+        self.conversations.append(conv)
         reply = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
         return [garak.attempt.Message(reply)]
 
@@ -156,6 +158,7 @@ VALID_ATTACK = json.dumps({"improvement": "try harder", "prompt": "a real attack
 @pytest.mark.parametrize(
     "unparsable",
     [
+        None,
         "I cannot help with that.",
         '{"improvement": "try harder", "prompt": ""}',
         '{"improvement": "try harder", "prompt": "   "}',
@@ -181,6 +184,49 @@ def test_get_attack_drops_branch_when_no_prompt_after_retries(caplog):
     assert attacks == [None], "a failed generation is None, not an empty prompt"
     assert len(attacker.received) == 3, "retries are bounded by attack_max_attempts"
     assert "no usable attack prompt" in caplog.text
+
+
+ATTACK_SEED = '{"improvement": "","prompt": "'
+
+
+def test_get_attack_seeds_first_turn_and_parses_a_continuation():
+    # A root conversation (parent "NA") gets an assistant turn that opens the
+    # JSON reply; a prefill-style attacker returns only the continuation
+    attacker = _ScriptedGenerator(['a real attack"}'])
+    manager = _attack_manager(attacker)
+    conv = _new_conv()
+
+    attacks = manager.get_attack([conv], ["begin"])
+
+    sent = attacker.conversations[0]
+    assert sent.turns[-1].role == "assistant"
+    assert sent.turns[-1].content.text == ATTACK_SEED
+    assert attacks == [{"improvement": "", "prompt": "a real attack"}]
+    assert [m["role"] for m in conv.messages] == ["system", "user", "assistant"]
+    assert json.loads(conv.messages[-1]["content"]) == attacks[0]
+
+
+def test_get_attack_with_seed_still_parses_a_complete_reply():
+    attacker = _ScriptedGenerator([VALID_ATTACK])
+    manager = _attack_manager(attacker)
+    conv = _new_conv()
+
+    attacks = manager.get_attack([conv], ["begin"])
+
+    assert attacker.conversations[0].turns[-1].content.text == ATTACK_SEED
+    assert attacks == [{"improvement": "try harder", "prompt": "a real attack"}]
+    assert conv.messages[-1] == {"role": "assistant", "content": VALID_ATTACK}
+
+
+def test_get_attack_does_not_seed_a_branched_conversation():
+    attacker = _ScriptedGenerator([VALID_ATTACK])
+    manager = _attack_manager(attacker)
+    conv = _new_conv()
+    conv.parent_id = "some-parent-id"
+
+    manager.get_attack([conv], ["begin"])
+
+    assert attacker.conversations[0].turns[-1].role == "user"
 
 
 def test_run_tap_never_sends_an_empty_prompt_to_the_target():
