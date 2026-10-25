@@ -229,6 +229,53 @@ def test_get_attack_does_not_seed_a_branched_conversation():
     assert attacker.conversations[0].turns[-1].role == "user"
 
 
+def test_get_attack_keeps_the_user_turn_of_a_branched_conversation():
+    attacker = _ScriptedGenerator([VALID_ATTACK])
+    manager = _attack_manager(attacker)
+    conv = _new_conv()
+    conv.parent_id = "some-parent-id"
+
+    manager.get_attack([conv], ["begin"])
+
+    assert conv.messages == [
+        {"role": "system", "content": "attacker system prompt"},
+        {"role": "user", "content": "begin"},
+        {"role": "assistant", "content": VALID_ATTACK},
+    ]
+
+
+@pytest.mark.parametrize(
+    "messages, expected",
+    [
+        (
+            [{"role": "user", "content": "begin"}],
+            [
+                {"role": "user", "content": "begin"},
+                {"role": "assistant", "content": "reply"},
+            ],
+        ),
+        (
+            [
+                {"role": "user", "content": "begin"},
+                {"role": "assistant", "content": ATTACK_SEED},
+            ],
+            [
+                {"role": "user", "content": "begin"},
+                {"role": "assistant", "content": "reply"},
+            ],
+        ),
+    ],
+)
+def test_update_last_message_sets_the_assistant_reply(messages, expected):
+    from garak.resources.tap.tap_main import TAPConversation
+
+    conv = TAPConversation(messages=messages)
+
+    conv.update_last_message("reply")
+
+    assert conv.messages == expected
+
+
 def test_run_tap_never_sends_an_empty_prompt_to_the_target():
     _config.load_base_config()
     target = _ScriptedGenerator(["I will not do that."])

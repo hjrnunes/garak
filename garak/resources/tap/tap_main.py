@@ -114,7 +114,12 @@ class TAPConversation:
         return garak_conv
 
     def update_last_message(self, message: str):
-        self.messages[-1]["content"] = message
+        """Set the attacker's reply: replace the assistant seed if there is
+        one, otherwise add the reply after the user turn"""
+        if self.messages and self.messages[-1]["role"] == "assistant":
+            self.messages[-1]["content"] = message
+        else:
+            self.add_message("assistant", message)
 
 
 class AttackManager(EvaluationJudge):
