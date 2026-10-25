@@ -328,7 +328,7 @@ def test_get_attack_keeps_the_user_turn_of_a_branched_conversation():
         {"role": "system", "content": "attacker system prompt"},
         {"role": "user", "content": "begin"},
         {"role": "assistant", "content": VALID_ATTACK},
-    ]
+    ], "the branched reply follows its user turn"
 
 
 @pytest.mark.parametrize(
@@ -360,7 +360,7 @@ def test_update_last_message_sets_the_assistant_reply(messages, expected):
 
     conv.update_last_message("reply")
 
-    assert conv.messages == expected
+    assert conv.messages == expected, "the assistant reply is set"
 
 
 def test_run_tap_never_sends_an_empty_prompt_to_the_target():
