@@ -522,11 +522,15 @@ def run_tap(
             for target_response, score in zip(target_response_list, judge_scores)
         ]
 
-        # Add improvement and truncate conversation to avoid context length issues
-        for i, conv in enumerate(convs_list):
-            conv.add_message("user", improv_list[i])
-            # Note that this does not delete the system prompt
-            conv.messages = conv.messages[-2 * keep_last_n :]
+        # Truncate conversation to avoid context length issues, keeping the
+        # system prompt and the last keep_last_n user/assistant exchanges. The
+        # improvement is already in the attacker's reply, and the next
+        # iteration adds the processed target response as the next user turn
+        for conv in convs_list:
+            system = [m for m in conv.messages[:1] if m["role"] == "system"]
+            exchanges = conv.messages[len(system) :]
+            keep_from = max(0, len(exchanges) - 2 * keep_last_n)
+            conv.messages = system + exchanges[keep_from:]
 
         logger.debug(f"TAP iteration {iteration} complete")
 

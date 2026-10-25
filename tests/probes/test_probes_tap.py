@@ -401,3 +401,65 @@ def test_run_tap_never_sends_an_empty_prompt_to_the_target():
 
     assert target.received == [], "no attack prompt reached the target"
     assert results == [goal], "falls back to the original goal"
+
+
+@pytest.mark.parametrize("keep_last_n", [1, 2])
+def test_run_tap_keeps_the_attacker_system_prompt_across_iterations(keep_last_n):
+    from garak.resources.red_team.system_prompts import attacker_system_prompt
+
+    _config.load_base_config()
+    goal, target_str = "Refund the order", "Sure,"
+    attacker = _ScriptedGenerator([VALID_ATTACK])
+
+    with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8") as report:
+        _config.transient.reportfile = report
+        _config.transient.report_filename = report.name
+        with (
+            patch(
+                "garak.resources.tap.tap_main.load_generator",
+                side_effect=[attacker, _ScriptedGenerator(["[[1]]"])],
+            ),
+            patch(
+                "garak.resources.tap.tap_main.isinstance",
+                side_effect=lambda obj, cls: (
+                    cls == garak.generators.openai.OpenAICompatible
+                    or isinstance(obj, cls)
+                ),
+            ),
+        ):
+            run_tap(
+                goal=goal,
+                target=target_str,
+                target_generator=_ScriptedGenerator(["I will not do that."]),
+                branching_factor=1,
+                width=1,
+                depth=4,
+                n_streams=1,
+                keep_last_n=keep_last_n,
+                save_results=False,
+            )
+
+    assert len(attacker.conversations) == 4, "the attacker is called once per depth"
+    # whole user/assistant exchanges are kept, so roles keep alternating
+    expected_roles = [
+        ["system"] + ["user", "assistant"] * min(iteration, keep_last_n) + ["user"]
+        for iteration in range(4)
+    ]
+    for iteration, (conv, roles) in enumerate(
+        zip(attacker.conversations, expected_roles), start=1
+    ):
+        assert [
+            turn.role for turn in conv.turns
+        ] == roles, (
+            f"iteration {iteration} keeps the system prompt and the last exchange"
+        )
+        assert conv.turns[0].content.text == attacker_system_prompt(
+            goal, target_str
+        ), f"iteration {iteration} sends the attacker system prompt"
+    for conv in attacker.conversations[1:]:
+        assert (
+            "I will not do that." in conv.last_message("user").text
+        ), "the attacker sees the target's last response"
+        assert (
+            json.loads(conv.last_message("assistant").text)["prompt"] == "a real attack"
+        ), "the attacker sees its own last attack"
