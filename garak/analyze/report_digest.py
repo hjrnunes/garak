@@ -46,6 +46,47 @@ def plugin_docstring_to_description(docstring):
     return docstring.split("\n")[0]
 
 
+HARNESS_RESULT_PREFIX = "harnesses."
+
+
+def _split_result_source(name: str) -> tuple[str, str]:
+    """Split the ``probe`` value of an eval entry into (module, class)
+
+    Most results come from a probe, named like ``probes.dan.Dan_11_0`` or
+    ``dan.Dan_11_0``. Some harnesses, such as EarlyStopHarness, also write
+    results of their own, named after the harness class, e.g.
+    ``garak.harnesses.earlystop.EarlyStopHarness``. For those the module keeps
+    its ``harnesses.`` prefix, so it is never mistaken for a probe module."""
+    harness_name = name.removeprefix("garak.")
+    if harness_name.startswith(HARNESS_RESULT_PREFIX):
+        harness_module, harness_class = harness_name.rsplit(".", 1)
+        return harness_module, harness_class
+    probe_module, probe_class = name.replace("probes.", "").split(".")
+    return probe_module, probe_class
+
+
+def _is_harness_result(probe_module: str) -> bool:
+    """True when results under ``probe_module`` were written by a harness
+
+    A harness result has no probe plugin, and its score comes from the harness
+    itself rather than a detector plugin, so there is no plugin metadata,
+    taxonomy tag or calibration to look up for it."""
+    return probe_module.startswith(HARNESS_RESULT_PREFIX)
+
+
+def _harness_description(harness_module: str) -> str:
+    """First line of a harness module's docstring, e.g. ``harnesses.earlystop``"""
+    harness_module = re.sub("[^0-9A-Za-z_.]", "", harness_module)
+    try:
+        m = importlib.import_module(f"garak.{harness_module}")
+    except ModuleNotFoundError as e:
+        raise ReportIncompatibleError(
+            f"Report references unknown harness garak.{harness_module}; "
+            "the report was likely generated with a different garak version"
+        ) from e
+    return plugin_docstring_to_description(m.__doc__ or harness_module)
+
+
 def _parse_report(reportfile: IO):
     reportfile.seek(0)
 
@@ -155,8 +196,8 @@ def _init_populate_result_db(evals, taxonomy=None, report_plugin_cache=None):
     cursor.execute(create_table)
 
     for eval in evals:
-        eval["probe"] = eval["probe"].replace("probes.", "")
-        pm, pc = eval["probe"].split(".")
+        pm, pc = _split_result_source(eval["probe"])
+        eval["probe"] = f"{pm}.{pc}"
         detector = eval["detector"].replace("detector.", "")
         passes = eval["passed"]
         instances = eval.get("total_evaluated", eval.get("total", None))
@@ -168,7 +209,10 @@ def _init_populate_result_db(evals, taxonomy=None, report_plugin_cache=None):
         ci_upper = eval.get("confidence_upper")
 
         groups = []
-        if taxonomy is not None:
+        if _is_harness_result(pm):
+            # harness results carry no taxonomy tags; group them by harness
+            groups = [pm]
+        elif taxonomy is not None:
             # get the probe tags
             try:
                 meta = _resolve_plugin_info(
@@ -252,7 +296,10 @@ def _get_group_info(probe_group, group_score, taxonomy, config=_config) -> dict:
     group_link = ""
 
     probe_group_name = probe_group
-    if taxonomy is None:
+    if _is_harness_result(probe_group):
+        group_doc = markdown.markdown(_harness_description(probe_group))
+        group_link = f"https://reference.garak.ai/en/latest/garak.{probe_group}.html"
+    elif taxonomy is None:
         probe_module = re.sub("[^0-9A-Za-z_]", "", probe_group)
         m = importlib.import_module(f"garak.probes.{probe_module}")
         group_doc = markdown.markdown(plugin_docstring_to_description(m.__doc__))
@@ -290,21 +337,28 @@ def _get_probe_result_summaries(cursor, probe_group) -> List[tuple]:
 def _get_probe_info(
     probe_module, probe_class, absolute_score, report_plugin_cache=None
 ) -> dict:
-    probe_classpath = f"probes.{probe_module}.{probe_class}"
-    try:
-        probe_plugin_info = _resolve_plugin_info(
-            probe_classpath,
-            report_plugin_cache,
-            required_fields=("description", "tags", "tier"),
-        )
-        probe_description = probe_plugin_info["description"]
-        probe_tags = probe_plugin_info["tags"]
-        probe_tier = probe_plugin_info["tier"]
-    except (KeyError, TypeError, ValueError) as e:
-        raise ReportIncompatibleError(
-            f"Report references unknown probe {probe_classpath}; "
-            "the report was likely generated with a different garak version"
-        ) from e
+    if _is_harness_result(probe_module):
+        probe_description = _harness_description(probe_module)
+        probe_tags = []
+        # no calibration exists for harness results, so rate them on the
+        # absolute score alone, as for tier 1 (of concern) probes
+        probe_tier = 1
+    else:
+        probe_classpath = f"probes.{probe_module}.{probe_class}"
+        try:
+            probe_plugin_info = _resolve_plugin_info(
+                probe_classpath,
+                report_plugin_cache,
+                required_fields=("description", "tags", "tier"),
+            )
+            probe_description = probe_plugin_info["description"]
+            probe_tags = probe_plugin_info["tags"]
+            probe_tier = probe_plugin_info["tier"]
+        except (KeyError, TypeError, ValueError) as e:
+            raise ReportIncompatibleError(
+                f"Report references unknown probe {probe_classpath}; "
+                "the report was likely generated with a different garak version"
+            ) from e
     probe_plugin_name = f"{probe_module}.{probe_class}"
     return {
         "probe_name": probe_plugin_name,
@@ -352,27 +406,35 @@ def _get_probe_detector_details(
 ) -> dict:
     calibration_used = False
     detector = re.sub(r"[^0-9A-Za-z_.]", "", detector)
-    detector_module, detector_class = detector.split(".")
-    try:
-        detector_cache_entry = _resolve_plugin_info(
-            f"detectors.{detector_module}.{detector_class}",
-            report_plugin_cache,
-            required_fields=("description",),
+    if _is_harness_result(probe_module):
+        # the harness scored these results itself (e.g. "EarlyStop"), so there
+        # is no detector plugin or calibration to consult
+        detector_description = (
+            f"Result recorded by the harness {probe_module}.{probe_class}"
         )
-        detector_description = detector_cache_entry["description"]
-    except (KeyError, TypeError, ValueError) as e:
-        raise ReportIncompatibleError(
-            f"Report references unknown detector detectors.{detector_module}.{detector_class}; "
-            "the report was likely generated with a different garak version"
-        ) from e
+        zscore = None
+    else:
+        detector_module, detector_class = detector.split(".")
+        try:
+            detector_cache_entry = _resolve_plugin_info(
+                f"detectors.{detector_module}.{detector_class}",
+                report_plugin_cache,
+                required_fields=("description",),
+            )
+            detector_description = detector_cache_entry["description"]
+        except (KeyError, TypeError, ValueError) as e:
+            raise ReportIncompatibleError(
+                f"Report references unknown detector detectors.{detector_module}.{detector_class}; "
+                "the report was likely generated with a different garak version"
+            ) from e
 
-    zscore = calibration.get_z_score(
-        probe_module,
-        probe_class,
-        detector_module,
-        detector_class,
-        absolute_score,
-    )
+        zscore = calibration.get_z_score(
+            probe_module,
+            probe_class,
+            detector_module,
+            detector_class,
+            absolute_score,
+        )
 
     if zscore is None:
         relative_defcon, relative_comment = None, None
