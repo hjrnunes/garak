@@ -26,6 +26,17 @@ import garak.resources.theme
 # CIs narrower than this provide no meaningful uncertainty information
 CI_DISPLAY_MIN_WIDTH = 0.001
 
+HARNESS_RESULT_PREFIX = "harnesses."
+
+
+def _is_harness_result(probe_name: str) -> bool:
+    """True when results named ``probe_name`` were written by a harness
+
+    Some harnesses, such as EarlyStopHarness, write results of their own, named
+    after the harness class, e.g. ``garak.harnesses.earlystop.EarlyStopHarness``,
+    rather than after a probe module.class."""
+    return probe_name.removeprefix("garak.").startswith(HARNESS_RESULT_PREFIX)
+
 
 class Evaluator:
     """Class to be subclassed by evaluators.
@@ -308,6 +319,9 @@ class Evaluator:
             _config.transient.reportfile.write(json.dumps(intent_log_entry) + "\n")
 
     def get_z_rating(self, probe_name, detector_name, asr_pct) -> str:
+        if _is_harness_result(probe_name):
+            # scored by the harness itself, so there is no calibration to look up
+            return None, ""
         probe_module, probe_classname = probe_name.split(".")
         detector_module, detector_classname = detector_name.split(".")
         zscore = self.calibration.get_z_score(
