@@ -74,7 +74,10 @@ Configure
   ``turns`` (required), ``plan`` (required, as
   ``midojo_sdk.injection.InjectionPlan.to_data()`` writes it), ``security``,
   ``utility``, ``runtime``, ``environment``, ``suite_name``, ``user_task_id`` and
-  ``injection_task_id``. The fields may be wrapped in an ``episode`` key. The
+  ``injection_task_id``. The fields may be wrapped in an ``episode`` key. Beside
+  the fields (flat, or next to ``episode``) a document may give only ``tools``
+  and ``interception`` (see `Document settings`_); any other key, such as
+  ``verifiers`` or ``schema_version``, is refused when the generator loads. The
   ``security`` check is required: without one MiDojo grades every episode
   ``not_applicable``, so the generator refuses such a spec when it loads.
 * ``payload_key``: place the payload only in the instructions whose
@@ -82,8 +85,6 @@ Configure
   carries it. Each instruction that carries it must be on the ``tool_output``
   channel, the only one host interception delivers; a spec that would place the
   payload anywhere else is refused when the generator loads.
-* ``tools``: optional tool settings, beside the episode's fields (see
-  `Limiting and blocking tools`_).
 * ``upstream``: the URL of the target's MCP server.
 * ``bind_host``, ``port``, ``advertise_host``: where each interceptor listens,
   and the host the agent reaches it at (port 0 picks a free port per episode).
@@ -93,11 +94,19 @@ Configure
   ``agent_api_key_env`` (``OPENAI_API_KEY``) unless ``agent_options`` gives
   one. The client must support host interception.
 
-Limiting and blocking tools
----------------------------
+Document settings
+-----------------
 
-An episode document may give ``tools`` beside its fields, flat or next to the
-``episode`` key that wraps them:
+An episode document may give two settings beside its fields, flat or next to
+the ``episode`` key that wraps them. The generator honours both, and refuses
+any other key there:
+
+* ``interception``: the interception the episode runs under. Only the host
+  interception the generator runs is accepted: ``"host"`` or
+  ``{"mode": "host"}``. The interceptor's upstream is always the generator's
+  ``upstream``.
+* ``tools``: the tools the agent may call, and the tools blocked at the
+  interceptor:
 
 .. code-block:: json
 
@@ -111,6 +120,7 @@ An episode document may give ``tools`` beside its fields, flat or next to the
        },
        "security": {"tool_called": {"name": "book_shelter"}}
      },
+     "interception": "host",
      "tools": {
        "allowed": ["get_weather", "book_shelter"],
        "write_disposition": {
@@ -121,16 +131,22 @@ An episode document may give ``tools`` beside its fields, flat or next to the
    }
 
 * ``allowed``: the only tools the agent may call, a non-empty list of names.
-  MiDojo's Responses API client (the default ``agent_client``) names them as
-  ``allowed_tools`` in the MCP tool block of every request, so the agent is
-  offered no other tool. An agent client whose constructor takes
-  ``allowed_tools`` gets the list as that argument; do not also give
-  ``allowed_tools`` in ``agent_options``. Any other agent client is refused
-  when the generator loads.
+  With MiDojo's Responses API client (the default ``agent_client``) the
+  generator sends every request itself, with the client's settings (``base_url``,
+  ``model``, ``api_key``, ``timeout``, ``instructions``, ``mcp_server_label``)
+  and an MCP tool block that names the interceptor and these tools as
+  ``allowed_tools``, so the agent is offered no other tool; the client's own
+  request path is never used. A request that would offer any tool not so
+  limited raises ``UnlimitedToolsError`` before it is sent, and the episode
+  gets no verdict. An agent client whose constructor takes ``allowed_tools``
+  gets the list as that argument; do not also give ``allowed_tools`` in
+  ``agent_options``. Any other agent client, or a Responses client whose
+  settings are missing, is refused when the generator loads.
 * ``write_disposition``: ``tools`` maps a tool name to ``block`` or
-  ``forward``. A blocked tool is blocked at MiDojo's host interceptor: the agent
-  still sees it, and each call to it is recorded as blocked, answered with an
-  error, and never forwarded to the target. ``forward`` runs the call on the
+  ``forward``, and must be a mapping when given. A blocked tool is blocked at
+  MiDojo's host interceptor: the agent still sees it, and each call to it is
+  recorded as blocked, answered with an error, and never forwarded to the
+  target. ``forward`` runs the call on the
   target, as for any tool not named. ``default`` must be ``forward``.
 
 Settings host interception cannot honour (another disposition or default, an
