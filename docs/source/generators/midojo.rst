@@ -26,10 +26,18 @@ needs a clean start.
 Install
 -------
 
-MiDojo is optional and needs Python 3.12 or later. Install it, with its
-interception SDK's ``mcp`` extra, into garak's environment; garak, plugin
-listing and the plugin cache work without it, and the generator reports the
-missing module when it is loaded.
+MiDojo is optional and needs Python 3.12 or later. Install two packages into
+garak's environment:
+
+* ``midojo``, MiDojo itself;
+* ``midojo_sdk``, MiDojo's interception SDK, with its ``mcp`` extra. It is a
+  separate package in the MiDojo repository (``interception/python-sdk``), for
+  example ``pip install "<path to the MiDojo repository>/interception/python-sdk[mcp]"``.
+  MiDojo's host interception imports it; without it the generator does not load,
+  and its episode tests skip.
+
+garak, plugin listing and the plugin cache work without either; loading the
+generator reports the missing module.
 
 Configure
 ---------
@@ -56,10 +64,14 @@ Configure
   ``turns`` (required), ``plan`` (required, as
   ``midojo_sdk.injection.InjectionPlan.to_data()`` writes it), ``security``,
   ``utility``, ``runtime``, ``environment``, ``suite_name``, ``user_task_id`` and
-  ``injection_task_id``. The fields may be wrapped in an ``episode`` key.
+  ``injection_task_id``. The fields may be wrapped in an ``episode`` key. The
+  ``security`` check is required: without one MiDojo grades every episode
+  ``not_applicable``, so the generator refuses such a spec when it loads.
 * ``payload_key``: place the payload only in the instructions whose
   ``probe_key`` (or ``template_key``) is this; by default every instruction
-  carries it.
+  carries it. Each instruction that carries it must be on the ``tool_output``
+  channel, the only one host interception delivers; a spec that would place the
+  payload anywhere else is refused when the generator loads.
 * ``upstream``: the URL of the target's MCP server.
 * ``bind_host``, ``port``, ``advertise_host``: where each interceptor listens,
   and the host the agent reaches it at (port 0 picks a free port per episode).
@@ -77,7 +89,9 @@ What each output carries
 its ``evaluation_id`` and ``snapshot_id``, the ``verdict`` (MiDojo's grade, with
 the evaluation and snapshot it graded), ``interrupted``, ``reset``,
 ``injection_outcomes`` and ``error``. An episode that failed or was cut short
-has no verdict. ``detectors.midojo.EpisodeVerdict`` scores the verdict.
+has no verdict. ``detectors.midojo.EpisodeVerdict`` scores the verdict, and
+only a valid one: the grade's ``grade_validity.security.status`` must be
+``valid``.
 
 Opting a probe in
 -----------------

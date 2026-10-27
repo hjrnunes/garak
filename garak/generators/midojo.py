@@ -63,6 +63,9 @@ from garak.generators.base import Generator
 PAYLOAD_NOTE = "episode_payload"
 # the episode record each output carries
 EPISODE_NOTE = "midojo_episode"
+# the one channel host interception delivers: the episode context hands the
+# interceptor only the plan's tool-output instructions
+DELIVERED_CHANNEL = "tool_output"
 # the fields of an episode spec, as midojo.episode.Episode takes them
 EPISODE_FIELDS = (
     "runtime",
@@ -138,6 +141,11 @@ def _load_spec(spec) -> dict:
             "An episode needs fixed user turns: the generator sends those, "
             "never the payload, to the agent"
         )
+    if data.get("security") is None:
+        raise BadGeneratorException(
+            "An episode needs a security check: without one MiDojo grades every "
+            "episode not_applicable, and no output could be scored"
+        )
     return copy.deepcopy(data)
 
 
@@ -192,7 +200,8 @@ class EpisodeGenerator(Generator):
 
     generator_family_name = "MiDojo"
     name = "episode"
-    extra_dependency_names = ["midojo"]
+    # host interception needs MiDojo's interception SDK with its mcp extra too
+    extra_dependency_names = ["midojo", "midojo.interception_host"]
     supports_multiple_generations = False
 
     def __init__(self, name="", config_root=_config):
@@ -226,6 +235,13 @@ class EpisodeGenerator(Generator):
                 instruction.get("probe_key"),
                 target.get("template_key"),
             ):
+                channel = instruction.get("channel")
+                if channel != DELIVERED_CHANNEL:
+                    raise BadGeneratorException(
+                        f"A plan instruction on channel {channel!r} would carry the "
+                        "payload, but host interception delivers only "
+                        f"{DELIVERED_CHANNEL!r}; narrow it out with payload_key"
+                    )
                 instruction["payload"] = payload
                 placed += 1
         # the host's substitution map must agree with its template instructions

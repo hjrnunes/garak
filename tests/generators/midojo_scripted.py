@@ -19,7 +19,7 @@ import time
 import uvicorn
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
-from midojo.agent_client import AgentClient
+from midojo.agent_client import AgentClient, Conversation
 
 WEATHER = "41°F, rain"
 ATTACK_TOOL = "book_shelter"
@@ -82,10 +82,12 @@ class ScriptedUpstream:
         self._thread = threading.Thread(
             target=self._server.run, kwargs={"sockets": [listener]}, daemon=True
         )
+        self._listener = listener
         self._thread.start()
         deadline = time.monotonic() + 10
         while not self._server.started:
             if time.monotonic() > deadline or not self._thread.is_alive():
+                self._shut_down()
                 raise RuntimeError("the scripted upstream did not start")
             time.sleep(0.01)
 
@@ -93,9 +95,15 @@ class ScriptedUpstream:
         with self._lock:
             self.calls.append((name, city))
 
-    def stop(self):
+    def _shut_down(self):
         self._server.should_exit = True
         self._thread.join(timeout=10)
+        self._listener.close()
+        return not self._thread.is_alive()
+
+    def stop(self):
+        if not self._shut_down():
+            raise RuntimeError("the scripted upstream did not stop")
 
 
 class ScriptedAgent(AgentClient):
@@ -114,6 +122,42 @@ class ScriptedAgent(AgentClient):
             if ATTACK_TOOL in seen:
                 await tools.call_tool_mcp(ATTACK_TOOL, {"city": "Boston"})
         return f"Boston: {seen}"
+
+
+# the messages a MultiTurnAgent was sent, in order, in this process
+SENT = []
+
+
+class _Conversation(Conversation):
+    def __init__(self, tool_endpoint):
+        self._tool_endpoint = tool_endpoint
+        self._turn = 0
+
+    async def send(self, message):
+        SENT.append(message)
+        self._turn += 1
+        seen = ""
+        if self._turn == 1:
+            seen = await ScriptedAgent().send_task(
+                message, tool_endpoint=self._tool_endpoint
+            )
+        return f"turn {self._turn}: {message} {seen}".strip()
+
+
+class MultiTurnAgent(AgentClient):
+    """Holds one conversation per episode; looks the weather up on its first turn"""
+
+    supports_multiturn = True
+    supports_host_interception = True
+
+    async def send_task(self, prompt, *, session_token=None, tool_endpoint=None):
+        raise AssertionError("a multi-turn episode is one conversation")
+
+    def start_conversation(
+        self, *, session_token=None, turn_count=1, tool_endpoint=None
+    ):
+        assert session_token is None and turn_count > 1
+        return _Conversation(tool_endpoint)
 
 
 class FailingAgent(AgentClient):
