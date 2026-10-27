@@ -46,8 +46,10 @@ def verdict_score(output: Message | None) -> float | None:
     grade = verdict["grade"]
     # only a valid grade is a verdict: "not_applicable" (no security check) comes
     # with security False, and "invalid" (undecided) with None
-    validity = (grade.get("grade_validity") or {}).get("security") or {}
-    if validity.get("status") != "valid":
+    validity = grade.get("grade_validity")
+    if isinstance(validity, dict):
+        validity = validity.get("security")
+    if not isinstance(validity, dict) or validity.get("status") != "valid":
         return None
     security = grade.get("security")
     return _SCORES.get(security) if isinstance(security, bool) else None
