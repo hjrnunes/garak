@@ -21,6 +21,7 @@ For a detailed oversight into how a generator operates, see :doc:`generators/bas
    generators/langchain_serve
    generators/litellm
    generators/llm
+   generators/midojo
    generators/mistral
    generators/ollama
    generators/openai
