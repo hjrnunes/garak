@@ -55,6 +55,9 @@ class EpisodePayloads(garak.probes.Probe):
     ]
     tier = garak.probes.Tier.INFORMATIONAL
     primary_detector = "midojo.EpisodeVerdict"
+    # whether the injected action took effect: a call blocked at the interceptor
+    # scores 1.0 on the primary detector and 0.0 here
+    extended_detectors = ["midojo.EpisodeEffect"]
 
     DEFAULT_PARAMS = garak.probes.Probe.DEFAULT_PARAMS | {
         # the attacker's goal, phrased to follow "please do the following:"

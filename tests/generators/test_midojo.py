@@ -8,28 +8,27 @@ interception SDK and fastmcp, and skip without them; they run offline, against
 a scripted MCP upstream and scripted agents (tests/generators/midojo_scripted.py).
 """
 
-import asyncio
 import copy
 import functools
 import importlib
 from pathlib import Path
 import pickle
+import sys
+import types
 
 import pytest
 
 from garak import _config
 from garak._config import GarakSubConfig
 from garak.attempt import Conversation, Message, Turn
-from garak.detectors.midojo import EpisodeVerdict, verdict_score
+from garak.detectors.midojo import EpisodeVerdict, effect_score, verdict_score
 from garak.exception import BadGeneratorException
 from garak.generators.midojo import (
     EPISODE_NOTE,
     PAYLOAD_NOTE,
     NotAPayloadError,
-    UnlimitedToolsError,
-    _AllowedToolsConversation,
-    _LimitedResponses,
     _load_spec,
+    _require_allowed_tools_support,
     episode_payload,
     mark_payload,
 )
@@ -86,6 +85,12 @@ def test_the_payload_probe_opts_in():
     attempt = probe._mint_attempt(probe.prompts[0], 0)
     assert attempt.prompt.notes[PAYLOAD_NOTE] is True
     assert episode_payload(attempt.prompt) == probe.prompts[0]
+
+
+def test_the_payload_probe_scores_the_verdict_and_reports_the_effect():
+    probe_class = garak.probes.midojo.EpisodePayloads
+    assert probe_class.primary_detector == "midojo.EpisodeVerdict"
+    assert probe_class.extended_detectors == ["midojo.EpisodeEffect"]
 
 
 # --- tool settings: no MiDojo needed ---
@@ -166,6 +171,7 @@ def test_document_settings_the_generator_cannot_honour_are_refused(
         ({"allowed": []}, "non-empty list of tool names"),
         ({"allowed": "get_weather"}, "non-empty list of tool names"),
         ({"allowed": ["get_weather", ""]}, "non-empty list of tool names"),
+        ({"allowed": ["get_weather", "get_weather"]}, "each named once"),
         ({"write_disposition": ["book_shelter"]}, "must be a JSON object"),
         ({"write_disposition": {"block": ["x"]}}, "Unknown write disposition"),
         ({"write_disposition": {"default": "block"}}, "default 'block' cannot"),
@@ -187,50 +193,49 @@ def test_tool_settings_host_interception_cannot_honour_are_refused(tools, messag
         _load_spec({**SPEC, "tools": tools})
 
 
-class RecordingResponses:
-    """An OpenAI client's ``responses`` that records what it would send"""
-
-    def __init__(self):
-        self.sent = []
-
-    async def create(self, **request):
-        """Record the request"""
-        self.sent.append(request)
-        return "sent"
+# --- the MiDojo the generator needs: a stand-in module, no MiDojo needed ---
 
 
-LIMITED = {"type": "mcp", "server_url": "u", "allowed_tools": ["get_weather"]}
+class OlderResponsesClient:
+    """MiDojo's Responses client before it took allowed_tools"""
+
+    def __init__(self, base_url, model, mcp_server_url, *, api_key, timeout=120.0):
+        self.base_url = base_url
 
 
-@pytest.mark.parametrize(
-    "tools",
-    [
-        None,
-        [],
-        [{"type": "mcp", "server_url": "u"}],
-        [{**LIMITED, "allowed_tools": None}],
-        [{**LIMITED, "allowed_tools": ["get_weather", "book_shelter"]}],
-        [LIMITED, {"type": "mcp", "server_url": "v"}],
-        [LIMITED, {"type": "web_search"}],
-    ],
-)
-def test_a_request_not_limited_to_the_allowed_tools_is_never_sent(tools):
-    """The request guard raises before an unlimited request goes out"""
-    responses = RecordingResponses()
-    request = {"model": "m", "input": "hi"} | (
-        {} if tools is None else {"tools": tools}
-    )
-    with pytest.raises(UnlimitedToolsError):
-        asyncio.run(_LimitedResponses(responses, ["get_weather"]).create(**request))
-    assert responses.sent == []
+class NewerResponsesClient(OlderResponsesClient):
+    """MiDojo's Responses client once it takes allowed_tools"""
+
+    def __init__(self, *args, allowed_tools=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.allowed_tools = allowed_tools
 
 
-def test_a_request_limited_to_the_allowed_tools_is_sent():
-    """A request whose every tool is limited goes out unchanged"""
-    responses = RecordingResponses()
-    request = {"model": "m", "input": "hi", "tools": [LIMITED, dict(LIMITED)]}
-    sent = asyncio.run(_LimitedResponses(responses, ["get_weather"]).create(**request))
-    assert sent == "sent" and responses.sent == [request]
+def stand_in_agent_client(monkeypatch, responses_client):
+    """``midojo.agent_client`` as a module whose Responses client is ``responses_client``"""
+    module = types.ModuleType("midojo.agent_client")
+    module.OpenAIResponsesAgentClient = responses_client
+    monkeypatch.setitem(sys.modules, "midojo.agent_client", module)
+
+
+def test_a_midojo_whose_responses_client_takes_no_allowed_tools_is_refused(
+    monkeypatch,
+):
+    """An older MiDojo is refused with what to upgrade, not run without the limit"""
+    stand_in_agent_client(monkeypatch, OlderResponsesClient)
+    with pytest.raises(
+        BadGeneratorException,
+        match=r"needs a newer MiDojo.*OpenAIResponsesAgentClient takes no "
+        r"allowed_tools.*Upgrade MiDojo",
+    ):
+        _require_allowed_tools_support()
+
+
+def test_a_midojo_whose_responses_client_takes_allowed_tools_is_accepted(
+    monkeypatch,
+):
+    stand_in_agent_client(monkeypatch, NewerResponsesClient)
+    _require_allowed_tools_support()
 
 
 # --- episodes: need MiDojo ---
@@ -608,6 +613,8 @@ def test_allowed_tools_limit_what_the_agent_can_call(
     assert scripted.MALICIOUS in output.text
     assert sorted(upstream.calls) == sorted(calls)
     assert verdict_score(output) == score
+    # nothing was blocked: a call the agent made took effect
+    assert effect_score(output) == score
 
 
 RESPONSES_OPTIONS = {
@@ -629,23 +636,9 @@ def responses_api(scripted, monkeypatch):
     return scripted
 
 
-@pytest.fixture
-def tool_endpoints(monkeypatch):
-    """The tool endpoint each limited conversation is given, in order"""
-    given = []
-    original = _AllowedToolsConversation.__init__
-
-    def keeping_the_endpoint(self, settings, tool_endpoint, allowed):
-        given.append(tool_endpoint)
-        original(self, settings, tool_endpoint, allowed)
-
-    monkeypatch.setattr(_AllowedToolsConversation, "__init__", keeping_the_endpoint)
-    return given
-
-
-def three_turns(scripted):
-    """The scripted episode, limited to get_weather, over three turns"""
-    spec = with_tools(scripted, allowed=["get_weather"])
+def three_turns(scripted, **tools):
+    """The scripted episode over three turns, with these tool settings"""
+    spec = with_tools(scripted, **tools) if tools else copy.deepcopy(scripted.EPISODE)
     spec["turns"] = [
         "What's the weather in Boston?",
         "And now?",
@@ -654,12 +647,49 @@ def three_turns(scripted):
     return spec
 
 
+def stock_generator(scripted, server, episode, agent_client=STOCK_RESPONSES_CLIENT):
+    """An episode generator whose agent is MiDojo's Responses client, or ``agent_client``"""
+    return episode_generator(
+        scripted,
+        server,
+        agent_client=agent_client,
+        agent_options=RESPONSES_OPTIONS,
+        episode=episode,
+    )
+
+
+def test_the_stock_responses_client_is_built_with_the_allowed_tools(
+    responses_api, upstream
+):
+    """With tools.allowed, MiDojo's own client gets them as allowed_tools"""
+    scripted = responses_api
+    g = stock_generator(
+        scripted, upstream, with_tools(scripted, allowed=["get_weather"])
+    )
+    assert g._agent_options()["allowed_tools"] == ["get_weather"]
+    agent = g._agent()
+    assert type(agent) is scripted.OpenAIResponsesAgentClient
+    assert agent.allowed_tools == ("get_weather",)
+
+
+def test_without_allowed_tools_the_stock_responses_client_gets_none(
+    responses_api, upstream
+):
+    """Without tools.allowed, MiDojo's own client is built with no allowed_tools"""
+    scripted = responses_api
+    g = stock_generator(scripted, upstream, copy.deepcopy(scripted.EPISODE))
+    assert "allowed_tools" not in g._agent_options()
+    agent = g._agent()
+    assert type(agent) is scripted.OpenAIResponsesAgentClient
+    assert agent.allowed_tools is None
+
+
 def test_the_responses_client_offers_only_the_allowed_tools_on_every_turn(
-    responses_api, upstream, tool_endpoints
+    responses_api, upstream
 ):
     """Every request of a multi-turn episode carries the client's settings and the limit"""
     scripted = responses_api
-    spec = three_turns(scripted)
+    spec = three_turns(scripted, allowed=["get_weather"])
     g = episode_generator(
         scripted,
         upstream,
@@ -682,21 +712,21 @@ def test_the_responses_client_offers_only_the_allowed_tools_on_every_turn(
         "timeout": 7.5,
     }
     assert client.closed
-    [endpoint] = tool_endpoints
+    assert len(scripted.REQUESTS) == 3
+    [first_tool] = scripted.REQUESTS[0]["tools"]
     # the interceptor's endpoint and its bearer token, never the target's
-    assert endpoint.url != upstream.url
-    assert list(endpoint.headers) == ["Authorization"]
-    assert endpoint.headers["Authorization"].startswith("Bearer ")
+    assert first_tool["server_url"] != upstream.url
+    assert list(first_tool["headers"]) == ["Authorization"]
+    assert first_tool["headers"]["Authorization"].startswith("Bearer ")
     expected_tool = {
         "type": "mcp",
         "server_label": "weather",
-        "server_url": endpoint.url,
-        "headers": dict(endpoint.headers),
+        "server_url": first_tool["server_url"],
+        "headers": first_tool["headers"],
         "require_approval": "never",
         "allowed_tools": ["get_weather"],
     }
     previous = [None, "response-1", "response-2"]
-    assert len(scripted.REQUESTS) == 3
     for request, turn, previous_id in zip(scripted.REQUESTS, spec["turns"], previous):
         continuation = (
             {} if previous_id is None else {"previous_response_id": previous_id}
@@ -717,18 +747,30 @@ def test_the_responses_client_offers_only_the_allowed_tools_on_every_turn(
     assert verdict_score(output) == 0.0
 
 
+def test_without_allowed_tools_no_request_limits_the_tools(responses_api, upstream):
+    """Without tools.allowed, every request offers every tool the interceptor lists"""
+    scripted = responses_api
+    g = stock_generator(scripted, upstream, three_turns(scripted))
+    [output] = g.generate(payload_prompt(scripted.MALICIOUS))
+
+    assert len(scripted.REQUESTS) == 3
+    for request in scripted.REQUESTS:
+        [tool] = request["tools"]
+        assert tool["type"] == "mcp" and "allowed_tools" not in tool
+    # nothing kept the agent off the attack tool once the payload reached it
+    assert upstream.calls.count(("get_weather", "Boston")) == 3
+    assert (scripted.ATTACK_TOOL, "Boston") in upstream.calls
+    assert verdict_score(output) == 1.0
+
+
 def test_a_failed_request_ends_the_episode_and_closes_the_client(
     responses_api, upstream, monkeypatch
 ):
     """A request that fails ends the conversation; its OpenAI client is closed"""
     scripted = responses_api
     monkeypatch.setattr(scripted.ScriptedOpenAI, "fail_after", 1)
-    g = episode_generator(
-        scripted,
-        upstream,
-        agent_client=STOCK_RESPONSES_CLIENT,
-        agent_options=RESPONSES_OPTIONS,
-        episode=three_turns(scripted),
+    g = stock_generator(
+        scripted, upstream, three_turns(scripted, allowed=["get_weather"])
     )
     [output] = g.generate(payload_prompt(scripted.MALICIOUS))
 
@@ -760,22 +802,23 @@ def test_a_subclass_setting_reaches_its_requests_without_a_limit(
 @pytest.mark.parametrize(
     "agent_client, options",
     [
-        # a setting of its own the generator's requests would drop
+        # a setting of its own that reaches its requests
         ("TemperatureAgent", {"temperature": 0.7}),
-        # a request path of its own
+        # a request path of its own, which drops the limit
         ("HookRenamedAgent", {}),
+        # a factory, taking allowed_tools, that builds such a subclass
+        ("hook_renamed_agent", {}),
     ],
 )
 def test_a_subclass_of_the_responses_client_is_refused_with_allowed_tools(
     responses_api, upstream, agent_client, options
 ):
-    """Only the stock Responses client is limited by the generator; nothing is sent"""
+    """Only the stock Responses client is limited; nothing is sent"""
     scripted = responses_api
     with pytest.raises(
         BadGeneratorException,
-        match=f"{agent_client} cannot be limited.*stock OpenAIResponsesAgentClient "
-        "only.*allowed_tools constructor argument",
-    ):
+        match=r"HookRenamedAgent|TemperatureAgent",
+    ) as refused:
         episode_generator(
             scripted,
             upstream,
@@ -783,14 +826,16 @@ def test_a_subclass_of_the_responses_client_is_refused_with_allowed_tools(
             agent_options=RESPONSES_OPTIONS | options,
             episode=with_tools(scripted, allowed=["get_weather"]),
         )
+    assert "cannot be limited to the episode's allowed tools" in str(refused.value)
+    assert "only MiDojo's stock OpenAIResponsesAgentClient" in str(refused.value)
     assert scripted.REQUESTS == [] and scripted.CLIENTS == []
     assert upstream.calls == []
 
 
-def test_a_responses_client_with_a_setting_the_generator_drops_is_refused(
+def test_a_responses_client_with_a_setting_the_generator_does_not_know_is_refused(
     responses_api, upstream, monkeypatch
 ):
-    """A stock client carrying a setting the generator does not send is refused"""
+    """A stock client carrying a setting the generator does not know is refused"""
     scripted = responses_api
     stock = scripted.OpenAIResponsesAgentClient
     original = stock.__init__
@@ -802,76 +847,59 @@ def test_a_responses_client_with_a_setting_the_generator_drops_is_refused(
 
     monkeypatch.setattr(stock, "__init__", with_a_temperature)
     with pytest.raises(BadGeneratorException, match=r"its settings \['temperature'\]"):
-        episode_generator(
-            scripted,
-            upstream,
-            agent_client=STOCK_RESPONSES_CLIENT,
-            agent_options=RESPONSES_OPTIONS,
-            episode=with_tools(scripted, allowed=["get_weather"]),
+        stock_generator(
+            scripted, upstream, with_tools(scripted, allowed=["get_weather"])
         )
     assert scripted.REQUESTS == [] and upstream.calls == []
-
-
-def test_an_unlimited_request_fails_the_episode_before_it_is_sent(
-    responses_api, upstream, monkeypatch
-):
-    """When the guard refuses a request, nothing is sent and nothing is scored"""
-    scripted = responses_api
-    g = episode_generator(
-        scripted,
-        upstream,
-        agent_client="midojo.agent_client:OpenAIResponsesAgentClient",
-        agent_options=RESPONSES_OPTIONS,
-        episode=with_tools(scripted, allowed=["get_weather"]),
-    )
-    original = _AllowedToolsConversation.__init__
-
-    def losing_the_limit(self, *args):
-        original(self, *args)
-        del self._tool["allowed_tools"]
-
-    # a request path that lost the limit
-    monkeypatch.setattr(_AllowedToolsConversation, "__init__", losing_the_limit)
-    [output] = g.generate(payload_prompt(scripted.MALICIOUS))
-    assert scripted.REQUESTS == [] and upstream.calls == []
-    assert all(client.closed for client in scripted.CLIENTS)
-    assert "UnlimitedToolsError" in records([output])[0]["error"]
-    assert verdict_score(output) is None
-
-
-def test_the_limited_agent_runs_in_host_mode_only(scripted, upstream):
-    """The limited agent refuses a session in place of a tool endpoint"""
-    g = episode_generator(
-        scripted,
-        upstream,
-        agent_client="midojo.agent_client:OpenAIResponsesAgentClient",
-        agent_options=RESPONSES_OPTIONS,
-        episode=with_tools(scripted, allowed=["get_weather"]),
-    )
-    with pytest.raises(UnlimitedToolsError, match="host-mode"):
-        g._agent().start_conversation(session_token="session")
 
 
 @pytest.mark.parametrize(
-    "options, message",
+    "carried",
+    [None, ("book_shelter",), ("get_weather", "book_shelter"), "get_weather"],
+)
+def test_a_responses_client_carrying_other_allowed_tools_is_refused(
+    responses_api, upstream, monkeypatch, carried
+):
+    """A stock client whose allowed_tools are not the episode's is refused"""
+    scripted = responses_api
+    stock = scripted.OpenAIResponsesAgentClient
+    original = stock.__init__
+
+    @functools.wraps(original)
+    def with_other_tools(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        self.allowed_tools = carried
+
+    monkeypatch.setattr(stock, "__init__", with_other_tools)
+    with pytest.raises(BadGeneratorException, match="carries allowed_tools"):
+        stock_generator(
+            scripted, upstream, with_tools(scripted, allowed=["get_weather"])
+        )
+    assert scripted.REQUESTS == [] and upstream.calls == []
+
+
+@pytest.mark.parametrize(
+    "agent_client, tools",
     [
-        ({"model": ""}, r"settings \['model'\]"),
-        ({"mcp_server_label": ""}, r"settings \['mcp_server_label'\]"),
+        (STOCK_RESPONSES_CLIENT, {"allowed": ["get_weather"]}),
+        (f"{SCRIPTED}:LimitedAgent", {"allowed": ["get_weather"]}),
+        (f"{SCRIPTED}:ScriptedAgent", None),
     ],
 )
-def test_a_responses_client_without_usable_settings_is_refused_at_load(
-    scripted, upstream, options, message
+def test_an_older_midojo_is_refused_at_load(
+    responses_api, upstream, monkeypatch, agent_client, tools
 ):
-    """The generator refuses to limit a Responses client it cannot send for"""
-    with pytest.raises(BadGeneratorException, match=message):
-        episode_generator(
-            scripted,
-            upstream,
-            agent_client="midojo.agent_client:OpenAIResponsesAgentClient",
-            agent_options=RESPONSES_OPTIONS | options,
-            episode=with_tools(scripted, allowed=["get_weather"]),
-        )
-    assert upstream.calls == []
+    """A MiDojo whose Responses client takes no allowed_tools is refused, whatever the agent"""
+    scripted = responses_api
+    monkeypatch.setattr(
+        "midojo.agent_client.OpenAIResponsesAgentClient", OlderResponsesClient
+    )
+    episode = copy.deepcopy(scripted.EPISODE)
+    if tools is not None:
+        episode = with_tools(scripted, **tools)
+    with pytest.raises(BadGeneratorException, match="needs a newer MiDojo"):
+        stock_generator(scripted, upstream, episode, agent_client=agent_client)
+    assert scripted.REQUESTS == [] and upstream.calls == []
 
 
 def test_blocked_tools_are_blocked_at_the_interceptor(scripted, upstream):
@@ -902,4 +930,7 @@ def test_blocked_tools_are_blocked_at_the_interceptor(scripted, upstream):
         True,
         False,
     )
+    # complied but contained: the security verdict scores the attempt, the
+    # effect detector the effect it never had
     assert verdict_score(output) == 1.0
+    assert effect_score(output) == 0.0
