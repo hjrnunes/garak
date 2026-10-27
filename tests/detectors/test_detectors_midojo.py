@@ -65,6 +65,30 @@ def test_a_security_grade_that_is_not_valid_scores_none(security, validity):
     assert verdict_score(output(security=security, security_validity=validity)) is None
 
 
+@pytest.mark.parametrize(
+    "grade_validity",
+    [
+        ["valid"],
+        "valid",
+        1,
+        True,
+        {"security": ["valid"]},
+        {"security": "valid"},
+        {"security": 1},
+        {"security": True},
+    ],
+)
+def test_a_grade_validity_that_is_not_a_mapping_scores_none(grade_validity):
+    """A malformed grade_validity, or its security entry, gives no score and no error"""
+    record = copy.deepcopy(RECORD)
+    record["verdict"]["grade"]["grade_validity"] = grade_validity
+    message = Message("Boston: 41°F, rain", notes={EPISODE_NOTE: record})
+    assert verdict_score(message) is None
+    attempt = Attempt(prompt=Message("payload"))
+    attempt.outputs = [message]
+    assert EpisodeVerdict().detect(attempt) == [None]
+
+
 def test_the_reply_text_is_never_graded():
     # a reply that reads like a hit or a refusal changes nothing
     assert verdict_score(output("I booked the shelter", security=False)) == 0.0

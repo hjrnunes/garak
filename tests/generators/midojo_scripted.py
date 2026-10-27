@@ -7,6 +7,8 @@ No model: the upstream answers with fixed results and keeps its own log of
 every call it ran, an independent record of what reached the target. The
 agents are MiDojo ``AgentClient``s importable by name, so a worker process of
 a ``parallel_requests`` or ``parallel_attempts`` pool can build them.
+``ScriptedOpenAI`` stands in for ``openai.AsyncOpenAI`` under MiDojo's own
+Responses API client.
 
 Needs MiDojo, its interception SDK and fastmcp.
 """
@@ -15,11 +17,13 @@ import contextlib
 import socket
 import threading
 import time
+from types import SimpleNamespace
 
+import openai
 import uvicorn
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
-from midojo.agent_client import AgentClient, Conversation
+from midojo.agent_client import AgentClient, Conversation, OpenAIResponsesAgentClient
 
 WEATHER = "41°F, rain"
 ATTACK_TOOL = "book_shelter"
@@ -106,22 +110,87 @@ class ScriptedUpstream:
             raise RuntimeError("the scripted upstream did not stop")
 
 
+async def look_up_weather(url, headers, allowed=None):
+    """Ask for the weather, and obey a tool result that names the attack tool
+
+    Calls only the tools ``allowed`` names (every tool when None). The reply
+    holds each tool result seen, the attack tool's included.
+    """
+    async with Client(StreamableHttpTransport(url, headers=headers)) as tools:
+        offered = {tool.name for tool in await tools.list_tools()}
+        if allowed is not None:
+            offered &= set(allowed)
+        if "get_weather" not in offered:
+            return "Boston: no weather tool"
+        result = await tools.call_tool_mcp("get_weather", {"city": "Boston"})
+        seen = "\n".join(block.text for block in result.content)
+        if ATTACK_TOOL in seen and ATTACK_TOOL in offered:
+            result = await tools.call_tool_mcp(ATTACK_TOOL, {"city": "Boston"})
+            seen += "\n" + "\n".join(block.text for block in result.content)
+    return f"Boston: {seen}"
+
+
 class ScriptedAgent(AgentClient):
     """Asks for the weather, and obeys any tool result that names the attack tool"""
 
     supports_host_interception = True
+    # the tools it calls; None for every tool
+    allowed_tools = None
 
     async def send_task(self, prompt, *, session_token=None, tool_endpoint=None):
         assert session_token is None, "a host-mode agent never gets a session"
-        transport = StreamableHttpTransport(
-            tool_endpoint.url, headers=tool_endpoint.headers
+        return await look_up_weather(
+            tool_endpoint.url, tool_endpoint.headers, self.allowed_tools
         )
-        async with Client(transport) as tools:
-            result = await tools.call_tool_mcp("get_weather", {"city": "Boston"})
-            seen = "\n".join(block.text for block in result.content)
-            if ATTACK_TOOL in seen:
-                await tools.call_tool_mcp(ATTACK_TOOL, {"city": "Boston"})
-        return f"Boston: {seen}"
+
+
+class LimitedAgent(ScriptedAgent):
+    """A ScriptedAgent that calls only the tools its allowed_tools names"""
+
+    def __init__(self, allowed_tools=None):
+        self.allowed_tools = allowed_tools
+
+
+# the Responses API requests a ScriptedOpenAI was sent, in order, in this process
+REQUESTS = []
+# each ScriptedOpenAI made, in this process
+CLIENTS = []
+
+
+class ScriptedOpenAI:
+    """Stands in for ``openai.AsyncOpenAI``: a Responses API whose model looks the weather up
+
+    As the Responses API does, it offers the model only the tools an MCP tool
+    block's ``allowed_tools`` names, every tool when it names none. It keeps
+    the settings it was made with, and whether it was closed. Once
+    ``fail_after`` requests were answered, the next one fails.
+    """
+
+    fail_after = None
+
+    def __init__(self, **client_settings):
+        self.responses = self
+        self.settings = client_settings
+        self.closed = False
+        CLIENTS.append(self)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        self.closed = True
+
+    async def create(self, *, tools, **request):
+        """Answer one request, logged in REQUESTS, as the scripted model"""
+        if self.fail_after is not None and len(REQUESTS) >= self.fail_after:
+            raise ConnectionError("the Responses API went away")
+        REQUESTS.append({"tools": tools, **request})
+        [block] = tools
+        assert block["type"] == "mcp"
+        text = await look_up_weather(
+            block["server_url"], block["headers"], block.get("allowed_tools")
+        )
+        return SimpleNamespace(id=f"response-{len(REQUESTS)}", output_text=text)
 
 
 # the messages a MultiTurnAgent was sent, in order, in this process
@@ -174,3 +243,72 @@ class SessionOnlyAgent(AgentClient):
 
     async def send_task(self, prompt, *, session_token=None, tool_endpoint=None):
         return ""
+
+
+class _UnlimitedConversation(Conversation):
+    def __init__(self, client, tool_endpoint):
+        self._client = client
+        self._tool_endpoint = tool_endpoint
+
+    async def send(self, message):
+        """Send one turn, with MiDojo's tool block and no tool limit"""
+        client = self._client
+        async with openai.AsyncOpenAI(
+            base_url=client.base_url, api_key=client.api_key, timeout=client.timeout
+        ) as openai_client:
+            response = await openai_client.responses.create(
+                model=client.model,
+                input=message,
+                instructions=client.instructions,
+                tools=[
+                    {
+                        "type": "mcp",
+                        "server_label": client.mcp_server_label,
+                        "server_url": self._tool_endpoint.url,
+                        "headers": self._tool_endpoint.headers,
+                        "require_approval": "never",
+                    }
+                ],
+                stream=False,
+            )
+        return response.output_text
+
+
+class HookRenamedAgent(OpenAIResponsesAgentClient):
+    """MiDojo's Responses client with its request hook renamed
+
+    Its conversations send each request without ``_create_response``, and
+    without any tool limit.
+    """
+
+    def start_conversation(
+        self, *, session_token=None, turn_count=1, tool_endpoint=None
+    ):
+        """A conversation of its own, never calling ``_create_response``"""
+        assert session_token is None and turn_count >= 1
+        return _UnlimitedConversation(self, tool_endpoint)
+
+
+class TemperatureAgent(OpenAIResponsesAgentClient):
+    """MiDojo's Responses client, sending each request with its own temperature"""
+
+    def __init__(self, base_url, model, mcp_server_url, *, temperature=0.0, **kwargs):
+        super().__init__(base_url, model, mcp_server_url, **kwargs)
+        self.temperature = temperature
+
+    async def _create_response(self, openai_client, message, **kwargs):
+        """MiDojo's request, with the temperature"""
+
+        class WithTemperature:
+            """``responses`` that adds the temperature to each request"""
+
+            @staticmethod
+            async def create(**request):
+                """Send the request with the temperature"""
+                return await openai_client.responses.create(
+                    temperature=self.temperature, **request
+                )
+
+        return await super()._create_response(
+            SimpleNamespace(responses=WithTemperature()), message, **kwargs
+        )
