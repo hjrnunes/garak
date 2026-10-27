@@ -19,10 +19,11 @@ import threading
 import time
 from types import SimpleNamespace
 
+import openai
 import uvicorn
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
-from midojo.agent_client import AgentClient, Conversation
+from midojo.agent_client import AgentClient, Conversation, OpenAIResponsesAgentClient
 
 WEATHER = "41°F, rain"
 ATTACK_TOOL = "book_shelter"
@@ -231,3 +232,47 @@ class SessionOnlyAgent(AgentClient):
 
     async def send_task(self, prompt, *, session_token=None, tool_endpoint=None):
         return ""
+
+
+class _UnlimitedConversation(Conversation):
+    def __init__(self, client, tool_endpoint):
+        self._client = client
+        self._tool_endpoint = tool_endpoint
+
+    async def send(self, message):
+        """Send one turn, with MiDojo's tool block and no tool limit"""
+        client = self._client
+        async with openai.AsyncOpenAI(
+            base_url=client.base_url, api_key=client.api_key, timeout=client.timeout
+        ) as openai_client:
+            response = await openai_client.responses.create(
+                model=client.model,
+                input=message,
+                instructions=client.instructions,
+                tools=[
+                    {
+                        "type": "mcp",
+                        "server_label": client.mcp_server_label,
+                        "server_url": self._tool_endpoint.url,
+                        "headers": self._tool_endpoint.headers,
+                        "require_approval": "never",
+                    }
+                ],
+                stream=False,
+            )
+        return response.output_text
+
+
+class HookRenamedAgent(OpenAIResponsesAgentClient):
+    """MiDojo's Responses client with its request hook renamed
+
+    Its conversations send each request without ``_create_response``, and
+    without any tool limit.
+    """
+
+    def start_conversation(
+        self, *, session_token=None, turn_count=1, tool_endpoint=None
+    ):
+        """A conversation of its own, never calling ``_create_response``"""
+        assert session_token is None and turn_count >= 1
+        return _UnlimitedConversation(self, tool_endpoint)

@@ -39,15 +39,24 @@ A probe opts in by marking each attempt prompt as a payload:
 the prompt must be one user turn, the payload. Any other prompt raises
 :class:`NotAPayloadError` before an episode runs.
 
-Tool settings
--------------
+Document settings
+-----------------
 
-An episode document may give ``tools`` beside its fields:
+An episode document may give settings beside its fields: ``tools`` and
+``interception``. Any other key beside the fields is refused when the generator
+loads, in a flat spec and beside a wrapped ``episode`` alike.
+
+``interception`` may only name the host interception the generator runs:
+``"host"`` or ``{"mode": "host"}``.
+
+``tools`` limits and blocks the agent's tools:
 
 * ``allowed``: the only tools the agent may call. An agent client whose
-  constructor takes ``allowed_tools`` gets them; MiDojo's Responses API client
-  names them as ``allowed_tools`` in the MCP tool block of every request. Any
-  other client is refused when the generator loads.
+  constructor takes ``allowed_tools`` gets them. For MiDojo's Responses API
+  client the generator sends every request itself, with the client's settings
+  and an MCP tool block naming the allowed tools, and refuses to send one that
+  is not so limited (:class:`UnlimitedToolsError`). Any other client is refused
+  when the generator loads.
 * ``write_disposition``: ``{"default": "forward", "tools": {name: disposition}}``.
   A tool whose disposition is ``block`` is blocked at MiDojo's host
   interceptor: the agent still sees it, its calls are recorded as blocked and
@@ -55,6 +64,7 @@ An episode document may give ``tools`` beside its fields:
 """
 
 import asyncio
+import contextlib
 import copy
 import functools
 import importlib
@@ -63,7 +73,6 @@ import json
 import logging
 import os
 from pathlib import Path
-from types import SimpleNamespace
 from typing import List, Union
 
 from garak import _config
@@ -96,8 +105,13 @@ EPISODE_FIELDS = (
 )
 # MiDojo's Responses API agent client, the default agent client
 RESPONSES_AGENT_CLIENT = "midojo.agent_client:OpenAIResponsesAgentClient"
-# the tool settings an episode document may give beside its fields
+# the settings an episode document may give beside its fields; the generator
+# honours each one
 TOOLS_FIELD = "tools"
+INTERCEPTION_FIELD = "interception"
+DOCUMENT_SETTINGS = (TOOLS_FIELD, INTERCEPTION_FIELD)
+# the one interception the generator runs: MiDojo's host interception
+HOST_MODE = "host"
 TOOLS_KEYS = ("allowed", "write_disposition")
 WRITE_DISPOSITION_KEYS = ("default", "tools")
 # the write dispositions host interception honours: run the call on the target,
@@ -108,6 +122,10 @@ BLOCK = "block"
 
 class NotAPayloadError(GarakException):
     """A prompt reached the episode generator without being a payload"""
+
+
+class UnlimitedToolsError(GarakException):
+    """A Responses API request would offer the agent tools beyond the allowed ones"""
 
 
 def mark_payload(conversation: Conversation) -> Conversation:
@@ -168,12 +186,19 @@ def _load_spec(spec) -> tuple:
             raise BadGeneratorException(f"Cannot read episode {spec}: {e}") from e
     if not isinstance(spec, dict):
         raise BadGeneratorException("An episode spec must be a JSON object")
-    # a document may wrap the episode's fields in "episode", its tool settings
-    # beside them
+    # a document may wrap the episode's fields in "episode", its settings beside
+    # them; a flat spec gives its settings among the fields
     if isinstance(spec.get("episode"), dict):
         data = spec["episode"]
+        unknown = sorted(set(spec) - {"episode", *DOCUMENT_SETTINGS})
+        if unknown:
+            raise BadGeneratorException(
+                f"Unknown episode document settings: {unknown}; beside a wrapped "
+                f"episode the generator honours only {list(DOCUMENT_SETTINGS)}"
+            )
     else:
-        data = {k: v for k, v in spec.items() if k != TOOLS_FIELD}
+        data = {k: v for k, v in spec.items() if k not in DOCUMENT_SETTINGS}
+    _check_interception(spec.get(INTERCEPTION_FIELD, HOST_MODE))
     tools = _tool_settings(spec.get(TOOLS_FIELD))
     unknown = sorted(set(data) - set(EPISODE_FIELDS))
     if unknown:
@@ -191,6 +216,15 @@ def _load_spec(spec) -> tuple:
             "episode not_applicable, and no output could be scored"
         )
     return copy.deepcopy(data), tools
+
+
+def _check_interception(interception) -> None:
+    """Refuse an interception setting other than the host interception the generator runs"""
+    if interception not in (HOST_MODE, {"mode": HOST_MODE}):
+        raise BadGeneratorException(
+            f"Interception {interception!r} cannot be honoured: the generator runs "
+            f"MiDojo's host interception in front of upstream, {HOST_MODE!r}"
+        )
 
 
 def _tool_settings(tools) -> tuple:
@@ -231,7 +265,7 @@ def _tool_settings(tools) -> tuple:
             f"interception blocks only the tools tools.write_disposition.tools "
             f"marks {BLOCK!r}; the default must be {FORWARD!r}"
         )
-    named = disposition.get("tools") or {}
+    named = disposition.get("tools", {})
     if not isinstance(named, dict) or not all(
         isinstance(name, str) and name for name in named
     ):
@@ -250,52 +284,148 @@ def _tool_settings(tools) -> tuple:
     return allowed, sorted(name for name, value in named.items() if value == BLOCK)
 
 
-class _AllowedToolsResponses:
-    """An OpenAI client's ``responses``, its MCP tool blocks limited to ``allowed``"""
+class _LimitedResponses:
+    """An OpenAI client's ``responses``, refusing any request not limited to ``allowed``
 
-    def __init__(self, openai_client, allowed):
-        self._responses = openai_client.responses
+    Every tool a request offers must be an MCP tool block whose
+    ``allowed_tools`` is exactly ``allowed``; any other request raises
+    :class:`UnlimitedToolsError` before it is sent.
+    """
+
+    def __init__(self, responses, allowed):
+        self._responses = responses
         self._allowed = list(allowed)
 
-    async def create(self, *, tools=(), **request):
-        """Create the response, each MCP tool block naming the allowed tools"""
-        tools = [
-            (
-                {**tool, "allowed_tools": list(self._allowed)}
-                if tool.get("type") == "mcp"
-                else tool
-            )
+    async def create(self, **request):
+        """Send the request, once its every tool is an MCP block limited to ``allowed``"""
+        tools = request.get("tools")
+        if not tools or not all(
+            isinstance(tool, dict)
+            and tool.get("type") == "mcp"
+            and tool.get("allowed_tools") == self._allowed
             for tool in tools
-        ]
-        return await self._responses.create(tools=tools, **request)
-
-
-@functools.cache
-def _allowed_tools_client(base, allowed: tuple):
-    """``base``, a MiDojo Responses API client, limited to the ``allowed`` tools
-
-    Each request's MCP tool block names them as the Responses API's
-    ``allowed_tools``, so the agent is offered no other tool.
-    """
-    responses_client = _import_object(RESPONSES_AGENT_CLIENT)
-    if not (isinstance(base, type) and issubclass(base, responses_client)):
-        raise BadGeneratorException(
-            f"Agent client {getattr(base, '__qualname__', base)} cannot be limited "
-            "to the episode's allowed tools: it takes no allowed_tools, and is "
-            "not MiDojo's OpenAIResponsesAgentClient"
-        )
-
-    class AllowedToolsClient(base):
-        """MiDojo's Responses API client, offering the agent only the allowed tools"""
-
-        async def _create_response(self, openai_client, message, **kwargs):
-            """MiDojo's request, its MCP tool block naming the allowed tools"""
-            limited = SimpleNamespace(
-                responses=_AllowedToolsResponses(openai_client, allowed)
+        ):
+            raise UnlimitedToolsError(
+                "A Responses API request must offer only MCP tools limited to the "
+                f"allowed tools {self._allowed}; it was not sent"
             )
-            return await super()._create_response(limited, message, **kwargs)
+        return await self._responses.create(**request)
 
-    return AllowedToolsClient
+
+class _AllowedToolsConversation:
+    """One episode's conversation over the Responses API, limited to the allowed tools
+
+    Each turn is one request through :class:`_LimitedResponses`, chained on the
+    previous reply's ID, with an MCP tool block that names the interceptor's
+    URL and bearer token and the allowed tools.
+    """
+
+    def __init__(self, settings: dict, tool_endpoint, allowed):
+        self._settings = settings
+        self._tool = {
+            "type": "mcp",
+            "server_label": settings["mcp_server_label"],
+            "server_url": tool_endpoint.url,
+            "headers": dict(tool_endpoint.headers),
+            "require_approval": "never",
+            "allowed_tools": list(allowed),
+        }
+        self._allowed = list(allowed)
+        self._responses = None
+        self._previous_response_id = None
+        self._resources = contextlib.AsyncExitStack()
+
+    async def send(self, message: str) -> str:
+        """Send one turn; return the agent's reply"""
+        if self._responses is None:
+            from openai import AsyncOpenAI
+
+            client = await self._resources.enter_async_context(
+                AsyncOpenAI(
+                    base_url=self._settings["base_url"],
+                    api_key=self._settings["api_key"],
+                    timeout=self._settings["timeout"],
+                )
+            )
+            self._responses = _LimitedResponses(client.responses, self._allowed)
+        continuation = (
+            {"previous_response_id": self._previous_response_id}
+            if self._previous_response_id is not None
+            else {}
+        )
+        response = await self._responses.create(
+            model=self._settings["model"],
+            input=message,
+            instructions=self._settings["instructions"],
+            tools=[dict(self._tool)],
+            stream=False,
+            **continuation,
+        )
+        self._previous_response_id = response.id
+        return response.output_text
+
+    async def aclose(self) -> None:
+        """Close the OpenAI client"""
+        await self._resources.aclose()
+
+
+class _AllowedToolsAgent:
+    """MiDojo's Responses API client, its every request sent by the generator
+
+    Reads the client's settings, and starts conversations of its own
+    (:class:`_AllowedToolsConversation`) in place of the client's, so no request
+    leaves without the allowed tools, whatever the client's own request path.
+    """
+
+    def __init__(self, client, allowed):
+        responses_client = _import_object(RESPONSES_AGENT_CLIENT)
+        if not isinstance(client, responses_client):
+            raise BadGeneratorException(
+                f"Agent client {type(client).__qualname__} cannot be limited to the "
+                "episode's allowed tools: it takes no allowed_tools, and is not "
+                "MiDojo's OpenAIResponsesAgentClient"
+            )
+        settings = {
+            name: getattr(client, name, None)
+            for name in (
+                "base_url",
+                "model",
+                "api_key",
+                "timeout",
+                "instructions",
+                "mcp_server_label",
+            )
+        }
+        unusable = sorted(
+            name
+            for name in ("base_url", "model", "mcp_server_label")
+            if not isinstance(settings[name], str) or not settings[name]
+        ) + sorted(
+            name
+            for name in ("api_key", "instructions")
+            if not isinstance(settings[name], str)
+        )
+        if not isinstance(settings["timeout"], (int, float)):
+            unusable.append("timeout")
+        if unusable:
+            raise BadGeneratorException(
+                f"Agent client {type(client).__qualname__} cannot be limited to the "
+                f"episode's allowed tools: its Responses API settings {unusable} "
+                "are missing or unusable"
+            )
+        self._settings = settings
+        self._allowed = list(allowed)
+
+    def start_conversation(
+        self, *, session_token=None, turn_count=1, tool_endpoint=None
+    ):
+        """A conversation limited to the allowed tools, in host mode only"""
+        del turn_count  # each turn is one request, chained on the previous reply
+        if session_token is not None or tool_endpoint is None:
+            raise UnlimitedToolsError(
+                "The allowed tools are sent only to a host-mode agent's tool endpoint"
+            )
+        return _AllowedToolsConversation(self._settings, tool_endpoint, self._allowed)
 
 
 @functools.cache
@@ -391,9 +521,10 @@ class EpisodeGenerator(Generator):
                 f"Agent client {self.agent_client} cannot be given a tool "
                 "endpoint; the episode generator runs host interception only"
             )
-        # refuses an agent client that cannot be limited to the allowed tools
-        self._agent_class()
         self._agent_options()
+        # refuses an agent client that cannot be limited to the allowed tools
+        if self._allowed_tools is not None:
+            self._agent()
         # build the episode once, so a spec MiDojo refuses fails here
         try:
             self._build_episode("")
@@ -450,15 +581,20 @@ class EpisodeGenerator(Generator):
                 f"Cannot load agent client {self.agent_client}: {e}"
             ) from e
 
-    def _agent_class(self):
-        """The agent client, limited to the episode's allowed tools when it has them"""
+    def _agent(self):
+        """The agent, limited to the episode's allowed tools when it has them
+
+        A client that takes ``allowed_tools`` is given them. Otherwise MiDojo's
+        Responses API client is wrapped, so the generator sends its requests.
+        """
         factory = self._agent_factory()
+        agent = factory(**self._agent_options())
         if (
             self._allowed_tools is None
             or "allowed_tools" in inspect.signature(factory).parameters
         ):
-            return factory
-        return _allowed_tools_client(factory, tuple(self._allowed_tools))
+            return agent
+        return _AllowedToolsAgent(agent, self._allowed_tools)
 
     def _agent_options(self) -> dict:
         options = dict(self.agent_options or {})
@@ -504,7 +640,7 @@ class EpisodeGenerator(Generator):
             port=self.port,
             advertise_host=self.advertise_host,
         )
-        agent = self._agent_class()(**self._agent_options())
+        agent = self._agent()
         # a fresh runtime and in-process control plane; reset is never asked for
         context = midojo.open_episode(episode, interception=interception)
         error = None
