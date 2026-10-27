@@ -94,6 +94,7 @@ TESTABLE_GENERATORS = [
         "generators.huggingface.Model",  # model name restrictions
         "generators.huggingface.Pipeline",  # model name restrictions
         "generators.langchain.LangChainLLMGenerator",  # model name restrictions
+        "generators.midojo.EpisodeGenerator",  # requires an episode spec and MiDojo, tested in own test file
     ]
 ]
 
