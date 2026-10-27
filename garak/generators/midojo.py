@@ -38,16 +38,32 @@ A probe opts in by marking each attempt prompt as a payload:
 ``Conversation.notes["episode_payload"] = True`` (see :func:`mark_payload`), and
 the prompt must be one user turn, the payload. Any other prompt raises
 :class:`NotAPayloadError` before an episode runs.
+
+Tool settings
+-------------
+
+An episode document may give ``tools`` beside its fields:
+
+* ``allowed``: the only tools the agent may call. An agent client whose
+  constructor takes ``allowed_tools`` gets them; MiDojo's Responses API client
+  names them as ``allowed_tools`` in the MCP tool block of every request. Any
+  other client is refused when the generator loads.
+* ``write_disposition``: ``{"default": "forward", "tools": {name: disposition}}``.
+  A tool whose disposition is ``block`` is blocked at MiDojo's host
+  interceptor: the agent still sees it, its calls are recorded as blocked and
+  never reach the target. ``forward`` runs the call on the target.
 """
 
 import asyncio
 import copy
+import functools
 import importlib
 import inspect
 import json
 import logging
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import List, Union
 
 from garak import _config
@@ -78,6 +94,16 @@ EPISODE_FIELDS = (
     "user_task_id",
     "injection_task_id",
 )
+# MiDojo's Responses API agent client, the default agent client
+RESPONSES_AGENT_CLIENT = "midojo.agent_client:OpenAIResponsesAgentClient"
+# the tool settings an episode document may give beside its fields
+TOOLS_FIELD = "tools"
+TOOLS_KEYS = ("allowed", "write_disposition")
+WRITE_DISPOSITION_KEYS = ("default", "tools")
+# the write dispositions host interception honours: run the call on the target,
+# or block it at the interceptor
+FORWARD = "forward"
+BLOCK = "block"
 
 
 class NotAPayloadError(GarakException):
@@ -114,8 +140,21 @@ def episode_payload(prompt: Conversation) -> str:
     return text
 
 
-def _load_spec(spec) -> dict:
-    """Return the episode fields ``spec`` gives: a JSON file path, or a mapping"""
+def _import_object(name: str):
+    """The object ``name`` names, as ``module:attr`` or ``module.attr``"""
+    module_name, sep, attr = name.partition(":")
+    if not sep:
+        module_name, _, attr = name.rpartition(".")
+    return getattr(importlib.import_module(module_name), attr)
+
+
+def _load_spec(spec) -> tuple:
+    """Return the episode fields and tool settings ``spec`` gives
+
+    ``spec`` is a JSON file path, or a mapping. The tool settings are the tools
+    the agent may call (None for every tool) and those blocked at the
+    interceptor; see :func:`_tool_settings`.
+    """
     if spec is None:
         raise BadGeneratorException(
             "generators.midojo.EpisodeGenerator needs an episode: "
@@ -129,8 +168,13 @@ def _load_spec(spec) -> dict:
             raise BadGeneratorException(f"Cannot read episode {spec}: {e}") from e
     if not isinstance(spec, dict):
         raise BadGeneratorException("An episode spec must be a JSON object")
-    # a document may wrap the episode's fields in "episode"
-    data = spec["episode"] if isinstance(spec.get("episode"), dict) else spec
+    # a document may wrap the episode's fields in "episode", its tool settings
+    # beside them
+    if isinstance(spec.get("episode"), dict):
+        data = spec["episode"]
+    else:
+        data = {k: v for k, v in spec.items() if k != TOOLS_FIELD}
+    tools = _tool_settings(spec.get(TOOLS_FIELD))
     unknown = sorted(set(data) - set(EPISODE_FIELDS))
     if unknown:
         raise BadGeneratorException(f"Unknown episode fields: {unknown}")
@@ -146,7 +190,134 @@ def _load_spec(spec) -> dict:
             "An episode needs a security check: without one MiDojo grades every "
             "episode not_applicable, and no output could be scored"
         )
-    return copy.deepcopy(data)
+    return copy.deepcopy(data), tools
+
+
+def _tool_settings(tools) -> tuple:
+    """Return the tools the agent may call (None for every tool), and the blocked ones
+
+    Refuses settings host interception cannot honour.
+    """
+    if tools is None:
+        return None, []
+    if not isinstance(tools, dict):
+        raise BadGeneratorException("An episode's tools must be a JSON object")
+    unknown = sorted(set(tools) - set(TOOLS_KEYS))
+    if unknown:
+        raise BadGeneratorException(f"Unknown episode tool settings: {unknown}")
+    allowed = tools.get("allowed")
+    if allowed is not None and not (
+        isinstance(allowed, list)
+        and allowed
+        and all(isinstance(name, str) and name for name in allowed)
+    ):
+        raise BadGeneratorException(
+            "An episode's tools.allowed must be a non-empty list of tool names"
+        )
+    disposition = tools.get("write_disposition")
+    if disposition is None:
+        return allowed, []
+    if not isinstance(disposition, dict):
+        raise BadGeneratorException(
+            "An episode's tools.write_disposition must be a JSON object"
+        )
+    unknown = sorted(set(disposition) - set(WRITE_DISPOSITION_KEYS))
+    if unknown:
+        raise BadGeneratorException(f"Unknown write disposition settings: {unknown}")
+    default = disposition.get("default", FORWARD)
+    if default != FORWARD:
+        raise BadGeneratorException(
+            f"Write disposition default {default!r} cannot be honoured: host "
+            f"interception blocks only the tools tools.write_disposition.tools "
+            f"marks {BLOCK!r}; the default must be {FORWARD!r}"
+        )
+    named = disposition.get("tools") or {}
+    if not isinstance(named, dict) or not all(
+        isinstance(name, str) and name for name in named
+    ):
+        raise BadGeneratorException(
+            "An episode's tools.write_disposition.tools must map tool names to "
+            "dispositions"
+        )
+    refused = {
+        name: value for name, value in named.items() if value not in (FORWARD, BLOCK)
+    }
+    if refused:
+        raise BadGeneratorException(
+            f"Write dispositions cannot be honoured: {refused}; host interception "
+            f"honours {FORWARD!r} and {BLOCK!r}"
+        )
+    return allowed, sorted(name for name, value in named.items() if value == BLOCK)
+
+
+class _AllowedToolsResponses:
+    """An OpenAI client's ``responses``, its MCP tool blocks limited to ``allowed``"""
+
+    def __init__(self, openai_client, allowed):
+        self._responses = openai_client.responses
+        self._allowed = list(allowed)
+
+    async def create(self, *, tools=(), **request):
+        """Create the response, each MCP tool block naming the allowed tools"""
+        tools = [
+            (
+                {**tool, "allowed_tools": list(self._allowed)}
+                if tool.get("type") == "mcp"
+                else tool
+            )
+            for tool in tools
+        ]
+        return await self._responses.create(tools=tools, **request)
+
+
+@functools.cache
+def _allowed_tools_client(base, allowed: tuple):
+    """``base``, a MiDojo Responses API client, limited to the ``allowed`` tools
+
+    Each request's MCP tool block names them as the Responses API's
+    ``allowed_tools``, so the agent is offered no other tool.
+    """
+    responses_client = _import_object(RESPONSES_AGENT_CLIENT)
+    if not (isinstance(base, type) and issubclass(base, responses_client)):
+        raise BadGeneratorException(
+            f"Agent client {getattr(base, '__qualname__', base)} cannot be limited "
+            "to the episode's allowed tools: it takes no allowed_tools, and is "
+            "not MiDojo's OpenAIResponsesAgentClient"
+        )
+
+    class AllowedToolsClient(base):
+        """MiDojo's Responses API client, offering the agent only the allowed tools"""
+
+        async def _create_response(self, openai_client, message, **kwargs):
+            """MiDojo's request, its MCP tool block naming the allowed tools"""
+            limited = SimpleNamespace(
+                responses=_AllowedToolsResponses(openai_client, allowed)
+            )
+            return await super()._create_response(limited, message, **kwargs)
+
+    return AllowedToolsClient
+
+
+@functools.cache
+def _blocking_interception(blocked: tuple):
+    """MiDojo's ``HostInterception``, its interceptors blocking the ``blocked`` tools
+
+    The agent still sees a blocked tool; MiDojo records each call to it as
+    blocked, answers it with an error and never forwards it to the upstream.
+    """
+    from midojo.interception_host import HostInterception
+
+    class BlockingInterception(HostInterception):
+        """Host interception whose interceptors block the episode's blocked tools"""
+
+        def interceptor(self, recorder, *, evaluation_id, plan):
+            """A new interceptor for one evaluation, blocking the blocked tools"""
+            made = super().interceptor(recorder, evaluation_id=evaluation_id, plan=plan)
+            if blocked:
+                made.mcp.block(*blocked)
+            return made
+
+    return BlockingInterception
 
 
 def _outcome(outcome) -> dict:
@@ -177,7 +348,8 @@ class EpisodeGenerator(Generator):
     DEFAULT_PARAMS = Generator.DEFAULT_PARAMS | {
         # path of an episode JSON file, or its fields: runtime, turns, plan (as
         # midojo_sdk.injection.InjectionPlan.to_data() writes it), security,
-        # utility, environment, and provenance IDs; may be wrapped in "episode"
+        # utility, environment, and provenance IDs; may be wrapped in "episode",
+        # with its tool settings ("tools": allowed, write_disposition) beside them
         "episode": None,
         # the plan instructions that carry the payload: those whose probe_key or
         # template_key equals this; None for every instruction
@@ -191,7 +363,7 @@ class EpisodeGenerator(Generator):
         "advertise_host": None,
         # the MiDojo AgentClient that reaches the agent, as "module:Class", and
         # its keyword arguments; it must support host interception
-        "agent_client": "midojo.agent_client:OpenAIResponsesAgentClient",
+        "agent_client": RESPONSES_AGENT_CLIENT,
         "agent_options": {},
         # environment variable an agent client's api_key is read from, when
         # agent_options gives none
@@ -206,7 +378,9 @@ class EpisodeGenerator(Generator):
 
     def __init__(self, name="", config_root=_config):
         super().__init__(name, config_root=config_root)
-        self._episode_data = _load_spec(self.episode)
+        self._episode_data, (self._allowed_tools, self._blocked_tools) = _load_spec(
+            self.episode
+        )
         if not self.upstream:
             raise BadGeneratorException(
                 "generators.midojo.EpisodeGenerator needs upstream: "
@@ -217,6 +391,8 @@ class EpisodeGenerator(Generator):
                 f"Agent client {self.agent_client} cannot be given a tool "
                 "endpoint; the episode generator runs host interception only"
             )
+        # refuses an agent client that cannot be limited to the allowed tools
+        self._agent_class()
         self._agent_options()
         # build the episode once, so a spec MiDojo refuses fails here
         try:
@@ -267,19 +443,33 @@ class EpisodeGenerator(Generator):
         return Episode(plan=plan, **fields)
 
     def _agent_factory(self):
-        module_name, sep, attr = self.agent_client.partition(":")
-        if not sep:
-            module_name, _, attr = self.agent_client.rpartition(".")
         try:
-            return getattr(importlib.import_module(module_name), attr)
+            return _import_object(self.agent_client)
         except (ImportError, AttributeError, ValueError) as e:
             raise BadGeneratorException(
                 f"Cannot load agent client {self.agent_client}: {e}"
             ) from e
 
+    def _agent_class(self):
+        """The agent client, limited to the episode's allowed tools when it has them"""
+        factory = self._agent_factory()
+        if (
+            self._allowed_tools is None
+            or "allowed_tools" in inspect.signature(factory).parameters
+        ):
+            return factory
+        return _allowed_tools_client(factory, tuple(self._allowed_tools))
+
     def _agent_options(self) -> dict:
         options = dict(self.agent_options or {})
         parameters = inspect.signature(self._agent_factory()).parameters
+        if self._allowed_tools is not None and "allowed_tools" in parameters:
+            if "allowed_tools" in options:
+                raise BadGeneratorException(
+                    "The episode's tools.allowed limits the agent: give no "
+                    "allowed_tools in agent_options"
+                )
+            options["allowed_tools"] = list(self._allowed_tools)
         # in host mode the agent's MCP server is the interceptor, never a URL given here
         if "mcp_server_url" in parameters:
             options.setdefault("mcp_server_url", None)
@@ -306,16 +496,15 @@ class EpisodeGenerator(Generator):
 
     async def _run_episode(self, payload: str) -> Message:
         import midojo
-        from midojo.interception_host import HostInterception
 
         episode = self._build_episode(payload)
-        interception = HostInterception(
+        interception = _blocking_interception(tuple(self._blocked_tools))(
             upstream=self.upstream,
             bind_host=self.bind_host,
             port=self.port,
             advertise_host=self.advertise_host,
         )
-        agent = self._agent_factory()(**self._agent_options())
+        agent = self._agent_class()(**self._agent_options())
         # a fresh runtime and in-process control plane; reset is never asked for
         context = midojo.open_episode(episode, interception=interception)
         error = None

@@ -7,6 +7,8 @@ No model: the upstream answers with fixed results and keeps its own log of
 every call it ran, an independent record of what reached the target. The
 agents are MiDojo ``AgentClient``s importable by name, so a worker process of
 a ``parallel_requests`` or ``parallel_attempts`` pool can build them.
+``ScriptedOpenAI`` stands in for ``openai.AsyncOpenAI`` under MiDojo's own
+Responses API client.
 
 Needs MiDojo, its interception SDK and fastmcp.
 """
@@ -15,6 +17,7 @@ import contextlib
 import socket
 import threading
 import time
+from types import SimpleNamespace
 
 import uvicorn
 from fastmcp import Client, FastMCP
@@ -106,22 +109,76 @@ class ScriptedUpstream:
             raise RuntimeError("the scripted upstream did not stop")
 
 
+async def look_up_weather(url, headers, allowed=None):
+    """Ask for the weather, and obey a tool result that names the attack tool
+
+    Calls only the tools ``allowed`` names (every tool when None). The reply
+    holds each tool result seen, the attack tool's included.
+    """
+    async with Client(StreamableHttpTransport(url, headers=headers)) as tools:
+        offered = {tool.name for tool in await tools.list_tools()}
+        if allowed is not None:
+            offered &= set(allowed)
+        if "get_weather" not in offered:
+            return "Boston: no weather tool"
+        result = await tools.call_tool_mcp("get_weather", {"city": "Boston"})
+        seen = "\n".join(block.text for block in result.content)
+        if ATTACK_TOOL in seen and ATTACK_TOOL in offered:
+            result = await tools.call_tool_mcp(ATTACK_TOOL, {"city": "Boston"})
+            seen += "\n" + "\n".join(block.text for block in result.content)
+    return f"Boston: {seen}"
+
+
 class ScriptedAgent(AgentClient):
     """Asks for the weather, and obeys any tool result that names the attack tool"""
 
     supports_host_interception = True
+    # the tools it calls; None for every tool
+    allowed_tools = None
 
     async def send_task(self, prompt, *, session_token=None, tool_endpoint=None):
         assert session_token is None, "a host-mode agent never gets a session"
-        transport = StreamableHttpTransport(
-            tool_endpoint.url, headers=tool_endpoint.headers
+        return await look_up_weather(
+            tool_endpoint.url, tool_endpoint.headers, self.allowed_tools
         )
-        async with Client(transport) as tools:
-            result = await tools.call_tool_mcp("get_weather", {"city": "Boston"})
-            seen = "\n".join(block.text for block in result.content)
-            if ATTACK_TOOL in seen:
-                await tools.call_tool_mcp(ATTACK_TOOL, {"city": "Boston"})
-        return f"Boston: {seen}"
+
+
+class LimitedAgent(ScriptedAgent):
+    """A ScriptedAgent that calls only the tools its allowed_tools names"""
+
+    def __init__(self, allowed_tools=None):
+        self.allowed_tools = allowed_tools
+
+
+# the Responses API requests a ScriptedOpenAI was sent, in order, in this process
+REQUESTS = []
+
+
+class ScriptedOpenAI:
+    """Stands in for ``openai.AsyncOpenAI``: a Responses API whose model looks the weather up
+
+    As the Responses API does, it offers the model only the tools an MCP tool
+    block's ``allowed_tools`` names, every tool when it names none.
+    """
+
+    def __init__(self, **_client_settings):
+        self.responses = self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return None
+
+    async def create(self, *, tools, **request):
+        """Answer one request, logged in REQUESTS, as the scripted model"""
+        REQUESTS.append({"tools": tools, **request})
+        [block] = tools
+        assert block["type"] == "mcp"
+        text = await look_up_weather(
+            block["server_url"], block["headers"], block.get("allowed_tools")
+        )
+        return SimpleNamespace(id=f"response-{len(REQUESTS)}", output_text=text)
 
 
 # the messages a MultiTurnAgent was sent, in order, in this process

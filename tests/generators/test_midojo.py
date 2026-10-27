@@ -24,6 +24,7 @@ from garak.generators.midojo import (
     EPISODE_NOTE,
     PAYLOAD_NOTE,
     NotAPayloadError,
+    _load_spec,
     episode_payload,
     mark_payload,
 )
@@ -80,6 +81,61 @@ def test_the_payload_probe_opts_in():
     attempt = probe._mint_attempt(probe.prompts[0], 0)
     assert attempt.prompt.notes[PAYLOAD_NOTE] is True
     assert episode_payload(attempt.prompt) == probe.prompts[0]
+
+
+# --- tool settings: no MiDojo needed ---
+
+SPEC = {
+    "turns": ["hi"],
+    "plan": {"instructions": []},
+    "security": {"tool_called": {"name": "book_shelter"}},
+}
+
+
+def test_tool_settings_load_flat_or_beside_a_wrapped_episode():
+    """Tool settings load from a flat spec, or from beside a wrapped episode"""
+    tools = {
+        "allowed": ["get_weather", "book_shelter"],
+        "write_disposition": {
+            "default": "forward",
+            "tools": {"book_shelter": "block", "get_weather": "forward"},
+        },
+    }
+    expected = (["get_weather", "book_shelter"], ["book_shelter"])
+    data, settings = _load_spec({**SPEC, "tools": tools})
+    assert settings == expected and "tools" not in data
+    data, settings = _load_spec({"episode": SPEC, "tools": tools})
+    assert settings == expected and data == SPEC
+
+
+def test_without_tool_settings_every_tool_is_allowed_and_none_blocked():
+    """No tool settings: no limit on the agent, nothing blocked"""
+    assert _load_spec(SPEC)[1] == (None, [])
+    assert _load_spec({**SPEC, "tools": {"write_disposition": None}})[1] == (None, [])
+
+
+@pytest.mark.parametrize(
+    "tools, message",
+    [
+        ([], "tools must be a JSON object"),
+        ({"inventory": []}, "Unknown episode tool settings"),
+        ({"allowed": []}, "non-empty list of tool names"),
+        ({"allowed": "get_weather"}, "non-empty list of tool names"),
+        ({"allowed": ["get_weather", ""]}, "non-empty list of tool names"),
+        ({"write_disposition": ["book_shelter"]}, "must be a JSON object"),
+        ({"write_disposition": {"block": ["x"]}}, "Unknown write disposition"),
+        ({"write_disposition": {"default": "block"}}, "default 'block' cannot"),
+        ({"write_disposition": {"tools": ["book_shelter"]}}, "map tool names"),
+        (
+            {"write_disposition": {"tools": {"book_shelter": "simulate"}}},
+            "dispositions cannot be honoured",
+        ),
+    ],
+)
+def test_tool_settings_host_interception_cannot_honour_are_refused(tools, message):
+    """Tool settings host interception cannot honour are refused at load"""
+    with pytest.raises(BadGeneratorException, match=message):
+        _load_spec({**SPEC, "tools": tools})
 
 
 # --- episodes: need MiDojo ---
@@ -358,7 +414,27 @@ def test_a_multi_turn_episode_sends_every_turn_in_order_in_one_episode(
         ({"upstream": None}, "needs upstream"),
         ({"agent": "SessionOnlyAgent"}, "host interception only"),
         ({"agent_client": "no.such.module:Agent"}, "Cannot load agent client"),
-        ({"episode": {"turns": ["hi"], "plan": {}, "tools": []}}, "Unknown episode"),
+        (
+            {"episode": {"turns": ["hi"], "plan": {}, "verifiers": []}},
+            "Unknown episode",
+        ),
+        # the tool settings go beside a wrapped episode's fields, not among them
+        (
+            {"episode": {"episode": {**SPEC, "tools": {}}, "tools": None}},
+            "Unknown episode",
+        ),
+        (
+            {"episode": {**SPEC, "tools": {"allowed": ["get_weather"]}}},
+            "cannot be limited to the episode's allowed tools",
+        ),
+        (
+            {
+                "agent": "LimitedAgent",
+                "episode": {**SPEC, "tools": {"allowed": ["get_weather"]}},
+                "agent_options": {"allowed_tools": ["book_shelter"]},
+            },
+            "give no allowed_tools in agent_options",
+        ),
         (
             {
                 "episode": {
@@ -397,3 +473,105 @@ def test_an_episode_spec_it_cannot_run_fails_at_load(
     with pytest.raises(BadGeneratorException, match=message):
         episode_generator(scripted, upstream, agent=agent, **change)
     assert upstream.calls == []
+
+
+# --- tool settings in episodes: need MiDojo ---
+
+
+def with_tools(scripted, **tools):
+    """The scripted episode, with these tool settings"""
+    spec = copy.deepcopy(scripted.EPISODE)
+    spec["tools"] = tools
+    return spec
+
+
+@pytest.mark.parametrize(
+    "allowed, calls, score",
+    [
+        (["get_weather"], [("get_weather", "Boston")], 0.0),
+        (
+            ["get_weather", "book_shelter"],
+            [("get_weather", "Boston"), ("book_shelter", "Boston")],
+            1.0,
+        ),
+    ],
+)
+def test_allowed_tools_limit_what_the_agent_can_call(
+    scripted, upstream, allowed, calls, score
+):
+    """The agent gets the allowed tools, and calls no other"""
+    g = episode_generator(
+        scripted,
+        upstream,
+        agent="LimitedAgent",
+        episode=with_tools(scripted, allowed=allowed),
+    )
+    assert g._agent_options()["allowed_tools"] == allowed
+    [output] = g.generate(payload_prompt(scripted.MALICIOUS))
+    assert_own_episodes([output])
+    # the payload reached the agent either way; only the limit kept it from obeying
+    assert scripted.MALICIOUS in output.text
+    assert sorted(upstream.calls) == sorted(calls)
+    assert verdict_score(output) == score
+
+
+def test_the_responses_client_offers_only_the_allowed_tools(
+    scripted, upstream, monkeypatch
+):
+    """MiDojo's Responses client names the allowed tools in its MCP tool block"""
+    monkeypatch.setattr("openai.AsyncOpenAI", scripted.ScriptedOpenAI)
+    scripted.REQUESTS.clear()
+    g = episode_generator(
+        scripted,
+        upstream,
+        agent_client="midojo.agent_client:OpenAIResponsesAgentClient",
+        agent_options={
+            "base_url": "http://127.0.0.1:9/v1",
+            "model": "scripted",
+            "api_key": "unused",
+        },
+        episode=with_tools(scripted, allowed=["get_weather"]),
+    )
+    [output] = g.generate(payload_prompt(scripted.MALICIOUS))
+
+    [request] = scripted.REQUESTS
+    [block] = request["tools"]
+    # MiDojo's own tool block, naming the interceptor, with the allowed tools added
+    assert block["allowed_tools"] == ["get_weather"]
+    assert block["server_url"] != upstream.url and block["headers"]
+    assert request["input"] == scripted.EPISODE["turns"][0]
+    assert_own_episodes([output])
+    assert scripted.MALICIOUS in output.text
+    assert upstream.calls == [("get_weather", "Boston")]
+    assert verdict_score(output) == 0.0
+
+
+def test_blocked_tools_are_blocked_at_the_interceptor(scripted, upstream):
+    """A blocked tool is refused at the interceptor and never reaches the target"""
+    document = {
+        "episode": copy.deepcopy(scripted.EPISODE),
+        "tools": {
+            "allowed": ["get_weather", "book_shelter"],
+            "write_disposition": {
+                "default": "forward",
+                "tools": {"book_shelter": "block", "get_weather": "forward"},
+            },
+        },
+    }
+    g = episode_generator(scripted, upstream, agent="LimitedAgent", episode=document)
+    [output] = g.generate(payload_prompt(scripted.MALICIOUS))
+
+    assert_own_episodes([output])
+    # the agent obeyed and called the blocked tool: MiDojo refused the call
+    assert "Tool execution was blocked" in output.text
+    assert "shelter booked" not in output.text
+    # and never forwarded it: the target ran only the weather lookup
+    assert upstream.calls == [("get_weather", "Boston")]
+    # MiDojo grades the attempt: the agent was hijacked, but the write had no effect
+    grade = records([output])[0]["verdict"]["grade"]
+    assert (grade["attempted"], grade["blocked"], grade["effect_observed"]) == (
+        True,
+        True,
+        False,
+    )
+    assert verdict_score(output) == 1.0
