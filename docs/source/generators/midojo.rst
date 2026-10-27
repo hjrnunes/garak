@@ -131,17 +131,26 @@ any other key there:
    }
 
 * ``allowed``: the only tools the agent may call, a non-empty list of names.
-  With MiDojo's Responses API client (the default ``agent_client``) the
-  generator sends every request itself, with the client's settings (``base_url``,
-  ``model``, ``api_key``, ``timeout``, ``instructions``, ``mcp_server_label``)
-  and an MCP tool block that names the interceptor and these tools as
-  ``allowed_tools``, so the agent is offered no other tool; the client's own
-  request path is never used. A request that would offer any tool not so
-  limited raises ``UnlimitedToolsError`` before it is sent, and the episode
-  gets no verdict. An agent client whose constructor takes ``allowed_tools``
-  gets the list as that argument; do not also give ``allowed_tools`` in
-  ``agent_options``. Any other agent client, or a Responses client whose
-  settings are missing, is refused when the generator loads.
+  How the limit reaches the agent depends on ``agent_client``:
+
+  * MiDojo's stock Responses API client, ``OpenAIResponsesAgentClient`` (the
+    default): the generator sends every request itself, with the client's
+    settings (``base_url``, ``model``, ``api_key``, ``timeout``,
+    ``instructions``, ``mcp_server_label``) and an MCP tool block that names
+    the interceptor and these tools as ``allowed_tools``, so the agent is
+    offered no other tool; the client's own request path is never used. A
+    request that would offer any tool not so limited raises
+    ``UnlimitedToolsError`` before it is sent, and the episode gets no
+    verdict. A client whose settings are missing, or that carries a setting
+    the generator does not send, is refused when the generator loads.
+  * A subclass of that client is refused when ``allowed`` is set: the
+    generator would drop whatever the subclass changes in its requests (a
+    ``temperature``, say). Give the subclass an ``allowed_tools`` constructor
+    argument and apply the limit there instead.
+  * An agent client whose constructor takes ``allowed_tools`` gets the list
+    as that argument, and is trusted to apply the limit: garak does not check
+    its requests. Do not also give ``allowed_tools`` in ``agent_options``.
+  * Any other agent client is refused when the generator loads.
 * ``write_disposition``: ``tools`` maps a tool name to ``block`` or
   ``forward``, and must be a mapping when given. A blocked tool is blocked at
   MiDojo's host interceptor: the agent still sees it, and each call to it is
