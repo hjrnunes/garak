@@ -38,6 +38,7 @@ For a guide to writing probes, see :doc:`extending.probe`.
    probes/leakreplay
    probes/lmrc
    probes/malwaregen
+   probes/midojo
    probes/misleading
    probes/packagehallucination
    probes/phrasing
