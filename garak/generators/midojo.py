@@ -52,11 +52,12 @@ loads, in a flat spec and beside a wrapped ``episode`` alike.
 ``tools`` limits and blocks the agent's tools:
 
 * ``allowed``: the only tools the agent may call. An agent client whose
-  constructor takes ``allowed_tools`` gets them. For MiDojo's Responses API
-  client the generator sends every request itself, with the client's settings
-  and an MCP tool block naming the allowed tools, and refuses to send one that
-  is not so limited (:class:`UnlimitedToolsError`). Any other client is refused
-  when the generator loads.
+  constructor takes ``allowed_tools`` gets them, and is trusted to apply the
+  limit: its requests are not checked. For MiDojo's stock Responses API client
+  the generator sends every request itself, with the client's settings and an
+  MCP tool block naming the allowed tools, and refuses to send one that is not
+  so limited (:class:`UnlimitedToolsError`). Any other client, a subclass of
+  the stock Responses client included, is refused when the generator loads.
 * ``write_disposition``: ``{"default": "forward", "tools": {name: disposition}}``.
   A tool whose disposition is ``block`` is blocked at MiDojo's host
   interceptor: the agent still sees it, its calls are recorded as blocked and
@@ -105,6 +106,19 @@ EPISODE_FIELDS = (
 )
 # MiDojo's Responses API agent client, the default agent client
 RESPONSES_AGENT_CLIENT = "midojo.agent_client:OpenAIResponsesAgentClient"
+# the settings of that client the generator sends each request with, when it
+# limits the agent to the allowed tools
+RESPONSES_SETTINGS = (
+    "base_url",
+    "model",
+    "api_key",
+    "timeout",
+    "instructions",
+    "mcp_server_label",
+)
+# every setting the client keeps: in host mode its tool block names the tool
+# endpoint, never mcp_server_url
+RESPONSES_CLIENT_SETTINGS = RESPONSES_SETTINGS + ("mcp_server_url",)
 # the settings an episode document may give beside its fields; the generator
 # honours each one
 TOOLS_FIELD = "tools"
@@ -370,48 +384,57 @@ class _AllowedToolsConversation:
 
 
 class _AllowedToolsAgent:
-    """MiDojo's Responses API client, its every request sent by the generator
+    """MiDojo's stock Responses API client, its every request sent by the generator
 
     Reads the client's settings, and starts conversations of its own
     (:class:`_AllowedToolsConversation`) in place of the client's, so no request
-    leaves without the allowed tools, whatever the client's own request path.
+    leaves without the allowed tools. Only the stock client is accepted, with
+    no setting the generator does not reproduce: a subclass may change its
+    requests in ways the generator would silently drop.
     """
 
     def __init__(self, client, allowed):
+        name = type(client).__qualname__
         responses_client = _import_object(RESPONSES_AGENT_CLIENT)
         if not isinstance(client, responses_client):
             raise BadGeneratorException(
-                f"Agent client {type(client).__qualname__} cannot be limited to the "
-                "episode's allowed tools: it takes no allowed_tools, and is not "
-                "MiDojo's OpenAIResponsesAgentClient"
+                f"Agent client {name} cannot be limited to the episode's allowed "
+                "tools: it takes no allowed_tools, and is not MiDojo's "
+                "OpenAIResponsesAgentClient"
+            )
+        if type(client) is not responses_client:
+            raise BadGeneratorException(
+                f"Agent client {name} cannot be limited to the episode's allowed "
+                "tools: the generator sends the requests of MiDojo's stock "
+                "OpenAIResponsesAgentClient only, and would drop what a subclass "
+                "changes. Give the subclass an allowed_tools constructor argument, "
+                "and apply the limit there"
+            )
+        unreproduced = sorted(set(vars(client)) - set(RESPONSES_CLIENT_SETTINGS))
+        if unreproduced:
+            raise BadGeneratorException(
+                f"Agent client {name} cannot be limited to the episode's allowed "
+                f"tools: the generator does not reproduce its settings {unreproduced}"
             )
         settings = {
-            name: getattr(client, name, None)
-            for name in (
-                "base_url",
-                "model",
-                "api_key",
-                "timeout",
-                "instructions",
-                "mcp_server_label",
-            )
+            setting: getattr(client, setting, None) for setting in RESPONSES_SETTINGS
         }
         unusable = sorted(
-            name
-            for name in ("base_url", "model", "mcp_server_label")
-            if not isinstance(settings[name], str) or not settings[name]
+            setting
+            for setting in ("base_url", "model", "mcp_server_label")
+            if not isinstance(settings[setting], str) or not settings[setting]
         ) + sorted(
-            name
-            for name in ("api_key", "instructions")
-            if not isinstance(settings[name], str)
+            setting
+            for setting in ("api_key", "instructions")
+            if not isinstance(settings[setting], str)
         )
         if not isinstance(settings["timeout"], (int, float)):
             unusable.append("timeout")
         if unusable:
             raise BadGeneratorException(
-                f"Agent client {type(client).__qualname__} cannot be limited to the "
-                f"episode's allowed tools: its Responses API settings {unusable} "
-                "are missing or unusable"
+                f"Agent client {name} cannot be limited to the episode's allowed "
+                f"tools: its Responses API settings {unusable} are missing or "
+                "unusable"
             )
         self._settings = settings
         self._allowed = list(allowed)

@@ -153,26 +153,37 @@ class LimitedAgent(ScriptedAgent):
 
 # the Responses API requests a ScriptedOpenAI was sent, in order, in this process
 REQUESTS = []
+# each ScriptedOpenAI made, in this process
+CLIENTS = []
 
 
 class ScriptedOpenAI:
     """Stands in for ``openai.AsyncOpenAI``: a Responses API whose model looks the weather up
 
     As the Responses API does, it offers the model only the tools an MCP tool
-    block's ``allowed_tools`` names, every tool when it names none.
+    block's ``allowed_tools`` names, every tool when it names none. It keeps
+    the settings it was made with, and whether it was closed. Once
+    ``fail_after`` requests were answered, the next one fails.
     """
 
-    def __init__(self, **_client_settings):
+    fail_after = None
+
+    def __init__(self, **client_settings):
         self.responses = self
+        self.settings = client_settings
+        self.closed = False
+        CLIENTS.append(self)
 
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, *exc_info):
-        return None
+        self.closed = True
 
     async def create(self, *, tools, **request):
         """Answer one request, logged in REQUESTS, as the scripted model"""
+        if self.fail_after is not None and len(REQUESTS) >= self.fail_after:
+            raise ConnectionError("the Responses API went away")
         REQUESTS.append({"tools": tools, **request})
         [block] = tools
         assert block["type"] == "mcp"
@@ -276,3 +287,28 @@ class HookRenamedAgent(OpenAIResponsesAgentClient):
         """A conversation of its own, never calling ``_create_response``"""
         assert session_token is None and turn_count >= 1
         return _UnlimitedConversation(self, tool_endpoint)
+
+
+class TemperatureAgent(OpenAIResponsesAgentClient):
+    """MiDojo's Responses client, sending each request with its own temperature"""
+
+    def __init__(self, base_url, model, mcp_server_url, *, temperature=0.0, **kwargs):
+        super().__init__(base_url, model, mcp_server_url, **kwargs)
+        self.temperature = temperature
+
+    async def _create_response(self, openai_client, message, **kwargs):
+        """MiDojo's request, with the temperature"""
+
+        class WithTemperature:
+            """``responses`` that adds the temperature to each request"""
+
+            @staticmethod
+            async def create(**request):
+                """Send the request with the temperature"""
+                return await openai_client.responses.create(
+                    temperature=self.temperature, **request
+                )
+
+        return await super()._create_response(
+            SimpleNamespace(responses=WithTemperature()), message, **kwargs
+        )
