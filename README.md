@@ -85,7 +85,7 @@ git remote set-url origin https://github.com/NVIDIA/garak.git
 
 ### Optional: MiDojo episode support
 
-`garak` supports Python 3.10 or later. The MiDojo episode generator (`generators.midojo`) also needs the `midojo` package and `midojo_sdk[mcp]`, which need Python 3.12 or later. Install them into a Python 3.12+ environment alongside `garak`:
+`garak` supports Python 3.10 or later. The MiDojo episode generator (`generators.midojo`) also needs the `midojo` package and `midojo_sdk[mcp]`, which need Python 3.12 or later. It needs a MiDojo whose `OpenAIResponsesAgentClient` takes `allowed_tools` (MiDojo commit b9319ac or later). Install them into a Python 3.12+ environment alongside `garak`:
 
 ```
 python -m pip install "<path to MiDojo>" "<path to MiDojo>/interception/python-sdk[mcp]"

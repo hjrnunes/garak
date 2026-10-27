@@ -32,7 +32,8 @@ Optional MiDojo Support
 
 garak supports Python 3.10 or later.
 The MiDojo episode generator (``generators.midojo``) also needs MiDojo, which needs Python 3.12 or later.
-To use it, run garak on Python 3.12 or later and install the ``midojo`` package and ``midojo_sdk`` with its ``mcp`` extra:
+To use it, run garak on Python 3.12 or later and install the ``midojo`` package and ``midojo_sdk`` with its ``mcp`` extra.
+The generator needs a MiDojo whose ``OpenAIResponsesAgentClient`` takes ``allowed_tools`` (MiDojo commit b9319ac or later), and refuses to load with an older one:
 
 .. code-block:: console
 

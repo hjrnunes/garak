@@ -31,7 +31,9 @@ support is optional and is not one of garak's extras: to use this generator,
 run garak on Python 3.12 or later and install two packages into its
 environment:
 
-* ``midojo``, MiDojo itself;
+* ``midojo``, MiDojo itself, at a version whose ``OpenAIResponsesAgentClient``
+  takes ``allowed_tools`` (MiDojo commit b9319ac or later). With an older
+  MiDojo the generator refuses to load, and says to upgrade;
 * ``midojo_sdk`` (distributed as ``midojo-sdk``), MiDojo's interception SDK,
   with its ``mcp`` extra. It is a separate package in the MiDojo repository
   (``interception/python-sdk``). MiDojo's host interception imports it; without
@@ -130,27 +132,29 @@ any other key there:
      }
    }
 
-* ``allowed``: the only tools the agent may call, a non-empty list of names.
-  How the limit reaches the agent depends on ``agent_client``:
+* ``allowed``: the only tools the agent may call, a non-empty list of names,
+  each named once. The agent client gets the list as its ``allowed_tools``
+  constructor argument; do not also give ``allowed_tools`` in
+  ``agent_options``. How the limit reaches the agent depends on
+  ``agent_client``:
 
   * MiDojo's stock Responses API client, ``OpenAIResponsesAgentClient`` (the
-    default): the generator sends every request itself, with the client's
-    settings (``base_url``, ``model``, ``api_key``, ``timeout``,
-    ``instructions``, ``mcp_server_label``) and an MCP tool block that names
-    the interceptor and these tools as ``allowed_tools``, so the agent is
-    offered no other tool; the client's own request path is never used. A
-    request that would offer any tool not so limited raises
-    ``UnlimitedToolsError`` before it is sent, and the episode gets no
-    verdict. A client whose settings are missing, or that carries a setting
-    the generator does not send, is refused when the generator loads.
-  * A subclass of that client is refused when ``allowed`` is set: the
-    generator would drop whatever the subclass changes in its requests (a
-    ``temperature``, say). Give the subclass an ``allowed_tools`` constructor
-    argument and apply the limit there instead.
-  * An agent client whose constructor takes ``allowed_tools`` gets the list
-    as that argument, and is trusted to apply the limit: garak does not check
-    its requests. Do not also give ``allowed_tools`` in ``agent_options``.
+    default): MiDojo's client puts the list, as ``allowed_tools``, in the MCP
+    tool block of every request it sends, on every turn, so the agent is
+    offered no other tool. The generator accepts the built client only when
+    it carries exactly the episode's list and no setting the generator does
+    not know (MiDojo's own ``base_url``, ``model``, ``mcp_server_url``,
+    ``mcp_server_label``, ``instructions``, ``api_key``, ``timeout`` and
+    ``allowed_tools``); any other is refused when the generator loads.
+  * A subclass of that client is refused when ``allowed`` is set: it may
+    change its requests in ways that drop the limit (a request path of its
+    own, say).
+  * Any other agent client whose constructor takes ``allowed_tools`` is
+    trusted to apply the limit: garak does not check its requests.
   * Any other agent client is refused when the generator loads.
+
+  Without ``allowed``, the agent client is built without ``allowed_tools``,
+  and MiDojo's Responses API client offers every tool the interceptor lists.
 * ``write_disposition``: ``tools`` maps a tool name to ``block`` or
   ``forward``, and must be a mapping when given. A blocked tool is blocked at
   MiDojo's host interceptor: the agent still sees it, and each call to it is
@@ -161,8 +165,10 @@ any other key there:
 Settings host interception cannot honour (another disposition or default, an
 unknown key) are refused when the generator loads. A blocked call still counts
 as an attempt: MiDojo grades a security check that looks for that call as
-holding (``attempted`` and ``blocked`` true, ``effect_observed`` false), and
-``detectors.midojo.EpisodeVerdict`` scores it 1.0.
+holding (``attempted`` and ``blocked`` true, ``effect_observed`` false), so
+``detectors.midojo.EpisodeVerdict`` scores it 1.0 and
+``detectors.midojo.EpisodeEffect`` 0.0: the agent complied, and the call was
+contained.
 
 What each output carries
 ------------------------
@@ -172,9 +178,20 @@ What each output carries
 its ``evaluation_id`` and ``snapshot_id``, the ``verdict`` (MiDojo's grade, with
 the evaluation and snapshot it graded), ``interrupted``, ``reset``,
 ``injection_outcomes`` and ``error``. An episode that failed or was cut short
-has no verdict. ``detectors.midojo.EpisodeVerdict`` scores the verdict, and
-only a valid one: the grade's ``grade_validity.security.status`` must be
-``valid``.
+has no verdict. Two detectors score the verdict, and only a valid one: the
+grade's ``grade_validity.security.status`` must be ``valid``.
+
+* ``detectors.midojo.EpisodeVerdict`` scores the grade's ``security``: 1.0 when
+  the agent did what the security check looks for, a call blocked at the
+  interceptor included. It is ``probes.midojo.EpisodePayloads``'s primary
+  detector.
+* ``detectors.midojo.EpisodeEffect`` scores the grade's ``effect_observed``:
+  1.0 when the check holds on the calls that ran to their end, 0.0 when it
+  does not, and None when MiDojo could not tell. It is the probe's extended
+  detector: run with ``--extended_detectors`` to report both.
+
+An output with 1.0 from ``EpisodeVerdict`` and 0.0 from ``EpisodeEffect``
+complied but was contained.
 
 Opting a probe in
 -----------------

@@ -289,6 +289,18 @@ class HookRenamedAgent(OpenAIResponsesAgentClient):
         return _UnlimitedConversation(self, tool_endpoint)
 
 
+def hook_renamed_agent(
+    base_url, model, mcp_server_url=None, *, allowed_tools=None, **options
+):
+    """A factory taking allowed_tools, building a HookRenamedAgent"""
+    return HookRenamedAgent(
+        base_url, model, mcp_server_url, allowed_tools=allowed_tools, **options
+    )
+
+
+hook_renamed_agent.supports_host_interception = True
+
+
 class TemperatureAgent(OpenAIResponsesAgentClient):
     """MiDojo's Responses client, sending each request with its own temperature"""
 
