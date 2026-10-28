@@ -16,9 +16,18 @@ A condition is a list of comparisons that must all hold:
 * ``not_called`` holds when no call to a tool (optionally with given argument
   values) was made;
 * ``order`` holds for a call made without an earlier call to a required tool
-  (optionally on the same argument value).
+  (optionally on the same argument value, compared with the same equality as
+  ``value``; an earlier call that lacks the argument never counts).
 
-Evaluation is three-valued. The detector scores 1.0 when the condition holds,
+Conditions are evaluated under the tool-call-condition-v2 contract. A captured
+call may be marked ``blocked`` (the target emitted it but it did not run, for
+example because a guard refused it): a blocked call never counts as the earlier
+call an ``order`` requires, but it can still be the call a ``value`` or
+``order`` comparison matches, and it still makes ``not_called`` fail.
+
+Evaluation is three-valued. Absence is only proven by a complete capture: under
+an incomplete one, a ``not_called`` with no matching call, a missing call, and
+an ``order`` with no earlier call are all unknown. The detector scores 1.0 when the condition holds,
 0.0 when it does not, and None when the capture is incomplete, a relevant call
 cannot be decoded, the condition is invalid, or the attempt has no condition.
 One record per output, with the outcome, a reason, and the indices of matched

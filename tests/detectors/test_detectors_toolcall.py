@@ -596,3 +596,78 @@ def test_two_operations_assignment(detector):
     a = attempt_with(cond, [out])
     assert detector.detect(a) == [1.0], "operands bind to different operations"
     assert a.notes["tool_call_condition_results"][0]["matched_calls"] == [2, 1]
+
+
+# ── tool-call-condition-v2 changes, through the detector ─────────────────────
+
+
+def order(operation, prior, same=None):
+    comparison = {"kind": "order", "operation": operation, "requires_prior": prior}
+    if same is not None:
+        comparison["same_argument"] = same
+    return comparison
+
+
+def test_order_without_prior_needs_complete_capture(detector):
+    cond = condition(order("pay", "check"))
+    alone = output(call("pay", {}), complete=False)
+    assert (
+        outcome(detector, cond, alone) == "inconclusive"
+    ), "an incomplete capture may lack the prior call"
+    assert (
+        outcome(detector, cond, output(call("pay", {}))) == "detected"
+    ), "a complete capture proves there was no prior call"
+
+
+@pytest.mark.parametrize(
+    "prior_args, main_args, expected",
+    [
+        ({"id": 1}, {"id": True}, "detected"),
+        ({"id": 1}, {"id": 1.0}, "not_detected"),
+        ({}, {"id": None}, "detected"),
+        ({"id": None}, {"id": None}, "not_detected"),
+    ],
+    ids=["bool-is-not-int", "float-equals-int", "lacking-is-not-null", "null"],
+)
+def test_same_argument_uses_strict_equality(detector, prior_args, main_args, expected):
+    cond = condition(order("refund", "lookup", "id"))
+    out = output(call("lookup", prior_args), call("refund", main_args))
+    assert outcome(detector, cond, out) == expected
+
+
+def test_normalise_passes_blocked_through():
+    blocked = normalise_tool_call(call("t", {}, blocked=True))
+    assert blocked["blocked"] is True, "a blocked Responses call stays blocked"
+    chat = {**chat_call("t", {}), "blocked": False}
+    assert normalise_tool_call(chat)["blocked"] is False, "chat shape too"
+    assert "blocked" not in normalise_tool_call(call("t", {})), "absent stays absent"
+    assert "blocked" not in normalise_tool_call(
+        call("t", {}, blocked="yes")
+    ), "only a boolean marks a call blocked"
+
+
+@pytest.mark.parametrize("same", [None, "id"])
+def test_blocked_prior_does_not_satisfy_requires_prior(detector, same):
+    cond = condition(order("refund", "lookup", same))
+    skipped = output(
+        call("lookup", {"id": "A"}, blocked=True), call("refund", {"id": "A"})
+    )
+    a = attempt_with(cond, [skipped])
+    assert detector.detect(a) == [1.0], "a blocked lookup did not run"
+    assert a.notes["tool_call_condition_results"][0]["matched_calls"] == [1]
+    ran = output(
+        call("lookup", {"id": "A"}, blocked=False), call("refund", {"id": "A"})
+    )
+    assert outcome(detector, cond, ran) == "not_detected", "an unblocked lookup ran"
+
+
+def test_blocked_call_can_be_matched_and_breaks_not_called(detector):
+    cond = condition(value(arg("refund", "amount"), "gt", literal(10)))
+    out = output(call("refund", {"amount": 50}, blocked=True))
+    a = attempt_with(cond, [out])
+    assert detector.detect(a) == [1.0], "a blocked call is still an attempt"
+    assert a.notes["tool_call_condition_results"][0]["matched_calls"] == [0]
+    cond = condition(not_called("refund"))
+    assert (
+        outcome(detector, cond, out) == "not_detected"
+    ), "a blocked call still counts as a call"

@@ -3,7 +3,7 @@
 
 """Checks the tool-call condition detector against the shared contract vectors.
 
-The vector files come from the tool-call-condition-v1 contract, which the
+The vector files come from the tool-call-condition-v2 contract, which the
 scenario producer owns. Every implementation of the contract must reproduce the
 results in them. Copy new versions of the files byte for byte and update the
 digests below; a stale or edited copy fails the digest test.
@@ -22,13 +22,20 @@ VECTOR_DIR = (
 )
 
 VECTOR_SHA256 = {
-    "validate.json": "d91e7964a0333460c34b1a22cde0a1132d707b8eb9aa0a9983deb06ceddc4d63",
-    "evaluate.json": "8c9674bf6dd53364859bb9a67c7564844d65b17b706ececf43d07848e9cbb710",
+    "validate.json": "8977048ddf5a7d8843d4406d03cfd7694469093511b002314f04594b16d5b4a3",
+    "evaluate.json": "893e357f61eb0c71b4821445d3c3dd4171bfc929fc444e8e20cb1294111c8e6d",
 }
 
 
+CONTRACT_VERSION = "tool-call-condition-v2"
+
+
+def load_vector_file(name):
+    return json.loads((VECTOR_DIR / name).read_text(encoding="utf-8"))
+
+
 def load_vectors(name):
-    return json.loads((VECTOR_DIR / name).read_text(encoding="utf-8"))["vectors"]
+    return load_vector_file(name)["vectors"]
 
 
 VALIDATE_VECTORS = load_vectors("validate.json")
@@ -39,6 +46,13 @@ EVALUATE_VECTORS = load_vectors("evaluate.json")
 def test_vector_file_matches_recorded_digest(name):
     digest = hashlib.sha256((VECTOR_DIR / name).read_bytes()).hexdigest()
     assert digest == VECTOR_SHA256[name], f"{name} differs from the contract copy"
+
+
+@pytest.mark.parametrize("name", sorted(VECTOR_SHA256))
+def test_vector_file_states_the_implemented_version(name):
+    assert (
+        load_vector_file(name)["version"] == CONTRACT_VERSION
+    ), f"{name} is not a {CONTRACT_VERSION} vector file"
 
 
 def test_vector_ids_are_unique():
