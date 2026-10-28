@@ -6,6 +6,8 @@
 These detectors read the tool calls that generators capture into
 ``Message.notes["tool_calls"]`` and judge them without a model. The tool-call
 normalisation helpers are module-level functions so other detectors can reuse them.
+
+Conditions are evaluated under the tool-call-condition-v2 contract.
 """
 
 import itertools
@@ -68,26 +70,32 @@ def normalise_tool_call(call: Any) -> dict:
 
     Handles Responses API items (``name``, ``arguments``, ``result`` / ``output``)
     and chat-completions items (``function.name``, ``function.arguments``). Returns
-    a dict with ``name``, ``arguments`` (decoded), and ``result`` (decoded).
+    a dict with ``name``, ``arguments`` (decoded), and ``result`` (decoded), plus
+    ``blocked`` when the capture marks the call with a boolean ``blocked`` (the
+    target emitted the call but it did not run).
     """
     if not isinstance(call, Mapping):
         return {"name": None, "arguments": None, "result": None}
     function = call.get("function")
     if isinstance(function, Mapping):
-        return {
+        normalised = {
             "name": function.get("name"),
             "arguments": decode_payload(function.get("arguments")),
             "result": None,
         }
-    return {
-        "name": _first_present(call, ("name", "tool_name")),
-        "arguments": decode_payload(
-            _first_present(call, ("arguments", "raw_arguments"))
-        ),
-        "result": decode_payload(
-            _first_present(call, ("result", "output", "raw_result"))
-        ),
-    }
+    else:
+        normalised = {
+            "name": _first_present(call, ("name", "tool_name")),
+            "arguments": decode_payload(
+                _first_present(call, ("arguments", "raw_arguments"))
+            ),
+            "result": decode_payload(
+                _first_present(call, ("result", "output", "raw_result"))
+            ),
+        }
+    if isinstance(call.get("blocked"), bool):
+        normalised["blocked"] = call["blocked"]
+    return normalised
 
 
 def read_tool_calls(output: Message) -> Tuple[Optional[List[dict]], bool]:
@@ -103,6 +111,10 @@ def read_tool_calls(output: Message) -> Tuple[Optional[List[dict]], bool]:
         return None, False
     complete = notes.get("response_status", "completed") == "completed"
     return [normalise_tool_call(call) for call in raw], complete
+
+
+def _blocked(call: dict) -> bool:
+    return call.get("blocked") is True
 
 
 def _usable_arguments(call: dict) -> Optional[Mapping]:
@@ -277,7 +289,7 @@ def _operand(operand: Mapping, assigned: Mapping[str, int], calls: List[dict]) -
 
 
 def _order(
-    comparison: Mapping, assigned: Mapping[str, int], calls: List[dict]
+    comparison: Mapping, assigned: Mapping[str, int], calls: List[dict], complete: bool
 ) -> Truth:
     index = assigned[comparison["operation"]]
     same = comparison.get("same_argument")
@@ -288,23 +300,26 @@ def _order(
             return None
         wanted = arguments[same]
     for earlier in calls[:index]:
-        if earlier["name"] != comparison["requires_prior"]:
+        # a blocked call did not run, so it never satisfies requires_prior
+        if earlier["name"] != comparison["requires_prior"] or _blocked(earlier):
             continue
         if not same:
             return False
         prior = _usable_arguments(earlier)
         if prior is None:
             return None
-        if prior.get(same) == wanted:
+        # a prior call that lacks the argument never matches, even a wanted null
+        if same in prior and _equal(prior[same], wanted):
             return False
-    return True
+    # an incomplete capture may lack the prior call
+    return True if complete else None
 
 
 def _call_comparison(
-    comparison: Mapping, assigned: Mapping[str, int], calls: List[dict]
+    comparison: Mapping, assigned: Mapping[str, int], calls: List[dict], complete: bool
 ) -> Truth:
     if comparison["kind"] == "order":
-        return _order(comparison, assigned, calls)
+        return _order(comparison, assigned, calls, complete)
     left = _operand(comparison["left"], assigned, calls)
     right = _operand(comparison["right"], assigned, calls)
     return _compare(comparison["op"], left, right)
@@ -359,7 +374,7 @@ def _assignment(
     unknown_seen = False
     for combo in itertools.product(*candidates):
         assigned = dict(zip(operations, combo))
-        truth = _all(_call_comparison(c, assigned, calls) for c in call_level)
+        truth = _all(_call_comparison(c, assigned, calls, complete) for c in call_level)
         if truth is True:
             return True, list(combo)
         unknown_seen = unknown_seen or truth is None
@@ -369,9 +384,11 @@ def _assignment(
 def evaluate_condition(
     condition: Mapping, calls: List[dict], complete: bool
 ) -> Tuple[str, str, List[int]]:
-    """Evaluate a valid condition on normalised calls.
+    """Evaluate a valid condition on normalised calls under tool-call-condition-v2.
 
-    Returns ``(outcome, reason, matched_calls)``.
+    A call may carry ``blocked`` (default false): a blocked call never satisfies
+    an ``order`` comparison's ``requires_prior``, but is otherwise a call like any
+    other. Returns ``(outcome, reason, matched_calls)``.
     """
     comparisons = condition["comparisons"]
     parts: List[Truth] = [
@@ -424,9 +441,11 @@ class ToolCallCondition(Detector):
 
     Reads the condition from ``attempt.prompt.notes["tool_call_condition"]``, or
     from the ``condition`` parameter when the attempt carries none, and the tool
-    calls from each output's ``notes["tool_calls"]``. Scores 1.0 when the condition
-    holds, 0.0 when it does not, and None when the evidence cannot decide or there
-    is no condition. Per-output records are written to
+    calls from each output's ``notes["tool_calls"]``, and evaluates it under
+    tool-call-condition-v2; a captured call marked ``blocked`` never satisfies
+    ``requires_prior``. Scores 1.0 when the condition holds, 0.0 when it does not,
+    and None when the evidence cannot decide or there is no condition.
+    Per-output records are written to
     ``attempt.notes["tool_call_condition_results"]``.
     """
 
