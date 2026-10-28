@@ -635,6 +635,26 @@ def test_same_argument_uses_strict_equality(detector, prior_args, main_args, exp
     assert outcome(detector, cond, out) == expected
 
 
+@pytest.mark.parametrize(
+    "prior, main, expected",
+    [
+        (HUGE, 2 * HUGE, "not_detected"),
+        (-HUGE, -2 * HUGE, "not_detected"),
+        (HUGE, -HUGE, "detected"),
+        (HUGE, 1, "detected"),
+    ],
+    ids=["same-sign", "same-sign-negative", "opposite-sign", "huge-and-small"],
+)
+def test_same_argument_compares_huge_integers_as_infinities(
+    detector, prior, main, expected
+):
+    cond = condition(order("refund", "lookup", "id"))
+    out = output(call("lookup", {"id": prior}), call("refund", {"id": main}))
+    assert (
+        outcome(detector, cond, out) == expected
+    ), "same_argument saturates as value comparisons do"
+
+
 def test_normalise_passes_blocked_through():
     blocked = normalise_tool_call(call("t", {}, blocked=True))
     assert blocked["blocked"] is True, "a blocked Responses call stays blocked"
