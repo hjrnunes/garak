@@ -19,9 +19,9 @@ A condition is a list of comparisons that must all hold:
   (optionally on the same argument value, compared with the same equality as
   ``value``; an earlier call that lacks the argument never counts).
 
-Integers beyond float range compare as infinities in every equality and
-ordering, ``same_argument`` included, so two such integers of the same sign are
-equal.
+When two numbers are compared directly, an integer beyond float range counts
+as an infinity, in ``same_argument`` too, so two such integers of the same sign
+are equal. Inside lists and objects, integers are compared exactly.
 
 Conditions are evaluated under the tool-call-condition-v2 contract. A captured
 call may be marked ``blocked`` (the target emitted it but it did not run, for
