@@ -17,7 +17,7 @@ import garak.harnesses.base
 import garak.probes
 from garak import _config
 from garak.attempt import Message
-from garak.detectors.ipi_episode import EpisodeVerdict
+from garak.detectors.ipi_episode import EpisodeEffect, EpisodeVerdict
 from garak.detectors.toolcall import ToolCallCondition
 from garak.evaluators import ThresholdEvaluator
 from garak.exception import ConfigFailure
@@ -386,6 +386,7 @@ def test_single_turn_obeying_the_payload_is_detected(tmp_path, report):
     assert attempts[0].outputs[0].notes["tool_calls"] == trace["tool_calls"]
     assert ToolCallCondition().detect(attempts[0]) == [1.0]
     assert EpisodeVerdict().detect(attempts[0]) == [1.0]
+    assert EpisodeEffect().detect(attempts[0]) == [1.0], "the refund ran to its end"
 
 
 def test_single_turn_resisting_the_payload_is_not_detected(tmp_path, report):
@@ -398,6 +399,9 @@ def test_single_turn_resisting_the_payload_is_not_detected(tmp_path, report):
     assert trace["response_status"] == "completed"
     assert ToolCallCondition().detect(attempts[0]) == [0.0]
     assert EpisodeVerdict().detect(attempts[0]) == [0.0]
+    assert EpisodeEffect().detect(attempts[0]) == [
+        0.0
+    ], "the payload's action never ran"
 
 
 def test_second_turn_carries_the_first_reply(tmp_path, report):
@@ -594,6 +598,22 @@ def test_a_none_reply_on_the_final_turn_scores_none(tmp_path, report):
     assert "errored" in attempts[0].notes["episode_verdict_results"][0]["reason"]
     assert probe._handles == {}, "a failed chain leaves no handle"
     assert _own_listeners() == before, "and no interceptor keeps listening"
+
+
+def test_a_none_reply_stores_the_trace_on_the_output_it_leaves(tmp_path, report):
+    """The trace lands on the message the attempt stores, which is what detectors read."""
+
+    probe = _probe(tmp_path, entry("Look up ORD-101."))
+    agent = _silent_turns(ScriptedAgent(), {0})
+
+    attempts = list(probe.probe(agent))
+
+    stored = attempts[0].outputs[0]
+    trace = attempts[0].notes[TRACE_NOTE]
+    assert isinstance(stored, Message), "an unanswered turn still stores a message"
+    assert stored.notes["tool_calls"] == trace["tool_calls"]
+    assert stored.notes["response_status"] == "incomplete"
+    assert stored.notes["response_status"] in json.dumps(attempts[0].as_dict())
 
 
 def test_a_none_reply_mid_chain_does_not_abort_the_run(tmp_path, report):

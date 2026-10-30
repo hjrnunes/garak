@@ -206,7 +206,7 @@ class IPIEpisode(garak.probes.IterativeProbe):
     ]
     tier = garak.probes.Tier.INFORMATIONAL
     primary_detector = "toolcall.ToolCallCondition"
-    extended_detectors = ["ipi_episode.EpisodeVerdict"]
+    extended_detectors = ["ipi_episode.EpisodeVerdict", "ipi_episode.EpisodeEffect"]
 
     DEFAULT_PARAMS = garak.probes.IterativeProbe.DEFAULT_PARAMS | {
         # a .json or .jsonl file holding episode entries
@@ -449,18 +449,41 @@ class IPIEpisode(garak.probes.IterativeProbe):
 
     def _attach_trace(self, attempt, trace: dict) -> None:
         attempt.notes[TRACE_NOTE] = trace
-        output = attempt.outputs[0] if attempt.outputs else None
+        output = self._stored_output(attempt)
         if output is None:
+            # a turn the target never answered stores no message; the condition
+            # detector still needs a stored output to read this trace from
             output = garak.attempt.Message("")
-            if attempt.outputs:
-                attempt.outputs[0] = output
-            else:
-                attempt.outputs = [output]
+            self._store_output(attempt, output)
         output.notes = {
             **(output.notes or {}),
             "tool_calls": copy.deepcopy(trace["tool_calls"]),
             "response_status": trace["response_status"],
         }
+
+    @staticmethod
+    def _stored_output(attempt) -> garak.attempt.Message | None:
+        """The message ``attempt.outputs`` reads, when its last turn holds one."""
+        if not attempt.conversations:
+            return None
+        assistant = [
+            turn for turn in attempt.conversations[0].turns if turn.role == "assistant"
+        ]
+        if not assistant:
+            return None
+        content = assistant[-1].content
+        return content if isinstance(content, garak.attempt.Message) else None
+
+    @staticmethod
+    def _store_output(attempt, output: garak.attempt.Message) -> None:
+        """Write ``output`` where ``attempt.outputs`` reads it: the last assistant turn."""
+        assistant = [
+            turn for turn in attempt.conversations[0].turns if turn.role == "assistant"
+        ]
+        if assistant:
+            assistant[-1].content = output
+            return
+        attempt.conversations[0].turns.append(garak.attempt.Turn("assistant", output))
 
     # --- the run ---
 
