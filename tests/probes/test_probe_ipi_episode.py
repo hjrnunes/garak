@@ -246,6 +246,20 @@ def _run(probe, script=()):
     return list(probe.probe(agent)), agent
 
 
+def _silent_turns(agent, turns):
+    """Make the scripted agent answer the given zero-based turns with no output."""
+    original = agent.generate
+
+    def generate(prompt, generations_this_call=1):
+        if len(agent.prompts) in turns:
+            agent.prompts.append(prompt)
+            return [None]
+        return original(prompt, generations_this_call)
+
+    agent.generate = generate
+    return agent
+
+
 @pytest.fixture
 def report(tmp_path):
     _config.load_base_config()
@@ -560,6 +574,110 @@ def test_a_turn_with_calls_and_no_reply_keeps_its_chain(tmp_path, report):
     trace = attempts[0].notes[TRACE_NOTE]
     assert trace.get("error") is None
     assert trace["snapshot"]["turns"][0]["reply"] == "", "MiDojo records an empty reply"
+
+
+def test_a_none_reply_on_the_final_turn_scores_none(tmp_path, report):
+    before = _own_listeners()
+    probe = _probe(tmp_path, entry("Look up ORD-101."))
+    agent = _silent_turns(ScriptedAgent(), {0})
+
+    attempts = list(probe.probe(agent))
+
+    assert len(attempts) == 1, "the unanswered turn is the chain's only result"
+    assert attempts[0].notes[CHAIN_NOTE]["final"] is True
+    trace = attempts[0].notes[TRACE_NOTE]
+    assert trace["sealed"] == "final", "a turn with no output still seals its chain"
+    assert trace["error"] == "ResponsesNotCompleted", "no output is a failed turn"
+    assert trace["response_status"] == "incomplete"
+    assert EpisodeVerdict().detect(attempts[0]) == [None], "never scored as resisted"
+    assert ToolCallCondition().detect(attempts[0]) == [None], "nor as a miss"
+    assert "errored" in attempts[0].notes["episode_verdict_results"][0]["reason"]
+    assert probe._handles == {}, "a failed chain leaves no handle"
+    assert _own_listeners() == before, "and no interceptor keeps listening"
+
+
+def test_a_none_reply_mid_chain_does_not_abort_the_run(tmp_path, report):
+    before = _own_listeners()
+    probe = _probe(
+        tmp_path, entry("Look up ORD-101.", "And ORD-201."), entry("Look up ORD-101.")
+    )
+    agent = _silent_turns(
+        ScriptedAgent(
+            [
+                [("lookup_order", {"order_id": "ORD-101"})],
+                [("lookup_order", {"order_id": "ORD-101"})],
+            ]
+        ),
+        {0},
+    )
+
+    attempts = list(probe.probe(agent))
+
+    assert len(agent.prompts) == 2, "no next turn starts after a turn with no output"
+    assert [a.notes[CHAIN_NOTE]["chain"] for a in attempts] == [
+        0,
+        1,
+    ], "both chains report, so one chain's None does not end the run"
+    cut_short = attempts[0]
+    assert (
+        cut_short.notes[CHAIN_NOTE]["turn"] == 0
+    ), "the unanswered turn ends its chain"
+    trace = cut_short.notes[TRACE_NOTE]
+    assert trace["sealed"] == "final"
+    assert trace["error"] == "ResponsesNotCompleted"
+    assert trace["response_status"] == "incomplete"
+    assert EpisodeVerdict().detect(cut_short) == [None], "never scored as resisted"
+    assert ToolCallCondition().detect(cut_short) == [None], "nor as a miss"
+    later = attempts[1].notes[TRACE_NOTE]
+    assert later["error"] is None, "the next chain runs to its own end"
+    assert ToolCallCondition().detect(attempts[1]) == [0.0], "and scores on its trace"
+    assert probe._handles == {}, "both chains left no handle"
+    assert _own_listeners() == before, "and no interceptor keeps listening"
+
+
+def test_an_interrupted_trace_that_fails_leaves_its_attempt_open(
+    tmp_path, report, monkeypatch
+):
+    probe = _probe(tmp_path, entry("Look up ORD-101.", "And ORD-201."))
+    agent = ScriptedAgent([[("lookup_order", {"order_id": "ORD-101"})]])
+    original = agent.generate
+    calls = {"count": 0}
+
+    def explode(prompt, generations_this_call=1):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            raise RuntimeError("the target went away")
+        return original(prompt, generations_this_call)
+
+    def no_trace(handle):
+        raise RuntimeError("the snapshot could not be read back")
+
+    agent.generate = explode
+    monkeypatch.setattr(probe, "_interrupted_trace", no_trace)
+
+    with pytest.raises(RuntimeError, match="the target went away"):
+        list(probe.probe(agent))
+
+    interrupted = probe._last_processed[0]
+    assert interrupted.notes[CHAIN_NOTE]["final"] is False, "no trace, no final attempt"
+    assert TRACE_NOTE not in interrupted.notes, "and nothing half-attached"
+    assert probe._handles == {}, "the handle still closes"
+
+
+def test_an_interrupt_before_the_first_postprocess_seals_nothing(tmp_path, report):
+    probe = _probe(tmp_path, entry("Look up ORD-101.", "And ORD-201."))
+    agent = ScriptedAgent()
+
+    def explode(prompt, generations_this_call=1):
+        raise RuntimeError("the target went away")
+
+    agent.generate = explode
+
+    with pytest.raises(RuntimeError, match="the target went away"):
+        list(probe.probe(agent))
+
+    assert probe._last_processed == {}, "no turn of the chain was processed"
+    assert probe._handles == {}, "the opened handle still closes"
 
 
 def test_an_error_mid_chain_closes_every_handle(tmp_path, report):

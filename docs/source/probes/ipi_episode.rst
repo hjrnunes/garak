@@ -79,6 +79,17 @@ one.
 also closes the moment its episode is sealed, so a probe with several chains
 still holds one handle at a time whatever ``parallel_attempts`` says.
 
+Generators
+----------
+
+The probe needs a Responses-style generator: one that takes the request's
+``notes["tools"]`` as its tool list and reports ``response_status`` and any
+``tool_calls`` on each output message. Only that generator can carry the
+interceptor's tool block to the target and say whether a response finished.
+Every other generator fails closed: a turn with no output, or with a response
+status the generator never sets, ends its chain as errored, and both detectors
+score the chain ``None`` rather than as resisted.
+
 Parameters
 ----------
 

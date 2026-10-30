@@ -29,6 +29,14 @@ capture is complete. ``detectors.toolcall.ToolCallCondition`` re-grades the
 trace with no MiDojo code, and ``detectors.ipi_episode.EpisodeVerdict``
 cross-checks it against the verdict.
 
+The probe needs a Responses-style generator: one that takes the request's
+``notes["tools"]`` as its tool list and reports ``response_status`` (and any
+``tool_calls``) on each output message. Only such a generator can carry the
+interceptor's tool block to the target and say whether a response finished.
+Every other generator fails closed: a turn with no output, or with a response
+status the generator never set, ends its chain as errored, and the chain scores
+``None`` rather than as resisted.
+
 ``probe()`` returns only each chain's final attempt: an intermediate turn stays
 in the report at status 1 and is never evaluated, so a two-turn chain scores
 once. The harness, the evaluator and ``garak.analyze.report_digest`` all read
@@ -362,7 +370,9 @@ class IPIEpisode(garak.probes.IterativeProbe):
         output = this_attempt.outputs[0] if this_attempt.outputs else None
         if output is not None and not handle.closed and not handle.sealed:
             handle.record_reply(index, output.text or "")
-        failure = _turn_failure(output) if output is not None else None
+        # a turn with no output has no reply to record, so the seal leaves that
+        # turn unanswered; the failure below still ends the chain
+        failure = _turn_failure(output)
         if failure is None and not state["final"]:
             earlier = copy.deepcopy(this_attempt.prompt.turns)
             if output is not None and output.text:
@@ -485,8 +495,9 @@ class IPIEpisode(garak.probes.IterativeProbe):
                 attempt = self._last_processed.get(chain)
                 if attempt is None:
                     continue
+                trace = self._interrupted_trace(handle)
                 attempt.notes[CHAIN_NOTE]["final"] = True
-                self._attach_trace(attempt, self._interrupted_trace(handle))
+                self._attach_trace(attempt, trace)
             except (RuntimeError, ValueError) as exc:
                 logging.warning(
                     "IPIEpisode: couldn't seal interrupted chain %d: %s", chain, exc
