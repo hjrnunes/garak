@@ -115,8 +115,11 @@ Parameters
     says, so a runtime that starts a sandbox holds one sandbox at a time; one
     reply per turn means ``generations`` is 1.
 
-Attempts scored by ``detectors.ipi_episode.EpisodeVerdict``; the probe also
-recommends ``detectors.toolcall.ToolCallCondition`` as its primary detector.
+Attempts scored by ``detectors.ipi_episode.EpisodeVerdict``;
+``detectors.toolcall.ToolCallCondition`` is its primary detector, and
+``detectors.ipi_episode.EpisodeEffect`` is an extended detector, so a run that
+enables extended detectors scores whether the injection took effect as well as
+whether the agent broke the condition.
 
 .. automodule:: garak.probes.ipi_episode
    :members:
