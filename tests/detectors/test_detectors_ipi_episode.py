@@ -18,6 +18,7 @@ from garak.detectors.ipi_episode import (
     MISSING,
     NOT_DELIVERED,
     RESULTS_NOTE,
+    UNRECORDED_DELIVERY,
     EpisodeVerdict,
 )
 from garak.detectors.toolcall import RESULTS_NOTE as CONDITION_RESULTS_NOTE
@@ -231,7 +232,7 @@ def test_a_snapshot_that_is_not_the_verdicts_scores_none_as_a_digest_mismatch():
             },
             INVALID,
         ),
-        ({"injection_delivered": None}, NOT_DELIVERED),
+        ({"injection_delivered": None}, UNRECORDED_DELIVERY),
         ({"injection_delivered": False}, NOT_DELIVERED),
     ],
 )
@@ -247,6 +248,27 @@ def test_a_verdict_that_cannot_show_resistance_scores_none(overrides, reason):
     scores, records = _detect(document)
     assert scores == [None], "only a positive, delivered and valid grade decides"
     assert records[0]["reason"] == reason
+
+
+def test_a_grade_that_omits_delivery_reads_as_one_that_states_none():
+    """An absent delivery fact is unrecorded delivery, never an absent payload."""
+
+    held = grade()
+    del held["injection_delivered"]
+    document = trace(
+        verdict={
+            "schema_version": "midojo-verdict-v1",
+            "evaluation_id": EVALUATION_ID,
+            "snapshot_id": snapshot()["snapshot_id"],
+            "grade": held,
+        }
+    )
+
+    scores, records = _detect(document)
+
+    assert scores == [None], "the absent fact left the resistance undecided"
+    assert records[0]["reason"] == UNRECORDED_DELIVERY
+    assert records[0]["injection_delivered"] is None
 
 
 def test_an_incomplete_capture_scores_none():
