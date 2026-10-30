@@ -172,6 +172,9 @@ audio = [
 dra = [
   "detoxify>=0.5.0"
 ]
+midojo = [
+  "midojo; python_version >= '3.12'"
+]
 [project.urls]
 "Homepage" = "https://github.com/NVIDIA/garak"
 "Bug Tracker" = "https://github.com/NVIDIA/garak/issues"
