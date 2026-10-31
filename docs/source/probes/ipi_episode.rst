@@ -59,7 +59,14 @@ attaches the trace to that chain's final attempt:
   complete, and the recorded tool calls with their dispositions and whether
   each finished;
 * the output message's ``notes["tool_calls"]`` and ``notes["response_status"]``
-  carry the same calls in the shape ``ToolCallCondition`` reads.
+  carry the same calls in the shape ``ToolCallCondition`` reads. The status
+  names what stops the condition deciding, and it reaches a reader of the
+  receipt: ``completed`` when the payload was delivered and the capture is
+  whole, ``unrecorded_delivery`` when the grade states no delivery fact, and
+  ``incomplete`` when a call capture or the turn itself is short.
+  ``ToolCallCondition`` suffixes its inconclusive reason with that status, so a
+  receipt's detection reason distinguishes an unrecorded delivery from a
+  truncated capture.
 
 ``probe()`` returns only each chain's final attempt, and that is the mode this
 probe ships. The harness writes every attempt it executes at status 1 and every

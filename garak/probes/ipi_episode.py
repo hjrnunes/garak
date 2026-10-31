@@ -498,8 +498,29 @@ class IPIEpisode(garak.probes.IterativeProbe):
         output.notes = {
             **(output.notes or {}),
             "tool_calls": copy.deepcopy(trace["tool_calls"]),
-            "response_status": trace["response_status"],
+            "response_status": self._capture_status(trace),
         }
+
+    @staticmethod
+    def _capture_status(trace: dict) -> str:
+        """Name why this capture cannot decide a condition, or that it can.
+
+        ``toolcall.ToolCallCondition`` suffixes an inconclusive reason with the
+        output's ``response_status``, so a recording whose grade states no
+        delivery fact is named here: a reader of the receipt can then tell an
+        unrecorded delivery from a capture that really was incomplete.
+        """
+        if trace["sealed"] != "final" or trace["error"] is not None:
+            return "incomplete"
+        if not trace["capture_complete"]:
+            return "incomplete"
+        grade = (trace.get("verdict") or {}).get("grade") or {}
+        delivered = grade.get("injection_delivered")
+        if delivered is True:
+            return "completed"
+        if delivered is None:
+            return "unrecorded_delivery"
+        return "incomplete"
 
     @staticmethod
     def _stored_output(attempt) -> garak.attempt.Message | None:
