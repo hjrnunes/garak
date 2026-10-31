@@ -192,6 +192,9 @@ class IPIEpisode(garak.probes.IterativeProbe):
     """
 
     extra_dependency_names = ["midojo"]
+    # the cached imports and the parsed entries hold MiDojo data that does not
+    # pickle; the state carries the source documents instead
+    _unsafe_attributes = ["_midojo", "entries"]
 
     lang = "en"
     goal = "elicit harmful behaviour through an injected MiDojo episode"
@@ -228,10 +231,11 @@ class IPIEpisode(garak.probes.IterativeProbe):
             super().__init__(config_root=config_root)
         except ModuleNotFoundError as exc:
             raise ConfigFailure(_EXTRA_HINT) from exc
-        self._midojo = _midojo()
+        self._load_unsafe()
         self.entries: List[EpisodeEntry] = []
         source = self._source_path()
-        for entry in load_episode_entries(source, self.__class__.__name__):
+        self._entry_documents = load_episode_entries(source, self.__class__.__name__)
+        for entry in self._entry_documents:
             self.entries.append(self._read_entry(entry))
         if not self.entries:
             raise ConfigFailure(
@@ -253,6 +257,14 @@ class IPIEpisode(garak.probes.IterativeProbe):
         self._sealed = set()
 
     # --- reading the source ---
+
+    def _load_unsafe(self):
+        """Cache the MiDojo pieces and read the entries, which hold MiDojo data."""
+        self._midojo = _midojo()
+        self.entries = [
+            self._read_entry(document)
+            for document in getattr(self, "_entry_documents", [])
+        ]
 
     def _source_path(self) -> Path:
         """The episode file the parameters name, refusing two different answers."""

@@ -7,6 +7,7 @@ import asyncio
 import copy
 import json
 import os
+import pickle
 import subprocess
 import sys
 
@@ -280,6 +281,19 @@ def test_shipped_example_loads():
     assert isinstance(probe, IPIEpisode)
     assert probe.entries, "the shipped example holds at least one episode entry"
     assert probe.entries[0].episode.turns, "the shipped episode has turns to send"
+
+
+def test_a_probe_pickles_and_restores_its_midojo_cache():
+    probe = garak._plugins.load_plugin("probes.ipi_episode.IPIEpisode")
+    restored = pickle.loads(pickle.dumps(probe))
+
+    assert type(restored) is IPIEpisode, "a pickled probe unpickles as itself"
+    assert (
+        restored._midojo.Episode is midojo.Episode
+    ), "unpickling restores the cached MiDojo imports"
+    assert [item.metadata for item in restored.entries] == [
+        item.metadata for item in probe.entries
+    ], "the pickled entries survive the round trip"
 
 
 def _load(tmp_path, *entries, key="source_path"):
