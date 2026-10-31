@@ -26,12 +26,12 @@ For detailed information on detector metrics and evaluation, see :doc:`../detect
    detectors/exploitation
    detectors/fileformats
    detectors/goodside
+   detectors/ipi_episode
    detectors/judge
    detectors/knownbadsignatures
    detectors/leakreplay
    detectors/lmrc
    detectors/malwaregen
-   detectors/midojo
    detectors/misleading
    detectors/mitigation
    detectors/packagehallucination
