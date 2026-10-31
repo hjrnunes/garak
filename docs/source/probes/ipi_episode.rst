@@ -93,10 +93,14 @@ score the chain ``None`` rather than as resisted.
 Parameters
 ----------
 
-``episode_source``
+``source_path``
     The file of episode entries. The shipped ``injection/example_episode.json``
     runs a single-turn order lookup against ``http://localhost:8081/mcp``; point
     it at your own file.
+
+``episode_source``
+    Deprecated alias for ``source_path``. The probe warns and reads it only when
+    ``source_path`` is unset; two keys naming different files are refused.
 
 ``upstream``
     An MCP server URL that wins over the URL each document's interception block

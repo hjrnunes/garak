@@ -234,7 +234,7 @@ def entry(*turns, metadata=None, **kwargs):
 def _probe(tmp_path, *entries, **params):
     source = tmp_path / "episodes.json"
     source.write_text(json.dumps(list(entries)), encoding="utf-8")
-    settings = {"episode_source": str(source), **params}
+    settings = {"source_path": str(source), **params}
     config_root = {"probes": {"ipi_episode": {"IPIEpisode": settings}}}
     probe = IPIEpisode(config_root=config_root)
     probe.upstream = orders_upstream()
@@ -280,6 +280,52 @@ def test_shipped_example_loads():
     assert isinstance(probe, IPIEpisode)
     assert probe.entries, "the shipped example holds at least one episode entry"
     assert probe.entries[0].episode.turns, "the shipped episode has turns to send"
+
+
+def _load(tmp_path, *entries, key="source_path"):
+    source = tmp_path / "episodes.json"
+    source.write_text(json.dumps(list(entries)), encoding="utf-8")
+    return IPIEpisode(
+        config_root={"probes": {"ipi_episode": {"IPIEpisode": {key: str(source)}}}}
+    )
+
+
+def test_source_path_names_the_episode_file(tmp_path):
+    probe = _load(tmp_path, entry("Look up ORD-101."), entry("Look up ORD-202."))
+    assert len(probe.entries) == 2, "source_path names the file the probe reads"
+
+
+def test_episode_source_is_a_deprecated_alias(tmp_path, caplog):
+    with caplog.at_level("WARNING"):
+        probe = _load(tmp_path, entry("Look up ORD-101."), key="episode_source")
+
+    assert len(probe.entries) == 1, "the old parameter still finds the file"
+    assert "episode_source" in caplog.text, "the alias says which key is old"
+    assert "source_path" in caplog.text, "and which key replaces it"
+    assert "deprecated" in caplog.text
+
+
+def test_naming_both_keys_with_different_files_is_refused(tmp_path):
+    other = tmp_path / "other.json"
+    other.write_text(json.dumps([entry("Look up ORD-202.")]), encoding="utf-8")
+    source = tmp_path / "episodes.json"
+    source.write_text(json.dumps([entry("Look up ORD-101.")]), encoding="utf-8")
+
+    with pytest.raises(ConfigFailure) as caught:
+        IPIEpisode(
+            config_root={
+                "probes": {
+                    "ipi_episode": {
+                        "IPIEpisode": {
+                            "source_path": str(source),
+                            "episode_source": str(other),
+                        }
+                    }
+                }
+            }
+        )
+    assert "source_path" in str(caught.value)
+    assert "episode_source" in str(caught.value)
 
 
 def test_metadata_is_copied_unread(tmp_path, report):

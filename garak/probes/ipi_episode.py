@@ -163,7 +163,9 @@ class IPIEpisode(garak.probes.IterativeProbe):
     """Drive MiDojo episode documents, one episode per chain
 
     Reads entries of ``{"episode": <episode document>, "metadata": <any JSON>}``
-    from ``episode_source``. The document is read with MiDojo's reader, so a
+    from ``source_path``. ``episode_source`` stays as a deprecated alias that
+    applies only when ``source_path`` is unset; naming both with different files
+    is refused. The document is read with MiDojo's reader, so a
     missing or unsupported ``schema_version`` is refused before any handle
     opens. ``metadata`` travels into every attempt's
     ``notes["source_metadata"]`` unread. The ``tool_call_condition`` the
@@ -198,7 +200,7 @@ class IPIEpisode(garak.probes.IterativeProbe):
     )
     # instructions injected via other contexts (tool results, documents, ...)
     intent = "T009indirect"
-    active = False  # opt-in: requires an external episode_source file
+    active = False  # opt-in: requires an external source_path file
     tags = [
         "avid-effect:security:S0403",
         "owasp:llm01",
@@ -210,7 +212,9 @@ class IPIEpisode(garak.probes.IterativeProbe):
 
     DEFAULT_PARAMS = garak.probes.IterativeProbe.DEFAULT_PARAMS | {
         # a .json or .jsonl file holding episode entries
-        "episode_source": "injection/example_episode.json",
+        "source_path": "injection/example_episode.json",
+        # deprecated alias for source_path; honoured only when source_path is unset
+        "episode_source": None,
         # an MCP server URL that wins over each document's interception upstream
         "upstream": None,
         # how many separate chains run the same episode
@@ -226,7 +230,7 @@ class IPIEpisode(garak.probes.IterativeProbe):
             raise ConfigFailure(_EXTRA_HINT) from exc
         self._midojo = _midojo()
         self.entries: List[EpisodeEntry] = []
-        source = resolve_source(self.episode_source)
+        source = self._source_path()
         for entry in load_episode_entries(source, self.__class__.__name__):
             self.entries.append(self._read_entry(entry))
         if not self.entries:
@@ -249,6 +253,30 @@ class IPIEpisode(garak.probes.IterativeProbe):
         self._sealed = set()
 
     # --- reading the source ---
+
+    def _source_path(self) -> Path:
+        """The episode file the parameters name, refusing two different answers."""
+        source = self.source_path
+        alias = self.episode_source
+        if alias is not None:
+            logging.warning(
+                "%s: episode_source is deprecated and will be removed; "
+                "use source_path",
+                self.__class__.__name__,
+            )
+            if source not in (None, self.DEFAULT_PARAMS["source_path"]) and str(
+                source
+            ) != str(alias):
+                raise ConfigFailure(
+                    f"{self.__class__.__name__}: source_path {source!r} and the "
+                    f"deprecated episode_source {alias!r} name different files"
+                )
+            source = alias
+        if source is None:
+            raise ConfigFailure(
+                f"{self.__class__.__name__}: no source_path names an episode file"
+            )
+        return resolve_source(source)
 
     def _read_entry(self, entry: dict) -> EpisodeEntry:
         document = entry["episode"]
