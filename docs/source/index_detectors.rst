@@ -32,7 +32,6 @@ For detailed information on detector metrics and evaluation, see :doc:`../detect
    detectors/leakreplay
    detectors/lmrc
    detectors/malwaregen
-   detectors/midojo
    detectors/misleading
    detectors/mitigation
    detectors/packagehallucination
