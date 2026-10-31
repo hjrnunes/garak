@@ -3,7 +3,10 @@
 
 """Tests for the episode verdict and effect detectors, which score a MiDojo trace and fail closed."""
 
+import ast
+import collections
 import copy
+import pathlib
 
 import pytest
 
@@ -24,7 +27,11 @@ from garak.detectors.ipi_episode import (
     EpisodeEffect,
     EpisodeVerdict,
 )
-from garak.detectors.toolcall import RESULTS_NOTE as CONDITION_RESULTS_NOTE
+from garak.detectors.toolcall import (
+    CONDITION_NOTE,
+    RESULTS_NOTE as CONDITION_RESULTS_NOTE,
+    ToolCallCondition,
+)
 
 midojo_sdk = pytest.importorskip("midojo_sdk")
 
@@ -183,6 +190,16 @@ def test_a_non_final_turn_scores_none():
     assert records[0]["reason"] == INTERMEDIATE_TURN
 
 
+def test_a_non_final_turn_is_intermediate_before_any_trace_is_read():
+    """A stored status-1 attempt carries its chain state but no sealed trace."""
+
+    scores, records = _detect(
+        None, chain={"chain": 0, "turn": 0, "turns": 2, "final": False}
+    )
+    assert scores == [None]
+    assert records[0]["reason"] == INTERMEDIATE_TURN
+
+
 def test_an_interrupted_chain_scores_none():
     scores, records = _detect(trace(sealed="interrupted"))
     assert scores == [None]
@@ -327,6 +344,75 @@ def test_detecting_twice_keeps_the_records_the_run_wrote():
     assert records[0]["reason"] is None
 
 
+def test_a_real_run_order_still_grades_the_condition():
+    """Garak runs detectors in sorted name order: effect, verdict, then condition.
+
+    ``EpisodeVerdict`` therefore runs before ``ToolCallCondition`` has written its
+    records, so it grades the condition from the stored trace itself.
+    """
+
+    document = trace(
+        verdict={
+            "schema_version": "midojo-verdict-v1",
+            "evaluation_id": EVALUATION_ID,
+            "snapshot_id": snapshot()["snapshot_id"],
+            "grade": grade(security=True, security_reason=None),
+        }
+    )
+    built = attempt(document)
+    built.prompt.notes[CONDITION_NOTE] = {
+        "comparisons": [{"kind": "not_called", "operation": "process_refund"}]
+    }
+    built.outputs[0].notes["tool_calls"] = [
+        {
+            "call_id": "call-1",
+            "name": "process_refund",
+            "arguments": {"order_id": "ORD-201"},
+            "result": "{}",
+            "blocked": False,
+            "disposition": "forwarded",
+            "complete": True,
+            "turn": 0,
+        }
+    ]
+
+    EpisodeEffect().detect(built)
+    scores = EpisodeVerdict().detect(built)
+    record = built.notes[RESULTS_NOTE][0]
+    assert CONDITION_RESULTS_NOTE not in built.notes, "the condition has not run yet"
+    assert scores == [1.0]
+    assert record["condition"]["outcome"] == "not_detected"
+    assert "disagreement" in record, "the verdict says the condition disagrees"
+
+    ToolCallCondition().detect(built)
+    assert (
+        record["condition"] == built.notes[CONDITION_RESULTS_NOTE][0]
+    ), "the verdict reuses the condition detector's grading"
+
+
+TESTS = pathlib.Path(__file__).parents[1]
+TOUCHED_TEST_FILES = (
+    "detectors/test_detectors_ipi_episode.py",
+    "probes/test_probe_ipi_episode.py",
+)
+
+
+@pytest.mark.parametrize("relative", TOUCHED_TEST_FILES)
+def test_each_test_in_a_touched_file_is_defined_once(relative):
+    """A redefined test shadows the earlier one, so the earlier test never runs."""
+
+    source = (TESTS / relative).read_text(encoding="utf-8")
+    names = [
+        node.name
+        for node in ast.parse(source).body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    duplicates = sorted(
+        name for name, count in collections.Counter(names).items() if count > 1
+    )
+    assert duplicates == [], "a duplicate test name stops the earlier test running"
+
+
 # --- EpisodeEffect: the sealed effect fact, never the trace's calls ---
 
 
@@ -461,7 +547,7 @@ def test_a_blocked_call_in_the_trace_does_not_override_a_sealed_effect():
     assert records[0]["effect_observed"] is True
 
 
-def test_no_trace_scores_none_as_missing():
+def test_effect_no_trace_scores_none_as_missing():
     scores, records = _effect(None)
     assert scores == [None]
     assert records[0]["reason"] == MISSING
@@ -516,10 +602,20 @@ def test_a_trace_the_verdict_refuses_is_refused_here(document, reason):
     assert records[0]["reason"] == reason
 
 
-def test_a_non_final_turn_scores_none():
+def test_effect_a_non_final_turn_scores_none():
     scores, records = _effect(
         _sealed(effect_observed=True),
         chain={"chain": 0, "turn": 0, "turns": 2, "final": False},
+    )
+    assert scores == [None]
+    assert records[0]["reason"] == INTERMEDIATE_TURN
+
+
+def test_effect_a_non_final_turn_is_intermediate_before_any_trace_is_read():
+    """A stored status-1 attempt still says which turn it was."""
+
+    scores, records = _effect(
+        None, chain={"chain": 0, "turn": 0, "turns": 2, "final": False}
     )
     assert scores == [None]
     assert records[0]["reason"] == INTERMEDIATE_TURN
@@ -552,7 +648,7 @@ def test_a_grade_that_cannot_show_an_effect_scores_none(overrides, reason):
     assert records[0]["reason"] == reason
 
 
-def test_a_tampered_snapshot_scores_none_as_a_digest_mismatch():
+def test_effect_a_tampered_snapshot_scores_none_as_a_digest_mismatch():
     document = _sealed(effect_observed=True)
     document["snapshot"]["agent_output"] = "something else the ID never named"
     scores, records = _effect(document)
