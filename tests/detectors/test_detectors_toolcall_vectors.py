@@ -3,10 +3,11 @@
 
 """Checks the tool-call condition detector against the shared contract vectors.
 
-The vector files come from the tool-call-condition-v2 contract, which the
-scenario producer owns. Every implementation of the contract must reproduce the
-results in them. Copy new versions of the files byte for byte and update the
-digests below; a stale or edited copy fails the digest test.
+The files under CONTRACT are a byte copy of the tool-call-condition-v2 contract,
+which the scenario producer owns. ``CONTRACT.lock`` is the copy's reference: it
+names the version and records every file's digest. Every implementation of the
+contract must reproduce the results in the vectors. Copy new versions of the
+files byte for byte; a stale or edited copy fails the digest test.
 """
 
 import hashlib
@@ -17,17 +18,18 @@ import pytest
 
 from garak.detectors import toolcall
 
-VECTOR_DIR = (
+CONTRACT = (
     pathlib.Path(__file__).parents[1] / "_assets" / "detectors" / "tool_call_condition"
 )
-
-VECTOR_SHA256 = {
-    "validate.json": "5899cc2f9cb3cf3912efa0383b229d8534314a848e51d9632fac4ad0ff7bd364",
-    "evaluate.json": "42c1216c2b6f2d972d7ae2715eeb12ee52a5c05334945e3ac559ecc559d86c52",
-}
-
+CONTRACT_LOCK = json.loads((CONTRACT / "CONTRACT.lock").read_text(encoding="utf-8"))
 
 CONTRACT_VERSION = "tool-call-condition-v2"
+VECTOR_DIR = CONTRACT / CONTRACT_VERSION / "vectors"
+
+VECTOR_SHA256 = {
+    name: CONTRACT_LOCK["files"][f"{CONTRACT_VERSION}/vectors/{name}"]
+    for name in ("validate.json", "evaluate.json")
+}
 
 
 def load_vector_file(name):
@@ -40,6 +42,24 @@ def load_vectors(name):
 
 VALIDATE_VECTORS = load_vectors("validate.json")
 EVALUATE_VECTORS = load_vectors("evaluate.json")
+
+
+def test_copy_references_the_implemented_version():
+    assert CONTRACT_LOCK["authority"] == "asago-scenario-generator"
+    assert CONTRACT_LOCK["contract"] == "tool-call-condition"
+    assert CONTRACT_LOCK["version"] == CONTRACT_VERSION
+    assert CONTRACT_VERSION in (CONTRACT / CONTRACT_VERSION / "README.md").read_text(
+        encoding="utf-8"
+    ), "the copy's README does not name the version"
+
+
+def test_copy_holds_exactly_the_contract_files():
+    on_disk = {
+        path.relative_to(CONTRACT).as_posix()
+        for path in CONTRACT.rglob("*")
+        if path.is_file() and path.name != "CONTRACT.lock"
+    }
+    assert on_disk == set(CONTRACT_LOCK["files"]), "the copy differs from its reference"
 
 
 @pytest.mark.parametrize("name", sorted(VECTOR_SHA256))

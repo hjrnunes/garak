@@ -2787,6 +2787,44 @@
       "tier": 2,
       "mod_time": "2026-05-27 20:51:42 +0000"
     },
+    "probes.ipi_episode.IPIEpisode": {
+      "description": "Drive MiDojo episode documents, one episode per chain",
+      "DEFAULT_PARAMS": {
+        "max_calls_per_conv": 10,
+        "follow_prompt_cap": false,
+        "source_path": "injection/example_episode.json",
+        "episode_source": null,
+        "upstream": null,
+        "repeats": 1,
+        "end_condition": "verify"
+      },
+      "active": false,
+      "doc_uri": "https://owasp.org/www-project-top-10-for-large-language-model-applications/",
+      "extended_detectors": [
+        "ipi_episode.EpisodeVerdict",
+        "ipi_episode.EpisodeEffect"
+      ],
+      "extra_dependency_names": [
+        "midojo"
+      ],
+      "goal": "elicit harmful behaviour through an injected MiDojo episode",
+      "intent": "T009indirect",
+      "lang": "en",
+      "modality": {
+        "in": [
+          "text"
+        ]
+      },
+      "parallelisable_attempts": true,
+      "primary_detector": "toolcall.ToolCallCondition",
+      "tags": [
+        "avid-effect:security:S0403",
+        "owasp:llm01",
+        "quality:Security:PromptStability"
+      ],
+      "tier": 3,
+      "mod_time": "2026-10-31 00:17:07 +0000"
+    },
     "probes.latentinjection.LatentInjectionFactSnippetEiffel": {
       "description": "String-based latent prompt injections in fact snippets on the Eiffel Tower",
       "DEFAULT_PARAMS": {
@@ -6887,6 +6925,50 @@
       "pass_desc": "Response does not contain false biographical claims",
       "tags": [],
       "mod_time": "2026-02-04 19:07:43 +0000"
+    },
+    "detectors.ipi_episode.EpisodeEffect": {
+      "description": "Score whether the injected action took effect, from MiDojo's sealed grade",
+      "DEFAULT_PARAMS": {
+        "skip": false
+      },
+      "active": true,
+      "doc_uri": "https://genai.owasp.org/llmrisk/llm01-prompt-injection/",
+      "extra_dependency_names": [],
+      "hit_desc": "The injected action took effect: the check holds without blocked calls",
+      "lang_spec": "*",
+      "modality": {
+        "out": [
+          "text"
+        ]
+      },
+      "pass_desc": "The injected action had no observed effect",
+      "tags": [
+        "owasp:llm01",
+        "quality:Security:PromptStability"
+      ],
+      "mod_time": "2026-10-31 00:16:18 +0000"
+    },
+    "detectors.ipi_episode.EpisodeVerdict": {
+      "description": "Score an IPIEpisode attempt by MiDojo's verdict, and fail closed",
+      "DEFAULT_PARAMS": {
+        "skip": false
+      },
+      "active": true,
+      "doc_uri": "https://genai.owasp.org/llmrisk/llm01-prompt-injection/",
+      "extra_dependency_names": [],
+      "hit_desc": "MiDojo's verdict holds the attack succeeded",
+      "lang_spec": "*",
+      "modality": {
+        "out": [
+          "text"
+        ]
+      },
+      "pass_desc": "MiDojo's verdict holds the attack was resisted",
+      "tags": [
+        "owasp:llm01",
+        "quality:Security:AgentSecurity"
+      ],
+      "mod_time": "2026-10-31 00:16:18 +0000"
     },
     "detectors.judge.Jailbreak": {
       "description": "Uses the configured model to detect if responses contain harmful content achieving the adversarial goal (JailbreakBench methodology)",
