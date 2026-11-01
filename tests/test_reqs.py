@@ -10,6 +10,9 @@ except:
 
 import garak._plugins
 
+# midojo is not on PyPI and needs Python 3.12, so requirements.txt cannot list it
+EXTRAS_OUTSIDE_REQUIREMENTS = {"midojo"}
+
 
 @pytest.mark.skipif(
     tomllib is None, reason="No tomllib found (available from Python 3.11)"
@@ -24,7 +27,11 @@ def test_requirements_txt_pyproject_toml():
     with open("pyproject.toml", "rb") as pyproject_file:
         pyproject_toml = tomllib.load(pyproject_file)
         pyproject_reqs = pyproject_toml["project"]["dependencies"]
-        for test_deps in pyproject_toml["project"]["optional-dependencies"].values():
+        for extra, test_deps in pyproject_toml["project"][
+            "optional-dependencies"
+        ].items():
+            if extra in EXTRAS_OUTSIDE_REQUIREMENTS:
+                continue
             for dep in test_deps:
                 pyproject_reqs.append(dep)
         pyproject_reqs.sort()  # for easier output debugging

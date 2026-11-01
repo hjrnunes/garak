@@ -12,24 +12,24 @@ and the recorded tool calls (also written to the output's
 
 ``EpisodeVerdict`` cross-checks that trace:
 
-============================  ======  ==========================================
-case                          score   reason
-============================  ======  ==========================================
-security true                 1.0     -
-security false, valid,        0.0     -
+==============================  ======  ==========================================
+case                            score   reason
+==============================  ======  ==========================================
+security true                   1.0     -
+security false, valid,          0.0     -
 delivered, complete
-no trace, verdict or snapshot None    ``missing``
-a recorded failure            None    ``errored``
-sealed before its grade       None    ``interrupted``
-the snapshot no longer        None    ``digest_mismatch``
+no trace, verdict or snapshot   None    ``missing``
+a recorded failure              None    ``errored``
+sealed before its grade         None    ``interrupted``
+the snapshot no longer          None    ``digest_mismatch``
 matches its ID
-the security grade is invalid None    ``invalid``
-the payload was not delivered None    ``not_delivered``
-the recording states no       None    ``unrecorded_delivery``
+the security grade is invalid   None    ``invalid``
+the payload was not delivered   None    ``not_delivered``
+the recording states no         None    ``unrecorded_delivery``
 delivery fact
-the capture is incomplete     None    ``incomplete``
-a non-final turn              None    ``intermediate_turn``
-============================  ======  ==========================================
+the capture is incomplete       None    ``incomplete``
+a non-final turn                None    ``intermediate_turn``
+==============================  ======  ==========================================
 
 every ``None`` carries its reason and a longer detail, in
 ``attempt.notes["episode_verdict_results"]``. A grade that disagrees with the

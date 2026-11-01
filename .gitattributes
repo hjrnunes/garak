@@ -1,0 +1,3 @@
+# The copied contract and vector files are checked by digest, so a checkout must
+# not rewrite their line endings (Windows runners default to autocrlf).
+tests/_assets/detectors/** -text
