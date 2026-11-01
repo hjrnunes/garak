@@ -33,7 +33,7 @@ Optional MiDojo Support
 garak supports Python 3.10 or later.
 The MiDojo injection-spec probe (``probes.midojo.InjectionSpecProbe``) also needs MiDojo, which needs Python 3.12 or later.
 To use it, run garak on Python 3.12 or later and install the ``midojo`` package and ``midojo_sdk`` with its ``mcp`` extra.
-The probe needs a MiDojo whose ``OpenAIResponsesAgentClient`` takes ``allowed_tools`` (MiDojo commit b9319ac or later), and refuses to load with an older one:
+The probe also needs the injection-spec modules MiDojo's rename introduced: ``midojo.injection_spec``, ``midojo.evaluation_handle`` and ``midojo.injection_spec_document``, whose reader accepts ``midojo-injection-spec-v1`` documents. MiDojo commit ``2a794f3`` or later provides them, including the ``OpenAIResponsesAgentClient`` that takes ``allowed_tools``, and the probe refuses to load with an older MiDojo:
 
 .. code-block:: console
 
