@@ -1,6 +1,14 @@
 garak.probes.ipi_episode
 ========================
 
+.. note::
+
+   This module is the deprecated alias of :mod:`garak.probes.midojo`. The probe
+   is :class:`garak.probes.midojo.InjectionSpecProbe`; it loads the same
+   documents, reads the ``episode`` entry key and writes the same notes. Use
+   ``probes.midojo.InjectionSpecProbe`` in new configuration, and read
+   :doc:`midojo` for the current documentation.
+
 Run MiDojo episode documents as multi-turn tool-use probes.
 
 Each source entry holds an ``episode`` (a ``midojo-episode-v1`` document, read

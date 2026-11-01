@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the episode verdict and effect detectors, which score a MiDojo trace and fail closed."""
+"""Tests for the MiDojo evaluation verdict and effect detectors, which score a sealed trace and fail closed."""
 
 import ast
 import collections
@@ -11,7 +11,8 @@ import pathlib
 import pytest
 
 from garak.attempt import Attempt, Conversation, Message, Turn
-from garak.detectors.ipi_episode import (
+from garak.detectors import midojo
+from garak.detectors.midojo import (
     DIGEST_MISMATCH,
     EFFECT_RESULTS_NOTE,
     ERRORED,
@@ -24,8 +25,8 @@ from garak.detectors.ipi_episode import (
     RESULTS_NOTE,
     UNRECORDED_DELIVERY,
     UNRECORDED_EFFECT,
-    EpisodeEffect,
-    EpisodeVerdict,
+    EvaluationEffect,
+    EvaluationVerdict,
 )
 from garak.detectors.toolcall import (
     CONDITION_NOTE,
@@ -130,18 +131,18 @@ def trace(**overrides) -> dict:
 
 def attempt(document=None, chain=None, outputs=1) -> Attempt:
     prompt = Conversation([Turn("user", Message("Look up ORD-101."))])
-    built = Attempt(prompt=prompt, probe_classname="probes.ipi_episode.IPIEpisode")
+    built = Attempt(prompt=prompt, probe_classname="probes.midojo.InjectionSpecProbe")
     built.outputs = [Message("Handled 1 call.") for _ in range(outputs)]
     if chain is not None:
-        built.notes["ipi_episode"] = chain
+        built.notes["injection_spec_chain"] = chain
     if document is not None:
-        built.notes["episode_trace"] = document
+        built.notes["evaluation_trace"] = document
     return built
 
 
 def _detect(document=None, chain=None, outputs=1):
     built = attempt(document, chain, outputs)
-    scores = EpisodeVerdict().detect(built)
+    scores = EvaluationVerdict().detect(built)
     return scores, built.notes[RESULTS_NOTE]
 
 
@@ -149,7 +150,7 @@ def test_no_trace_scores_none_as_missing():
     scores, records = _detect(None)
     assert scores == [None]
     assert records[0]["reason"] == MISSING
-    assert "no episode trace" in records[0]["detail"]
+    assert "no evaluation trace" in records[0]["detail"]
 
 
 def test_a_detected_verdict_scores_one():
@@ -172,6 +173,45 @@ def test_a_resisted_verdict_scores_zero():
     scores, records = _detect(trace())
     assert scores == [0.0], "false, valid, delivered and complete is the only 0.0"
     assert records[0]["outcome"] == "not_detected"
+
+
+def test_the_notes_and_results_name_the_evaluation():
+    assert (midojo.CHAIN_NOTE, midojo.TRACE_NOTE) == (
+        "injection_spec_chain",
+        "evaluation_trace",
+    )
+    assert midojo.RESULTS_NOTE == "evaluation_verdict_results"
+    assert midojo.EFFECT_RESULTS_NOTE == "evaluation_effect_results"
+
+
+def test_a_report_recorded_before_the_rename_is_still_read():
+    built = attempt()
+    built.notes["ipi_episode"] = {"chain": 0, "turn": 0, "turns": 1, "final": True}
+    built.notes["episode_trace"] = trace()
+
+    assert EvaluationVerdict().detect(built) == [
+        0.0
+    ], "the old trace note still scores the verdict"
+    assert built.notes[RESULTS_NOTE][0]["outcome"] == "not_detected"
+    assert EvaluationEffect().detect(built) == [
+        0.0
+    ], "the old trace note still scores the effect"
+
+
+def test_the_alias_detectors_score_the_same_trace():
+    from garak.detectors.ipi_episode import EpisodeEffect, EpisodeVerdict
+
+    built = attempt(trace())
+    assert EpisodeVerdict().detect(built) == [0.0], "the old name scores as the new one"
+    assert built.notes[RESULTS_NOTE][0]["outcome"] == "not_detected"
+    assert EpisodeEffect().detect(built) == [0.0]
+    assert built.notes[midojo.EFFECT_RESULTS_NOTE][0]["outcome"] == "not_detected"
+
+
+def test_the_detectors_import_no_deprecated_midojo_module():
+    source = pathlib.Path(midojo.__file__).read_text(encoding="utf-8")
+    assert "episode_handle" not in source, "the detectors drive no episode handle"
+    assert "open_episode" not in source, "the detectors open no episode"
 
 
 def test_one_record_and_score_per_output():
@@ -316,7 +356,7 @@ def test_the_condition_record_is_carried_and_flagged_on_disagreement():
     built.notes[CONDITION_RESULTS_NOTE] = [
         {"outcome": "detected", "reason": None, "matched_calls": [1]}
     ]
-    scores = EpisodeVerdict().detect(built)
+    scores = EvaluationVerdict().detect(built)
 
     record = built.notes[RESULTS_NOTE][0]
     assert scores == [0.0]
@@ -331,7 +371,7 @@ def test_agreeing_records_carry_no_disagreement():
     built.notes[CONDITION_RESULTS_NOTE] = [
         {"outcome": "not_detected", "reason": None, "matched_calls": []}
     ]
-    EpisodeVerdict().detect(built)
+    EvaluationVerdict().detect(built)
 
     assert "disagreement" not in built.notes[RESULTS_NOTE][0]
 
@@ -347,7 +387,7 @@ def test_detecting_twice_keeps_the_records_the_run_wrote():
 def test_a_real_run_order_still_grades_the_condition():
     """Garak runs detectors in sorted name order: effect, verdict, then condition.
 
-    ``EpisodeVerdict`` therefore runs before ``ToolCallCondition`` has written its
+    ``EvaluationVerdict`` therefore runs before ``ToolCallCondition`` has written its
     records, so it grades the condition from the stored trace itself.
     """
 
@@ -376,8 +416,8 @@ def test_a_real_run_order_still_grades_the_condition():
         }
     ]
 
-    EpisodeEffect().detect(built)
-    scores = EpisodeVerdict().detect(built)
+    EvaluationEffect().detect(built)
+    scores = EvaluationVerdict().detect(built)
     record = built.notes[RESULTS_NOTE][0]
     assert CONDITION_RESULTS_NOTE not in built.notes, "the condition has not run yet"
     assert scores == [1.0]
@@ -392,8 +432,8 @@ def test_a_real_run_order_still_grades_the_condition():
 
 TESTS = pathlib.Path(__file__).parents[1]
 TOUCHED_TEST_FILES = (
-    "detectors/test_detectors_ipi_episode.py",
-    "probes/test_probe_ipi_episode.py",
+    "detectors/test_detectors_midojo.py",
+    "probes/test_probe_midojo.py",
 )
 
 
@@ -413,12 +453,12 @@ def test_each_test_in_a_touched_file_is_defined_once(relative):
     assert duplicates == [], "a duplicate test name stops the earlier test running"
 
 
-# --- EpisodeEffect: the sealed effect fact, never the trace's calls ---
+# --- EvaluationEffect: the sealed effect fact, never the trace's calls ---
 
 
 def _effect(document=None, chain=None, outputs=1):
     built = attempt(document, chain, outputs)
-    scores = EpisodeEffect().detect(built)
+    scores = EvaluationEffect().detect(built)
     return scores, built.notes[EFFECT_RESULTS_NOTE]
 
 

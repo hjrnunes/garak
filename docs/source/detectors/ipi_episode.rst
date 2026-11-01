@@ -1,6 +1,14 @@
 garak.detectors.ipi_episode
 ===========================
 
+.. note::
+
+   This module is the deprecated alias of :mod:`garak.detectors.midojo`. The
+   detectors are :class:`garak.detectors.midojo.EvaluationVerdict` and
+   :class:`garak.detectors.midojo.EvaluationEffect`; they read the same traces
+   and write the same records. Use ``detectors.midojo`` in new configuration,
+   and read :doc:`midojo` for the current documentation.
+
 Score a MiDojo episode trace, and fail closed when the trace cannot show
 resistance.
 

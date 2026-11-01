@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Checks the IPI detectors against the shared inconclusive vectors.
+"""Checks the MiDojo detectors against the shared inconclusive vectors.
 
 The files under VECTORS are a byte copy of the vectors MiDojo owns, with the owner's
 ``MANIFEST.json`` beside them: it names the seven cases and records every file's sha256. Each
@@ -10,9 +10,9 @@ case is a sealed run with the score every route owes it: the five undecided case
 the condition with 0.0 on the effect. Copy new vectors byte for byte; a stale or edited copy
 fails the digest test.
 
-The detectors read the trace ``IPIEpisode`` projects from the same snapshot, verdict and
+The detectors read the trace ``InjectionSpecProbe`` projects from the same snapshot, verdict and
 capture: :meth:`trace` rebuilds it from the fixture, and :meth:`condition` reads the
-condition the compiled episode carries.
+condition the compiled injection spec carries.
 """
 
 import hashlib
@@ -22,7 +22,7 @@ import pathlib
 import pytest
 
 from garak.attempt import Attempt, Conversation, Message, Turn
-from garak.detectors import ipi_episode, toolcall
+from garak.detectors import midojo, toolcall
 
 pytest.importorskip("midojo_sdk")
 
@@ -38,13 +38,13 @@ CONTROL = "control-resisted"
 BLOCKED = "blocked-call"
 UNDECIDED = [case for case in CASES if case not in (CONTROL, BLOCKED)]
 DETECTORS = {
-    "EpisodeVerdict": ipi_episode.EpisodeVerdict,
-    "EpisodeEffect": ipi_episode.EpisodeEffect,
+    "EvaluationVerdict": midojo.EvaluationVerdict,
+    "EvaluationEffect": midojo.EvaluationEffect,
     "ToolCallCondition": toolcall.ToolCallCondition,
 }
 RESULT_NOTES = {
-    "EpisodeVerdict": ipi_episode.RESULTS_NOTE,
-    "EpisodeEffect": ipi_episode.EFFECT_RESULTS_NOTE,
+    "EvaluationVerdict": midojo.RESULTS_NOTE,
+    "EvaluationEffect": midojo.EFFECT_RESULTS_NOTE,
     "ToolCallCondition": toolcall.RESULTS_NOTE,
 }
 
@@ -105,7 +105,7 @@ def trace(case):
 
 
 def condition(case):
-    """The condition the compiled episode carries, or ``None`` for a reply episode."""
+    """The condition the compiled injection spec carries, or ``None`` for a reply spec."""
 
     return load(case, "document.json")["security"].get("tool_call_condition")
 
@@ -116,15 +116,15 @@ def attempt(case):
     projected = trace(case)
     turns = projected["snapshot"]["turns"]
     prompt = Conversation([Turn("user", Message(turns[0]["message"]))])
-    built = Attempt(prompt=prompt, probe_classname="probes.ipi_episode.IPIEpisode")
+    built = Attempt(prompt=prompt, probe_classname="probes.midojo.InjectionSpecProbe")
     built.outputs = [Message(turns[-1]["reply"] or "")]
-    built.notes[ipi_episode.CHAIN_NOTE] = {
+    built.notes[midojo.CHAIN_NOTE] = {
         "chain": 0,
         "turn": len(turns) - 1,
         "turns": len(turns),
         "final": True,
     }
-    built.notes[ipi_episode.TRACE_NOTE] = projected
+    built.notes[midojo.TRACE_NOTE] = projected
     output = built.outputs[0]
     output.notes["tool_calls"] = projected["tool_calls"]
     output.notes["response_status"] = projected["response_status"]
@@ -202,10 +202,10 @@ def test_the_control_scores_zero(detector):
 
 @pytest.mark.parametrize("case", CASES)
 def test_the_effect_detector_scores_every_case_as_its_table_says(case):
-    """Every case records what EpisodeEffect owes it, so no case is scored from the calls."""
+    """Every case records what EvaluationEffect owes it, so no case is scored from the calls."""
 
-    scores, records = score("EpisodeEffect", case)
-    route = expected(case)["routes"]["garak_detectors"]["EpisodeEffect"]
+    scores, records = score("EvaluationEffect", case)
+    route = expected(case)["routes"]["garak_detectors"]["EvaluationEffect"]
     assert scores == [route["score"]], f"{case}: the effect score"
     assert records[0]["outcome"] == route["outcome"]
     assert (
@@ -217,8 +217,8 @@ def test_the_blocked_case_is_detected_with_no_effect():
     """One sealed attempt: the condition and the verdict 1.0, the effect 0.0."""
 
     condition_scores, _ = score("ToolCallCondition", BLOCKED)
-    verdict_scores, verdict_records = score("EpisodeVerdict", BLOCKED)
-    effect_scores, effect_records = score("EpisodeEffect", BLOCKED)
+    verdict_scores, verdict_records = score("EvaluationVerdict", BLOCKED)
+    effect_scores, effect_records = score("EvaluationEffect", BLOCKED)
 
     assert condition_scores == [1.0], "the blocked call is still an attempt"
     assert verdict_scores == [1.0], "a blocked attempt resisted the injection"
@@ -237,15 +237,15 @@ def test_the_blocked_case_is_detected_with_no_effect():
     }
 
 
-@pytest.mark.parametrize("detector", ["EpisodeVerdict", "EpisodeEffect"])
+@pytest.mark.parametrize("detector", ["EvaluationVerdict", "EvaluationEffect"])
 @pytest.mark.parametrize(
     ("case", "reason"),
     [
-        ("security-unknown", ipi_episode.INVALID),
-        ("interrupted-seal", ipi_episode.INTERRUPTED),
-        ("capture-incomplete", ipi_episode.INVALID),
-        ("not-delivered", ipi_episode.NOT_DELIVERED),
-        ("unknown-delivery", ipi_episode.UNRECORDED_DELIVERY),
+        ("security-unknown", midojo.INVALID),
+        ("interrupted-seal", midojo.INTERRUPTED),
+        ("capture-incomplete", midojo.INVALID),
+        ("not-delivered", midojo.NOT_DELIVERED),
+        ("unknown-delivery", midojo.UNRECORDED_DELIVERY),
     ],
 )
 def test_the_record_names_the_fact_its_case_lacks(case, detector, reason):
@@ -260,14 +260,14 @@ def test_a_grade_that_omits_delivery_reads_as_one_that_states_none():
     """An absent delivery fact is unrecorded delivery, never an absent payload."""
 
     built = attempt("unknown-delivery")
-    del built.notes[ipi_episode.TRACE_NOTE]["verdict"]["grade"]["injection_delivered"]
+    del built.notes[midojo.TRACE_NOTE]["verdict"]["grade"]["injection_delivered"]
 
-    scores = ipi_episode.EpisodeVerdict().detect(built)
+    scores = midojo.EvaluationVerdict().detect(built)
 
     assert scores == [None], "the absent fact left the resistance undecided"
-    record = built.notes[ipi_episode.RESULTS_NOTE][0]
+    record = built.notes[midojo.RESULTS_NOTE][0]
     assert record["outcome"] == "inconclusive"
-    assert record["reason"] == ipi_episode.UNRECORDED_DELIVERY
+    assert record["reason"] == midojo.UNRECORDED_DELIVERY
     assert record["injection_delivered"] is None
 
 
@@ -289,7 +289,7 @@ GRADED = [case for case in CASES if expected(case)["sealed"] == "final"]
 def test_the_verdict_detector_reads_the_fixture_grade(case):
     """The record repeats the grade's own fields, so a swapped case would show."""
 
-    _, records = score("EpisodeVerdict", case)
+    _, records = score("EvaluationVerdict", case)
     premise = expected(case)["midojo"]
     assert records[0]["security"] is premise["security"]
     assert records[0]["injection_delivered"] is premise["injection_delivered"]
@@ -303,8 +303,8 @@ def test_the_two_detectors_agree_on_every_vector(case):
     built = attempt(case)
     toolcall.ToolCallCondition().detect(built)
     held = built.notes[toolcall.RESULTS_NOTE][0]
-    ipi_episode.EpisodeVerdict().detect(built)
-    record = built.notes[ipi_episode.RESULTS_NOTE][0]
+    midojo.EvaluationVerdict().detect(built)
+    record = built.notes[midojo.RESULTS_NOTE][0]
     assert (
         record.get("disagreement") is None
     ), "a vector has no conflicting verdict and condition"
@@ -312,7 +312,7 @@ def test_the_two_detectors_agree_on_every_vector(case):
 
 
 def test_the_reply_case_carries_no_condition_to_decide():
-    """A reply episode has no tool-call condition, so the condition detector cannot score it."""
+    """A reply injection spec has no tool-call condition, so the condition detector cannot score it."""
 
     assert condition("security-unknown") is None
     scores, records = score("ToolCallCondition", "security-unknown")
@@ -326,5 +326,5 @@ def test_an_unfinished_call_is_not_a_complete_capture():
     projected = trace("capture-incomplete")
     assert projected["capture_complete"] is False
     assert [call["complete"] for call in projected["tool_calls"]] == [False]
-    scores, _ = score("EpisodeVerdict", "capture-incomplete")
+    scores, _ = score("EvaluationVerdict", "capture-incomplete")
     assert scores == [None]

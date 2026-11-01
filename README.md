@@ -83,9 +83,9 @@ OK, if that went fine, you're probably good to go!
 git remote set-url origin https://github.com/NVIDIA/garak.git
 ```
 
-### Optional: MiDojo episode support
+### Optional: MiDojo injection-spec support
 
-`garak` supports Python 3.10 or later. The MiDojo episode probe (`probes.ipi_episode.IPIEpisode`) needs garak's `midojo` extra, which installs the `midojo` package on Python 3.12 or later (the extra carries that marker). From a source checkout:
+`garak` supports Python 3.10 or later. The MiDojo injection-spec probe (`probes.midojo.InjectionSpecProbe`) needs garak's `midojo` extra, which installs the `midojo` package on Python 3.12 or later (the extra carries that marker). From a source checkout:
 
 ```
 python -m pip install -e '.[midojo]'
@@ -97,7 +97,7 @@ The probe also needs `midojo_sdk[mcp]`, which the extra does not name, from the 
 python -m pip install "<path to MiDojo>/interception/python-sdk[mcp]"
 ```
 
-It needs a MiDojo whose `OpenAIResponsesAgentClient` takes `allowed_tools` (MiDojo commit b9319ac or later). Install both into a Python 3.12+ environment alongside `garak`. See `docs/source/probes/ipi_episode.rst` for details.
+It needs a MiDojo whose `OpenAIResponsesAgentClient` takes `allowed_tools` (MiDojo commit b9319ac or later). Install both into a Python 3.12+ environment alongside `garak`. See `docs/source/probes/midojo.rst` for details. `probes.ipi_episode.IPIEpisode` is the deprecated alias of the same probe.
 
 
 ## Versioning

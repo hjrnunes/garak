@@ -16,7 +16,10 @@ for top_path in TOP_PATHS:
         if not str(i).endswith("__init__.py")
     ]
 
-ROOT_MODULES = list(Path("garak").glob("*py"))
+# `_version.py` is generated at install time and deliberately untracked, so it has no docs
+ROOT_MODULES = [
+    path for path in Path("garak").glob("*py") if path.name != "_version.py"
+]
 
 MARKDOWN_CANARIES = set(
     [

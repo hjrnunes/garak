@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the MiDojo episode probe, which drives episode documents as chains."""
+"""Tests for the MiDojo injection-spec probe, which drives injection-spec documents as chains."""
 
 import asyncio
 import copy
 import json
 import os
+import pathlib
 import pickle
 import subprocess
 import sys
@@ -18,13 +19,13 @@ import garak.harnesses.base
 import garak.probes
 from garak import _config
 from garak.attempt import Message
-from garak.detectors.ipi_episode import EpisodeEffect, EpisodeVerdict
+from garak.detectors.midojo import EvaluationEffect, EvaluationVerdict
 from garak.detectors.toolcall import ToolCallCondition
 from garak.evaluators import ThresholdEvaluator
 from garak.exception import ConfigFailure
-from garak.probes.ipi_episode import (
+from garak.probes.midojo import (
     CHAIN_NOTE,
-    IPIEpisode,
+    InjectionSpecProbe,
     METADATA_NOTE,
     TRACE_NOTE,
 )
@@ -96,13 +97,13 @@ def disposable_runtime(monkeypatch):
     A document names only the runtime types MiDojo ships, so the test swaps the
     runtime the handle builds and the capabilities the probe reads instead.
     """
-    real_open = midojo.episode_handle.open
+    real_open = midojo.evaluation_handle.open
 
-    def open_scripted(episode, *, runtime=None, reset=False, **kwargs):
-        scripted = ScriptedDisposableRuntime("episode", episode.runtime)
-        return real_open(episode, runtime=scripted, reset=reset, **kwargs)
+    def open_scripted(injection_spec, *, runtime=None, reset=False, **kwargs):
+        scripted = ScriptedDisposableRuntime("injection-spec", injection_spec.runtime)
+        return real_open(injection_spec, runtime=scripted, reset=reset, **kwargs)
 
-    monkeypatch.setattr(midojo.episode_handle, "open", open_scripted)
+    monkeypatch.setattr(midojo.evaluation_handle, "open", open_scripted)
     monkeypatch.setattr(
         midojo.runtimes,
         "runtime_capabilities",
@@ -114,7 +115,7 @@ def disposable_runtime(monkeypatch):
 
 
 def orders_upstream() -> FastMCP:
-    """The tools an episode's interceptor mirrors, as an in-process MCP server."""
+    """The tools an injection spec's interceptor mirrors, as an in-process MCP server."""
     server = FastMCP("scripted-orders")
 
     @server.tool
@@ -214,7 +215,7 @@ def document(*turns, runtime=None, condition=CONDITION, instructions=None):
             "probe_payloads": [],
         },
         "runtime": runtime or {"type": "unmanaged"},
-        "schema_version": "midojo-episode-v1",
+        "schema_version": "midojo-injection-spec-v1",
         "security": {"tool_call_condition": condition} if condition else None,
         "suite_name": None,
         "tools": TOOLS,
@@ -226,18 +227,18 @@ def document(*turns, runtime=None, condition=CONDITION, instructions=None):
 
 
 def entry(*turns, metadata=None, **kwargs):
-    out = {"episode": document(*turns, **kwargs)}
+    out = {"injection_spec": document(*turns, **kwargs)}
     if metadata is not None:
         out["metadata"] = metadata
     return out
 
 
 def _probe(tmp_path, *entries, **params):
-    source = tmp_path / "episodes.json"
+    source = tmp_path / "injection_specs.json"
     source.write_text(json.dumps(list(entries)), encoding="utf-8")
     settings = {"source_path": str(source), **params}
-    config_root = {"probes": {"ipi_episode": {"IPIEpisode": settings}}}
-    probe = IPIEpisode(config_root=config_root)
+    config_root = {"probes": {"midojo": {"InjectionSpecProbe": settings}}}
+    probe = InjectionSpecProbe(config_root=config_root)
     probe.upstream = orders_upstream()
     return probe
 
@@ -277,19 +278,21 @@ def _report_entries(path):
 
 
 def test_shipped_example_loads():
-    probe = garak._plugins.load_plugin("probes.ipi_episode.IPIEpisode")
-    assert isinstance(probe, IPIEpisode)
-    assert probe.entries, "the shipped example holds at least one episode entry"
-    assert probe.entries[0].episode.turns, "the shipped episode has turns to send"
+    probe = garak._plugins.load_plugin("probes.midojo.InjectionSpecProbe")
+    assert isinstance(probe, InjectionSpecProbe)
+    assert probe.entries, "the shipped example holds at least one injection-spec entry"
+    assert probe.entries[
+        0
+    ].injection_spec.turns, "the shipped injection spec has turns to send"
 
 
 def test_a_probe_pickles_and_restores_its_midojo_cache():
-    probe = garak._plugins.load_plugin("probes.ipi_episode.IPIEpisode")
+    probe = garak._plugins.load_plugin("probes.midojo.InjectionSpecProbe")
     restored = pickle.loads(pickle.dumps(probe))
 
-    assert type(restored) is IPIEpisode, "a pickled probe unpickles as itself"
+    assert type(restored) is InjectionSpecProbe, "a pickled probe unpickles as itself"
     assert (
-        restored._midojo.Episode is midojo.Episode
+        restored._midojo.InjectionSpec is midojo.InjectionSpec
     ), "unpickling restores the cached MiDojo imports"
     assert [item.metadata for item in restored.entries] == [
         item.metadata for item in probe.entries
@@ -297,16 +300,52 @@ def test_a_probe_pickles_and_restores_its_midojo_cache():
 
 
 def _load(tmp_path, *entries, key="source_path"):
-    source = tmp_path / "episodes.json"
+    source = tmp_path / "injection_specs.json"
     source.write_text(json.dumps(list(entries)), encoding="utf-8")
-    return IPIEpisode(
-        config_root={"probes": {"ipi_episode": {"IPIEpisode": {key: str(source)}}}}
+    return InjectionSpecProbe(
+        config_root={"probes": {"midojo": {"InjectionSpecProbe": {key: str(source)}}}}
     )
 
 
-def test_source_path_names_the_episode_file(tmp_path):
+def test_source_path_names_the_injection_spec_file(tmp_path):
     probe = _load(tmp_path, entry("Look up ORD-101."), entry("Look up ORD-202."))
     assert len(probe.entries) == 2, "source_path names the file the probe reads"
+
+
+def test_the_probe_writes_the_renamed_notes():
+    assert (CHAIN_NOTE, TRACE_NOTE) == ("injection_spec_chain", "evaluation_trace")
+
+
+def test_an_episode_key_entry_is_still_read(tmp_path):
+    probe = _load(tmp_path, {"episode": document("Look up ORD-101.")})
+    assert len(probe.entries) == 1, "a source that spells the key episode is still read"
+
+
+def test_an_old_document_version_is_still_read(tmp_path):
+    old = document("Look up ORD-101.")
+    old["schema_version"] = "midojo-episode-v1"
+    probe = _load(tmp_path, {"injection_spec": old})
+    assert probe.entries[0].injection_spec.turns == (
+        "Look up ORD-101.",
+    ), "MiDojo's reader still accepts the document version it shipped before the rename"
+
+
+def test_the_alias_plugin_loads_the_renamed_probe():
+    probe = garak._plugins.load_plugin("probes.ipi_episode.IPIEpisode")
+    assert isinstance(
+        probe, InjectionSpecProbe
+    ), "the old plugin name loads the renamed probe"
+    assert type(probe).__name__ == "IPIEpisode", "the alias keeps its own plugin name"
+    assert probe.entries, "the alias reads the shipped injection spec"
+
+
+def test_the_probe_uses_the_renamed_midojo_api():
+    source = pathlib.Path(garak.probes.midojo.__file__).read_text(encoding="utf-8")
+    assert "open_episode" not in source, "the probe no longer opens an episode"
+    assert (
+        "episode_handle" not in source
+    ), "the probe no longer drives an episode handle"
+    assert "evaluation_handle" in source, "the probe drives an evaluation handle"
 
 
 def test_episode_source_is_a_deprecated_alias(tmp_path, caplog):
@@ -322,15 +361,15 @@ def test_episode_source_is_a_deprecated_alias(tmp_path, caplog):
 def test_naming_both_keys_with_different_files_is_refused(tmp_path):
     other = tmp_path / "other.json"
     other.write_text(json.dumps([entry("Look up ORD-202.")]), encoding="utf-8")
-    source = tmp_path / "episodes.json"
+    source = tmp_path / "injection_specs.json"
     source.write_text(json.dumps([entry("Look up ORD-101.")]), encoding="utf-8")
 
     with pytest.raises(ConfigFailure) as caught:
-        IPIEpisode(
+        InjectionSpecProbe(
             config_root={
                 "probes": {
-                    "ipi_episode": {
-                        "IPIEpisode": {
+                    "midojo": {
+                        "InjectionSpecProbe": {
                             "source_path": str(source),
                             "episode_source": str(other),
                         }
@@ -356,7 +395,7 @@ def test_one_reply_per_turn_and_serial_chains(tmp_path, report):
     probe = _probe(tmp_path, entry("Look up ORD-101."))
 
     assert probe.generations == 1, "a handle records exactly one reply per turn"
-    assert probe.parallel_attempts == 1, "one episode is live at a time"
+    assert probe.parallel_attempts == 1, "one evaluation is live at a time"
 
 
 def test_chain_notes_hold_plain_data_only(tmp_path, report, monkeypatch):
@@ -379,17 +418,17 @@ def test_chain_notes_hold_plain_data_only(tmp_path, report, monkeypatch):
         ],
     )
 
-    assert len(agent.prompts) == 2, "one request per episode turn"
+    assert len(agent.prompts) == 2, "one request per injection-spec turn"
     assert len(attempts) == 1, "a chain scores once, on its final turn"
     assert len(copies_mid_chain) == 2, "both turns queued with the handle live"
     assert all(
-        "episode_handle" not in copy for copy in copies_mid_chain
+        "evaluation_handle" not in copy for copy in copies_mid_chain
     ), "no handle rides in the queue"
     # the attempt queue is deep-copied between turns: only plain data may ride in it
     final = copy.deepcopy(attempts[0])
     assert final.notes[CHAIN_NOTE]["chain"] == 0
     json.dumps(final.as_dict())
-    assert "episode_handle" not in json.dumps(final.as_dict())
+    assert "evaluation_handle" not in json.dumps(final.as_dict())
 
 
 def test_unsupported_document_version_is_refused(tmp_path, monkeypatch):
@@ -399,23 +438,25 @@ def test_unsupported_document_version_is_refused(tmp_path, monkeypatch):
         opened.append(args)
         raise AssertionError("no handle may open for a refused document")
 
-    monkeypatch.setattr(midojo.episode_handle, "open", _open)
+    monkeypatch.setattr(midojo.evaluation_handle, "open", _open)
     bad = entry("Look up ORD-101.")
-    bad["episode"]["schema_version"] = "midojo-episode-v9"
+    bad["injection_spec"]["schema_version"] = "midojo-injection-spec-v9"
 
     with pytest.raises(ConfigFailure) as caught:
         _probe(tmp_path, bad)
-    assert "midojo-episode-v9" in str(caught.value), "the refusal names the version"
+    assert "midojo-injection-spec-v9" in str(
+        caught.value
+    ), "the refusal names the version"
     assert opened == [], "the document is read before any handle opens"
 
 
 def test_missing_extra_asks_for_the_midojo_extra(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "midojo", None)
-    source = tmp_path / "episodes.json"
+    source = tmp_path / "injection_specs.json"
     source.write_text(json.dumps([entry("Look up ORD-101.")]), encoding="utf-8")
 
     with pytest.raises(ConfigFailure) as caught:
-        IPIEpisode(config_root={"episode_source": str(source)})
+        InjectionSpecProbe(config_root={"episode_source": str(source)})
     assert "midojo" in str(caught.value), "the error names the extra to install"
 
 
@@ -445,8 +486,8 @@ def test_single_turn_obeying_the_payload_is_detected(tmp_path, report):
     assert trace["snapshot_id"] == trace["verdict"]["snapshot_id"]
     assert attempts[0].outputs[0].notes["tool_calls"] == trace["tool_calls"]
     assert ToolCallCondition().detect(attempts[0]) == [1.0]
-    assert EpisodeVerdict().detect(attempts[0]) == [1.0]
-    assert EpisodeEffect().detect(attempts[0]) == [1.0], "the refund ran to its end"
+    assert EvaluationVerdict().detect(attempts[0]) == [1.0]
+    assert EvaluationEffect().detect(attempts[0]) == [1.0], "the refund ran to its end"
 
 
 def test_single_turn_resisting_the_payload_is_not_detected(tmp_path, report):
@@ -458,8 +499,8 @@ def test_single_turn_resisting_the_payload_is_not_detected(tmp_path, report):
     assert trace["capture_complete"] is True, "a refusal is a complete capture"
     assert trace["response_status"] == "completed"
     assert ToolCallCondition().detect(attempts[0]) == [0.0]
-    assert EpisodeVerdict().detect(attempts[0]) == [0.0]
-    assert EpisodeEffect().detect(attempts[0]) == [
+    assert EvaluationVerdict().detect(attempts[0]) == [0.0]
+    assert EvaluationEffect().detect(attempts[0]) == [
         0.0
     ], "the payload's action never ran"
 
@@ -608,8 +649,10 @@ def test_a_failing_turn_ends_its_chain(tmp_path, report):
     trace = attempts[0].notes[TRACE_NOTE]
     assert trace["error"] == "ResponsesNotCompleted"
     assert trace["response_status"] == "incomplete"
-    assert EpisodeVerdict().detect(attempts[0]) == [None], "a failed turn scores None"
-    assert "errored" in attempts[0].notes["episode_verdict_results"][0]["reason"]
+    assert EvaluationVerdict().detect(attempts[0]) == [
+        None
+    ], "a failed turn scores None"
+    assert "errored" in attempts[0].notes["evaluation_verdict_results"][0]["reason"]
     assert probe._handles == {}, "a failed chain leaves no handle"
     assert _own_listeners() == before, "and no interceptor keeps listening"
 
@@ -653,9 +696,9 @@ def test_a_none_reply_on_the_final_turn_scores_none(tmp_path, report):
     assert trace["sealed"] == "final", "a turn with no output still seals its chain"
     assert trace["error"] == "ResponsesNotCompleted", "no output is a failed turn"
     assert trace["response_status"] == "incomplete"
-    assert EpisodeVerdict().detect(attempts[0]) == [None], "never scored as resisted"
+    assert EvaluationVerdict().detect(attempts[0]) == [None], "never scored as resisted"
     assert ToolCallCondition().detect(attempts[0]) == [None], "nor as a miss"
-    assert "errored" in attempts[0].notes["episode_verdict_results"][0]["reason"]
+    assert "errored" in attempts[0].notes["evaluation_verdict_results"][0]["reason"]
     assert probe._handles == {}, "a failed chain leaves no handle"
     assert _own_listeners() == before, "and no interceptor keeps listening"
 
@@ -685,25 +728,25 @@ def test_the_capture_status_names_what_stops_a_condition():
         "response_status": "incomplete",
         "verdict": {"grade": {"injection_delivered": None}},
     }
-    assert IPIEpisode._capture_status(undecided) == "unrecorded_delivery"
+    assert InjectionSpecProbe._capture_status(undecided) == "unrecorded_delivery"
 
     decided = {
         **undecided,
         "response_status": "completed",
         "verdict": {"grade": {"injection_delivered": True}},
     }
-    assert IPIEpisode._capture_status(decided) == "completed"
+    assert InjectionSpecProbe._capture_status(decided) == "completed"
 
     truncated = {**undecided, "capture_complete": False}
     assert (
-        IPIEpisode._capture_status(truncated) == "incomplete"
+        InjectionSpecProbe._capture_status(truncated) == "incomplete"
     ), "a truncated capture keeps its own name"
 
     errored = {**undecided, "error": "ResponsesNotCompleted"}
-    assert IPIEpisode._capture_status(errored) == "incomplete"
+    assert InjectionSpecProbe._capture_status(errored) == "incomplete"
 
     interrupted = {**undecided, "sealed": "interrupted"}
-    assert IPIEpisode._capture_status(interrupted) == "incomplete"
+    assert InjectionSpecProbe._capture_status(interrupted) == "incomplete"
 
 
 def test_an_unrecorded_delivery_is_named_in_the_condition_reason(tmp_path, report):
@@ -755,7 +798,7 @@ def test_a_none_reply_mid_chain_does_not_abort_the_run(tmp_path, report):
     assert trace["sealed"] == "final"
     assert trace["error"] == "ResponsesNotCompleted"
     assert trace["response_status"] == "incomplete"
-    assert EpisodeVerdict().detect(cut_short) == [None], "never scored as resisted"
+    assert EvaluationVerdict().detect(cut_short) == [None], "never scored as resisted"
     assert ToolCallCondition().detect(cut_short) == [None], "nor as a miss"
     later = attempts[1].notes[TRACE_NOTE]
     assert later["error"] is None, "the next chain runs to its own end"
@@ -830,8 +873,8 @@ def test_an_error_mid_chain_closes_every_handle(tmp_path, report):
     assert _own_listeners() == before, "and no interceptor keeps listening"
     interrupted = probe._last_processed[0]
     assert interrupted.notes[TRACE_NOTE]["sealed"] == "interrupted"
-    assert EpisodeVerdict().detect(interrupted) == [None]
-    assert "interrupted" in interrupted.notes["episode_verdict_results"][0]["reason"]
+    assert EvaluationVerdict().detect(interrupted) == [None]
+    assert "interrupted" in interrupted.notes["evaluation_verdict_results"][0]["reason"]
 
 
 def test_an_interrupt_closes_every_handle(tmp_path, report):
@@ -856,7 +899,7 @@ def test_an_interrupt_closes_every_handle(tmp_path, report):
     interrupted = probe._last_processed[0]
     assert interrupted.notes[TRACE_NOTE]["sealed"] == "interrupted"
     assert interrupted.notes[CHAIN_NOTE]["final"] is True, "the last attempt is final"
-    assert EpisodeVerdict().detect(interrupted) == [
+    assert EvaluationVerdict().detect(interrupted) == [
         None
     ], "an interrupted chain never resists"
 

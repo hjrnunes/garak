@@ -31,7 +31,7 @@ Optional MiDojo Support
 -----------------------
 
 garak supports Python 3.10 or later.
-The MiDojo episode probe (``probes.ipi_episode.IPIEpisode``) also needs MiDojo, which needs Python 3.12 or later.
+The MiDojo injection-spec probe (``probes.midojo.InjectionSpecProbe``) also needs MiDojo, which needs Python 3.12 or later.
 To use it, run garak on Python 3.12 or later and install the ``midojo`` package and ``midojo_sdk`` with its ``mcp`` extra.
 The probe needs a MiDojo whose ``OpenAIResponsesAgentClient`` takes ``allowed_tools`` (MiDojo commit b9319ac or later), and refuses to load with an older one:
 
@@ -39,4 +39,5 @@ The probe needs a MiDojo whose ``OpenAIResponsesAgentClient`` takes ``allowed_to
 
    $ python3 -m pip install "<path to MiDojo>" "<path to MiDojo>/interception/python-sdk[mcp]"
 
-See :doc:`garak.probes.ipi_episode.IPIEpisode <probes/ipi_episode>` for details.
+See :doc:`garak.probes.midojo.InjectionSpecProbe <probes/midojo>` for details.
+``probes.ipi_episode.IPIEpisode`` is the deprecated alias of the same probe.
