@@ -133,9 +133,6 @@ Attempts scored by ``detectors.midojo.EvaluationVerdict``;
 enables extended detectors scores whether the injection took effect as well as
 whether the agent broke the condition.
 
-``probes.ipi_episode.IPIEpisode`` is the deprecated alias of this probe: it
-loads the same documents and writes the same notes.
-
 .. automodule:: garak.probes.midojo
    :members:
    :undoc-members:

@@ -128,10 +128,6 @@ score 1.0 for it: the target complied. The same call never runs, so
 also never satisfies an ordering rule's ``requires_prior``, because it did not
 run the call the later one depends on.
 
-``detectors.ipi_episode.EpisodeVerdict`` and
-``detectors.ipi_episode.EpisodeEffect`` are the deprecated aliases of these
-detectors: they read the same traces and write the same records.
-
 .. automodule:: garak.detectors.midojo
    :members:
    :undoc-members:

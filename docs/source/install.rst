@@ -40,4 +40,3 @@ The probe also needs the injection-spec modules MiDojo's rename introduced: ``mi
    $ python3 -m pip install "<path to MiDojo>" "<path to MiDojo>/interception/python-sdk[mcp]"
 
 See :doc:`garak.probes.midojo.InjectionSpecProbe <probes/midojo>` for details.
-``probes.ipi_episode.IPIEpisode`` is the deprecated alias of the same probe.

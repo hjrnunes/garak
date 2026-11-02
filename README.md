@@ -97,7 +97,7 @@ The probe also needs `midojo_sdk[mcp]`, which the extra does not name, from the 
 python -m pip install "<path to MiDojo>/interception/python-sdk[mcp]"
 ```
 
-It needs a MiDojo with the injection-spec modules and document reader the probe imports: `midojo.injection_spec`, `midojo.evaluation_handle` and `midojo.injection_spec_document`, whose reader accepts `midojo-injection-spec-v1` documents. MiDojo commit `2a794f3` or later provides them, including the `OpenAIResponsesAgentClient` that takes `allowed_tools` (added in `b9319ac`). Install both into a Python 3.12+ environment alongside `garak`. See `docs/source/probes/midojo.rst` for details. `probes.ipi_episode.IPIEpisode` is the deprecated alias of the same probe.
+It needs a MiDojo with the injection-spec modules and document reader the probe imports: `midojo.injection_spec`, `midojo.evaluation_handle` and `midojo.injection_spec_document`, whose reader accepts `midojo-injection-spec-v1` documents. MiDojo commit `2a794f3` or later provides them, including the `OpenAIResponsesAgentClient` that takes `allowed_tools` (added in `b9319ac`). Install both into a Python 3.12+ environment alongside `garak`. See `docs/source/probes/midojo.rst` for details.
 
 
 ## Versioning

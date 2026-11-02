@@ -226,6 +226,12 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
     # pickle; the state carries the source documents instead
     _unsafe_attributes = ["_midojo", "entries"]
 
+    # Configurable sets these from DEFAULT_PARAMS
+    source_path: str | None
+    episode_source: str | None
+    upstream: str | None
+    repeats: int
+
     lang = "en"
     goal = "elicit harmful behaviour through an injected MiDojo injection spec"
     doc_uri = (
