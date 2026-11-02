@@ -26,8 +26,11 @@ rejected, that never finished, or that neither spoke nor called a tool ends its
 chain early; a turn that answers with tool calls alone does not, because MiDojo
 grades those calls. The sealed trace goes on the
 final attempt: the recorded tool calls (with their dispositions and whether each
-finished), the evaluation and snapshot IDs, MiDojo's verdict, and whether the
-capture is complete. ``detectors.toolcall.ToolCallCondition`` re-grades the
+finished), the evaluation and snapshot IDs, MiDojo's delivery facts and the
+exposure derived from them, MiDojo's verdict, and whether the capture is
+complete. A chain closed before its seal carries null for both delivery and
+exposure, because no plan was placed under that evaluation.
+``detectors.toolcall.ToolCallCondition`` re-grades the
 trace with no MiDojo code, and ``detectors.midojo.EvaluationVerdict``
 cross-checks it against the verdict. The trace goes in
 ``notes["evaluation_trace"]`` and the chain's own state in
@@ -107,6 +110,7 @@ def _midojo() -> SimpleNamespace:
     try:
         from midojo import evaluation_handle
         from midojo.control_plane.routers.runs import snapshot_response
+        from midojo.delivery import delivery_facts, exposure
         from midojo.injection_spec import InjectionSpec
         from midojo.injection_spec_document import (
             InjectionSpecDocumentError,
@@ -118,6 +122,8 @@ def _midojo() -> SimpleNamespace:
     return SimpleNamespace(
         evaluation_handle=evaluation_handle,
         snapshot_response=snapshot_response,
+        delivery_facts=delivery_facts,
+        exposure=exposure,
         InjectionSpec=InjectionSpec,
         InjectionSpecDocumentError=InjectionSpecDocumentError,
         UnsupportedDocumentVersion=UnsupportedDocumentVersion,
@@ -449,6 +455,7 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
         state = this_attempt.notes[CHAIN_NOTE]
         chain, index = state["chain"], state["turn"]
         handle = self._handles[chain]
+        entry = self.entries[chain // self.repeats]
         output = this_attempt.outputs[0] if this_attempt.outputs else None
         if output is not None and not handle.closed and not handle.sealed:
             handle.record_reply(index, output.text or "")
@@ -461,7 +468,6 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
                 earlier.append(
                     garak.attempt.Turn("assistant", garak.attempt.Message(output.text))
                 )
-            entry = self.entries[chain // self.repeats]
             handle.start_turn(entry.injection_spec.turns[index + 1])
             self._next_attempts[chain] = [
                 self._turn_attempt(chain, index + 1, earlier, handle)
@@ -470,7 +476,7 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
         state["final"] = True
         self._sealed.add(chain)
         try:
-            trace = self._seal_trace(handle)
+            trace = self._seal_trace(handle, entry.injection_spec.plan)
         finally:
             self._close_handle(chain)
         if failure is not None:
@@ -481,11 +487,16 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
 
     # --- the sealed trace ---
 
-    def _seal_trace(self, handle) -> dict:
+    def _seal_trace(self, handle, plan) -> dict:
         snapshot = handle.seal()
-        return self._trace(handle, snapshot, sealed="final")
+        return self._trace(handle, snapshot, sealed="final", plan=plan)
 
-    def _trace(self, handle, snapshot, *, sealed: str) -> dict:
+    def _trace(self, handle, snapshot, *, sealed: str, plan=None) -> dict:
+        """Describe one chain's seal, with MiDojo's delivery and exposure for it.
+
+        Only a sealed chain states delivery and exposure; a chain closed before
+        its seal records neither, so an interrupted trace leaves both null.
+        """
         verdict = handle.grade()
         served = self._midojo.snapshot_response(snapshot).model_dump(mode="json")
         complete = self._capture_complete(snapshot)
@@ -512,6 +523,8 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
             "failure": None,
             "error": None,
             "tool_calls": calls,
+            "delivery": self._delivery(plan, snapshot),
+            "exposure": self._exposure(plan, snapshot),
             # only a delivered payload with a complete capture can decide a condition
             "response_status": (
                 "completed"
@@ -519,6 +532,24 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
                 else "incomplete"
             ),
         }
+
+    def _delivery(self, plan, snapshot) -> list | None:
+        if plan is None:
+            return None
+        return [
+            fact.model_dump(mode="json")
+            for fact in self._midojo.delivery_facts(plan, snapshot.function_calls)
+        ]
+
+    def _exposure(self, plan, snapshot) -> dict | None:
+        if plan is None:
+            return None
+        return self._midojo.exposure(
+            plan,
+            snapshot.function_calls,
+            turns=len(snapshot.turns),
+            evidence_status=snapshot.evidence_status,
+        ).model_dump(mode="json")
 
     @staticmethod
     def _capture_complete(snapshot) -> bool:
@@ -632,7 +663,11 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
                 )
 
     def _interrupted_trace(self, handle) -> dict:
-        """The trace of a chain closed before its seal: no verdict is trustworthy."""
+        """The trace of a chain closed before its seal: no verdict is trustworthy.
+
+        The chain sealed no plan, so its trace states neither delivery nor
+        exposure: no payload was placed under this evaluation.
+        """
         result = handle.result
         snapshot = None if result is None else result.snapshot
         if snapshot is None:
@@ -647,8 +682,11 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
                 "failure": None,
                 "error": type(error).__name__ if error is not None else "NoSnapshot",
                 "tool_calls": [],
+                "delivery": None,
+                "exposure": None,
                 "response_status": "incomplete",
             }
+        # the plan stays with the seal, so both states stay null here
         return self._trace(handle, snapshot, sealed="interrupted")
 
     def _close_handle(self, chain: int) -> None:

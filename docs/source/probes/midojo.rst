@@ -62,6 +62,11 @@ and attaches the trace to that chain's final attempt:
   snapshot as MiDojo serves it, MiDojo's verdict, whether the capture is
   complete, and the recorded tool calls with their dispositions and whether
   each finished;
+* the same trace's ``delivery`` and ``exposure`` are MiDojo's own
+  ``delivery_facts`` and ``exposure`` functions applied to the injection spec's
+  plan and the sealed snapshot. The probe computes neither itself, so a trace
+  states the same delivery and exposure that MiDojo reports for the same seal,
+  and a reader need not run MiDojo to compare them;
 * the output message's ``notes["tool_calls"]`` and ``notes["response_status"]``
   carry the same calls in the shape ``ToolCallCondition`` reads. The status
   names what stops the condition deciding, and it reaches a reader of the
@@ -71,6 +76,10 @@ and attaches the trace to that chain's final attempt:
   ``ToolCallCondition`` suffixes its inconclusive reason with that status, so a
   receipt's detection reason distinguishes an unrecorded delivery from a
   truncated capture.
+
+A chain an error or an interrupt ends before its seal carries ``null`` for both
+``delivery`` and ``exposure``: the probe never placed that chain's plan under a
+grade, so the trace states no delivery facts rather than an empty list.
 
 ``probe()`` returns only each chain's final attempt, and that is the mode this
 probe ships. The harness writes every attempt it executes at status 1 and every
