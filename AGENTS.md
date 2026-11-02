@@ -8,6 +8,25 @@ It's open source software, used in production environments, with an active and s
 As such, the code needs to be robust, precise, and responsible.
 Due to the nature of the project, there is a lot of potentially harmful or dangerous data associated with the repository.   
 
+## Key concepts
+
+- **Testing tool** — Garak, the tool that runs probes against a target; not the
+  target's own tools.
+- **Target** — the endpoint or tool surface under assessment. Garak assesses
+  targets, not models.
+- **Probe** — a plugin that builds attempts (`garak/probes/`).
+- **Attempt** — one probe's stimulus with its generations, detector results and
+  notes; it can hold several generations.
+- **Detector** — a plugin that scores an attempt (`garak/detectors/`).
+- **Generator** — the plugin that calls the target; not the scenario or artifact
+  generator.
+- **Injection spec** (`InjectionSpec`) — the injected test this fork's
+  `midojo.InjectionSpecProbe` runs.
+- **Evaluation** — MiDojo's sealed record of one execution;
+  `midojo.EvaluationVerdict` and `midojo.EvaluationEffect` read it.
+- **Agent tool** — an operation the target exposes; `toolcall.ToolCallCondition`
+  checks whether an attempt called one.
+
 ## Contribution policy
 
 ### Duplicate-work checks
