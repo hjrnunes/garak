@@ -232,12 +232,15 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
     interceptor in MiDojo's interceptor service instead, which serves the
     interceptor outside this process; a target the sandbox hosts needs it. Name
     both or neither. Garak logs its options at DEBUG, so it masks the credential
-    before logging one, and the probe keeps it out of the trace; the environment
-    route keeps it out of the command line as well.
+    in every spelling the CLI accepts, and the probe keeps it out of the trace;
+    the environment route keeps it out of the command line as well.
     With neither named, the handle reads MiDojo's ``MIDOJO_INTERCEPTOR_URL`` and
     ``MIDOJO_INTERCEPTOR_CREDENTIAL``, so a run can select the service from its
     environment alone; a remote chain mirrors ``upstream``, which must then be
-    the target's MCP URL rather than a server in this process.
+    the target's MCP URL rather than a server in this process. A release the
+    service never acknowledges after the seal raises ``LinkLostError`` from the
+    close; the trace records its reason as ``release_error``, which a reader must
+    treat as a lost release, while the sealed verdict stands.
     """
 
     extra_dependency_names = ["midojo"]
@@ -518,7 +521,10 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
         try:
             trace = self._seal_trace(handle, entry.injection_spec.plan)
         finally:
-            self._close_handle(chain)
+            release_error = self._close_handle(chain)
+        if release_error is not None:
+            # the service never acknowledged the release; the seal still stands
+            trace["release_error"] = release_error
         if failure is not None:
             # a turn the target never answered leaves the chain's condition undecided
             trace["error"] = failure
@@ -562,6 +568,7 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
             "sealed": sealed,
             "failure": None,
             "error": None,
+            "release_error": None,
             "tool_calls": calls,
             "delivery": self._delivery(plan, snapshot),
             "exposure": self._exposure(plan, snapshot),
@@ -721,6 +728,7 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
                 "sealed": "interrupted",
                 "failure": None,
                 "error": type(error).__name__ if error is not None else "NoSnapshot",
+                "release_error": None,
                 "tool_calls": [],
                 "delivery": None,
                 "exposure": None,
@@ -729,21 +737,25 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
         # the plan stays with the seal, so both states stay null here
         return self._trace(handle, snapshot, sealed="interrupted")
 
-    def _close_handle(self, chain: int) -> None:
+    def _close_handle(self, chain: int) -> str | None:
         """Close and forget a chain's handle once the chain is sealed.
 
         A sealed chain needs neither its interceptor nor its sandbox, and
         closing here keeps at most one handle live however many chains run.
+        Return the reason of a release the service never acknowledged, which
+        MiDojo records on the handle and raises from the close, else None.
         """
         handle = self._handles.pop(chain, None)
         if handle is None:
-            return
+            return None
         try:
             handle.close()
         except (RuntimeError, ValueError) as exc:
             logging.warning(
                 "InjectionSpecProbe: couldn't close chain %d: %s", chain, exc
             )
+        error = getattr(handle, "close_error", None)
+        return getattr(error, "reason", None)
 
     def _close_handles(self) -> None:
         for chain in list(self._handles):

@@ -75,7 +75,11 @@ and attaches the trace to that chain's final attempt:
   ``incomplete`` when a call capture or the turn itself is short.
   ``ToolCallCondition`` suffixes its inconclusive reason with that status, so a
   receipt's detection reason distinguishes an unrecorded delivery from a
-  truncated capture.
+  truncated capture;
+* a release the interceptor service never acknowledged after the seal is
+  recorded as ``release_error``, with the reason MiDojo gives
+  (``link-lost``). The sealed verdict and the capture's status stand, and a
+  reader must treat the chain's release as lost, not as a clean close.
 
 A chain an error or an interrupt ends before its seal carries ``null`` for both
 ``delivery`` and ``exposure``: the probe never placed that chain's plan under a
@@ -113,12 +117,13 @@ Remote interceptor
 ``interceptor_url`` runs each chain's interceptor in MiDojo's interceptor
 service instead of this process, which a target the sandbox hosts needs. Name
 ``interceptor_url`` and ``interceptor_credential`` together, or neither. Garak
-logs its options at DEBUG, so it masks the credential before logging one, and
-the probe keeps it out of an attempt's notes; the environment route keeps the
-value out of the command line as well. With neither named, the handle reads
-``MIDOJO_INTERCEPTOR_URL`` and ``MIDOJO_INTERCEPTOR_CREDENTIAL``. A remote chain
-mirrors ``upstream``, which must then be the target's MCP URL rather than a
-server in this process.
+logs its arguments at DEBUG, so it masks the credential in every spelling the
+CLI accepts: a separate token, one ``--probe_options=<json>`` token, an option
+file or a ``--config`` file. The probe keeps the value out of an attempt's
+notes; the environment route keeps it out of the command line as well. With
+neither named, the handle reads ``MIDOJO_INTERCEPTOR_URL`` and
+``MIDOJO_INTERCEPTOR_CREDENTIAL``. A remote chain mirrors ``upstream``, which
+must then be the target's MCP URL rather than a server in this process.
 
 Parameters
 ----------
@@ -142,10 +147,10 @@ Parameters
     or neither.
 
 ``interceptor_credential``
-    The bind credential the interceptor service expects. Garak masks it before
-    logging an option and the probe keeps it out of the trace; MiDojo's
-    ``MIDOJO_INTERCEPTOR_CREDENTIAL`` keeps the value out of the command line
-    too.
+    The bind credential the interceptor service expects. Garak masks it in
+    every option spelling before logging a run's arguments, and the probe keeps
+    it out of the trace; MiDojo's ``MIDOJO_INTERCEPTOR_CREDENTIAL`` keeps the
+    value out of the command line too.
 
 ``repeats``
     How many separate chains run the same injection spec, each its own

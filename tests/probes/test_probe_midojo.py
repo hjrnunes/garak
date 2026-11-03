@@ -4,6 +4,7 @@
 """Tests for the MiDojo injection-spec probe, which drives injection-spec documents as chains."""
 
 import asyncio
+import contextlib
 import copy
 import json
 import logging
@@ -16,6 +17,7 @@ import sys
 import pytest
 
 import garak._plugins
+import garak.cli
 import garak.harnesses.base
 import garak.probes
 from garak import _config
@@ -1091,6 +1093,111 @@ class SamplingAgent(ScriptedAgent):
         return super().generate(prompt, generations_this_call)
 
 
+# --- closing a sealed chain ---
+
+
+class SealedHandle(RecordingHandle):
+    """An open evaluation that already sealed, as the probe closes it."""
+
+    close_error = None
+
+    def __init__(self):
+        super().__init__()
+        self.sealed = True
+
+    def close(self):
+        self.closed = True
+
+
+class LosingHandle(SealedHandle):
+    """A sealed evaluation whose release the service never acknowledged.
+
+    MiDojo records the lost link on the handle and raises it from ``close``.
+    """
+
+    def close(self):
+        self.closed = True
+        self.close_error = midojo.evaluation_handle.LinkLostError(
+            "the release lost the link"
+        )
+        raise self.close_error
+
+
+def _sealed_trace():
+    """A sealed chain's trace, in the shape ``_trace`` returns for a completed capture."""
+    return {
+        "evaluation_id": "evaluation-6f1c",
+        "snapshot_id": "snapshot-6f1c",
+        "snapshot": None,
+        "verdict": {"grade": {"security": True, "injection_delivered": True}},
+        "capture_complete": True,
+        "sealed": "final",
+        "failure": None,
+        "error": None,
+        "release_error": None,
+        "tool_calls": [],
+        "delivery": [],
+        "exposure": None,
+        "response_status": "completed",
+    }
+
+
+def _final_turn(probe, handle, chain=0):
+    """The chain's last attempt, as ``_advance_chain`` reads it after the seal."""
+    attempt = probe._turn_attempt(chain, 0, [], handle)
+    attempt.outputs = [Message("the reply", notes={"response_status": "completed"})]
+    attempt.notes[CHAIN_NOTE]["final"] = True
+    return attempt
+
+
+def _advance_to_seal(probe, handle, monkeypatch):
+    monkeypatch.setattr(probe, "_seal_trace", lambda sealed, plan: _sealed_trace())
+    probe._handles = {0: handle}
+    return probe._advance_chain(_final_turn(probe, handle))
+
+
+def test_a_lost_release_after_the_midojo_seal_is_recorded_on_the_trace(
+    tmp_path, monkeypatch
+):
+    probe = _probe(tmp_path, entry("Look up ORD-101 for me."))
+
+    trace = _advance_to_seal(probe, LosingHandle(), monkeypatch)
+
+    assert trace["sealed"] == "final", "the seal stands; only the release was lost"
+    assert trace["release_error"] == "link-lost", "the trace shows the lost release"
+    assert trace["error"] is None, "a lost release is not a generation failure"
+    assert probe._handles == {}, "the handle is closed and forgotten"
+
+
+def test_a_lost_midojo_release_keeps_the_sealed_verdict_and_its_capture_status(
+    tmp_path, monkeypatch
+):
+    probe = _probe(tmp_path, entry("Look up ORD-101 for me."))
+
+    trace = _advance_to_seal(probe, LosingHandle(), monkeypatch)
+    attempt = probe._turn_attempt(0, 0, [], SealedHandle())
+    probe._attach_trace(attempt, trace)
+
+    assert trace["verdict"]["grade"]["security"] is True, "the grade stays as sealed"
+    assert attempt.notes[TRACE_NOTE]["release_error"] == "link-lost"
+    assert (
+        attempt.outputs[0].notes["response_status"] == "completed"
+    ), "the capture still decides its condition"
+
+
+def test_an_acknowledged_midojo_release_records_no_lost_release(
+    tmp_path, monkeypatch
+):
+    probe = _probe(tmp_path, entry("Look up ORD-101 for me."))
+    handle = SealedHandle()
+
+    trace = _advance_to_seal(probe, handle, monkeypatch)
+
+    assert handle.closed, "the acknowledged release closes the handle"
+    assert trace["release_error"] is None, "an acknowledged release leaves no marker"
+    assert trace["sealed"] == "final"
+
+
 REMOTE_SERVICE_SCRIPT = """
 import asyncio
 import contextlib
@@ -1162,15 +1269,15 @@ asyncio.run(main())
 """
 
 
-@pytest.fixture
-def remote_service():
+@contextlib.contextmanager
+def _remote_interceptor(credential):
     """An interceptor service and its scripted upstream, in a child process.
 
     The driver must hold no socket of its own for the no-listener assertion to
-    mean anything, so both servers live here.
+    mean anything, so both servers live in the child.
     """
     process = subprocess.Popen(
-        [sys.executable, "-c", REMOTE_SERVICE_SCRIPT, CREDENTIAL],
+        [sys.executable, "-c", REMOTE_SERVICE_SCRIPT, credential],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -1192,6 +1299,12 @@ def remote_service():
             process.wait(30)
         process.stdout.close()
         process.stderr.close()
+
+
+@pytest.fixture
+def remote_service():
+    with _remote_interceptor(CREDENTIAL) as service:
+        yield service
 
 
 def test_the_interceptor_parameters_reach_the_handle_as_a_remote_interception(
@@ -1300,6 +1413,7 @@ def test_a_remote_probe_seals_its_chain_and_opens_no_listener(
     assert (
         trace["verdict"]["grade"]["security"] is True
     ), "the remote chain grades like a local one"
+    assert trace["release_error"] is None, "the service acknowledged the release"
     own_log = "\n".join(
         record.getMessage()
         for record in caplog.records
@@ -1343,6 +1457,22 @@ SENTINEL = "sentinel-probe-option-credential-must-never-be-written"
 REDACTION_MARKER = "[redacted]"
 INTERCEPTOR_URL = "http://127.0.0.1:8767"
 
+# Every spelling that hands the probe its credential, named after the option it uses
+ROUTES = [
+    "probe_options",
+    "probe_options_equals",
+    "probe_option_file",
+    "config",
+    "generator_options_equals",
+]
+# The routes that hand the probe this credential, so the run reaches its bind
+PROBE_ROUTES = [
+    "probe_options",
+    "probe_options_equals",
+    "probe_option_file",
+    "config",
+]
+
 
 def _cli_homes(tmp_path):
     """A private garak data, config and cache home, so the run leaves the shell alone."""
@@ -1354,36 +1484,65 @@ def _cli_homes(tmp_path):
     return homes
 
 
-def _credential_route(tmp_path, route):
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"midojo.InjectionSpecProbe": {"interceptor_credential": "sentinel"}}',
+        '--probe_options={"midojo.InjectionSpecProbe": {"interceptor_credential": "sentinel"}}',
+        '-o={"interceptor_credential": "sentinel"}',
+    ],
+)
+def test_the_log_masks_a_midojo_credential_in_every_json_option_spelling(text):
+    redacted = garak.cli.redact_credentials(text)
+
+    assert "sentinel" not in redacted
+    assert REDACTION_MARKER in redacted
+
+
+def test_the_midojo_log_leaves_a_non_json_option_unchanged():
+    assert (
+        garak.cli.redact_credentials("--probe_option_file=options=1.json")
+        == "--probe_option_file=options=1.json"
+    )
+
+
+def _credential_route(tmp_path, route, url=INTERCEPTOR_URL, upstream=None):
     """The CLI arguments for one hand-supplied credential route."""
     options = {
         "midojo.InjectionSpecProbe": {
-            "interceptor_url": INTERCEPTOR_URL,
+            "interceptor_url": url,
             "interceptor_credential": SENTINEL,
         }
     }
+    if upstream is not None:
+        options["midojo.InjectionSpecProbe"]["upstream"] = upstream
     if route == "probe_options":
         return ["--probe_options", json.dumps(options)]
+    if route == "probe_options_equals":
+        return [f"--probe_options={json.dumps(options)}"]
     if route == "probe_option_file":
         option_file = tmp_path / "probe_options.json"
         option_file.write_text(json.dumps(options), encoding="utf-8")
         return ["--probe_option_file", str(option_file)]
+    if route == "generator_options_equals":
+        # the generator never reads it: the raw argument is what the log must mask
+        generator_options = {"test.Blank": {"interceptor_credential": SENTINEL}}
+        return [f"--generator_options={json.dumps(generator_options)}"]
     config_file = tmp_path / "credential.yaml"
     config_file.write_text(
         "plugins:\n"
         "  probes:\n"
         "    midojo.InjectionSpecProbe:\n"
-        f"      interceptor_url: {INTERCEPTOR_URL}\n"
-        f"      interceptor_credential: {SENTINEL}\n",
+        f"      interceptor_url: {url}\n"
+        f"      interceptor_credential: {SENTINEL}\n"
+        + (f"      upstream: {upstream}\n" if upstream is not None else ""),
         encoding="utf-8",
     )
     return ["--config", str(config_file)]
 
 
-@pytest.mark.parametrize("route", ["probe_options", "probe_option_file", "config"])
-def test_the_cli_keeps_a_hand_supplied_credential_out_of_the_log_and_the_report(
-    tmp_path, route
-):
+def _cli_run(tmp_path, route, url=INTERCEPTOR_URL, upstream=None):
+    """Run the probe from the CLI with one credential route; return its output and files."""
     log_path = tmp_path / "garak.log"
     env = dict(os.environ, **_cli_homes(tmp_path), GARAK_LOG_FILE=str(log_path))
     completed = subprocess.run(
@@ -1397,7 +1556,7 @@ def test_the_cli_keeps_a_hand_supplied_credential_out_of_the_log_and_the_report(
             "midojo.InjectionSpecProbe",
             "--generations",
             "1",
-            *_credential_route(tmp_path, route),
+            *_credential_route(tmp_path, route, url=url, upstream=upstream),
         ],
         cwd=tmp_path,
         env=env,
@@ -1407,24 +1566,58 @@ def test_the_cli_keeps_a_hand_supplied_credential_out_of_the_log_and_the_report(
         check=False,
     )
     output = completed.stdout + completed.stderr
+    reports = sorted((tmp_path / "data" / "garak" / "garak_runs").glob("*.jsonl"))
+    return output, log_path.read_text(encoding="utf-8"), reports
 
-    log_text = log_path.read_text(encoding="utf-8")
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_the_cli_masks_a_hand_supplied_midojo_credential_in_every_option_spelling(
+    tmp_path, route
+):
+    output, log_text, reports = _cli_run(tmp_path, route)
+
     assert "DEBUG" in log_text, "garak.log holds the run's debug lines"
     assert SENTINEL not in log_text, "garak.log never records the credential"
-    assert (
-        "probe start for garak.probes.midojo.InjectionSpecProbe" in log_text
-    ), "the probe takes the hand-supplied credential, so the run reaches the bind"
-    assert "8767" in output, "and dials the interceptor URL"
-    if route == "probe_options":
+    if route in PROBE_ROUTES:
+        assert (
+            "probe start for garak.probes.midojo.InjectionSpecProbe" in log_text
+        ), "the probe takes the hand-supplied credential, so the run reaches the bind"
+    if route in ("probe_options", "probe_options_equals", "generator_options_equals"):
         assert (
             "interceptor_credential" in log_text
         ), "the log still records the option the run was given"
         assert REDACTION_MARKER in log_text, "with its value masked"
 
-    reports = sorted((tmp_path / "data" / "garak" / "garak_runs").glob("*.jsonl"))
     assert reports, f"the run wrote no report: {output[-2000:]}"
     report_text = "\n".join(path.read_text(encoding="utf-8") for path in reports)
     assert SENTINEL not in report_text, "report.jsonl never records the credential"
     assert (
         "midojo.InjectionSpecProbe" in report_text
     ), "the report still records the plugin the run selected"
+
+
+def test_the_cli_binds_the_midojo_remote_interceptor_from_its_probe_options(tmp_path):
+    """The hand-supplied route reaches the service and seals a real evaluation."""
+    with _remote_interceptor(SENTINEL) as service:
+        output, log_text, reports = _cli_run(
+            tmp_path,
+            "probe_options",
+            url=service["url"],
+            upstream=service["upstream_url"],
+        )
+
+    assert "DEBUG" in log_text, "garak.log holds the run's debug lines"
+    assert SENTINEL not in log_text, "garak.log never records the credential"
+    assert reports, f"the run wrote no report: {output[-2000:]}"
+    attempts = [
+        entry
+        for path in reports
+        for entry in _report_entries(path)
+        if entry.get("entry_type") == "attempt"
+    ]
+    assert attempts, "the CLI run reaches the probe's attempt"
+    trace = attempts[-1]["notes"][TRACE_NOTE]
+    assert trace["sealed"] == "final", "the service acknowledged the bind and the seal"
+    assert trace["evaluation_id"], "the service sealed an evaluation for this run"
+    report_text = "\n".join(path.read_text(encoding="utf-8") for path in reports)
+    assert SENTINEL not in report_text, "report.jsonl never records the credential"

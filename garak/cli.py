@@ -34,18 +34,31 @@ def redact_credentials(value):
 
 
 def _redact_json(text):
-    import json
+    """Return ``text`` with the JSON object or array it spells redacted.
 
-    if not text.lstrip().startswith(("{", "[")):
+    An option can spell its JSON on the option's own token, as
+    ``--probe_options={...}`` does, so the name before the ``=`` is split off
+    and the rest parsed. A string that parses to no JSON is returned unchanged.
+    """
+    import json
+    import re
+
+    name = ""
+    body = text
+    option = re.match(r"(--?[^\s=]+)=", text)
+    if option is not None:
+        name = option.group(1)
+        body = text[option.end() :]
+    if not body.lstrip().startswith(("{", "[")):
         return text
     try:
-        parsed = json.loads(text)
+        parsed = json.loads(body)
     except json.JSONDecodeError:
         return text
     redacted = redact_credentials(parsed)
     if redacted == parsed:
         return text
-    return json.dumps(redacted)
+    return f"{name}={json.dumps(redacted)}" if name else json.dumps(redacted)
 
 
 def parse_cli_plugin_config(plugin_type, args):
