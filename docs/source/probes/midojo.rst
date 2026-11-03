@@ -107,6 +107,19 @@ Every other generator fails closed: a turn with no output, or with a response
 status the generator never sets, ends its chain as errored, and both detectors
 score the chain ``None`` rather than as resisted.
 
+Remote interceptor
+------------------
+
+``interceptor_url`` runs each chain's interceptor in MiDojo's interceptor
+service instead of this process, which a target the sandbox hosts needs. Name
+``interceptor_url`` and ``interceptor_credential`` together, or neither. Garak
+logs its options at DEBUG, so it masks the credential before logging one, and
+the probe keeps it out of an attempt's notes; the environment route keeps the
+value out of the command line as well. With neither named, the handle reads
+``MIDOJO_INTERCEPTOR_URL`` and ``MIDOJO_INTERCEPTOR_CREDENTIAL``. A remote chain
+mirrors ``upstream``, which must then be the target's MCP URL rather than a
+server in this process.
+
 Parameters
 ----------
 
@@ -122,6 +135,17 @@ Parameters
 ``upstream``
     An MCP server URL that wins over the URL each document's interception block
     declares.
+
+``interceptor_url``
+    The base URL of MiDojo's interceptor service, which runs each chain's
+    interceptor outside this process. Name ``interceptor_credential`` with it,
+    or neither.
+
+``interceptor_credential``
+    The bind credential the interceptor service expects. Garak masks it before
+    logging an option and the probe keeps it out of the trace; MiDojo's
+    ``MIDOJO_INTERCEPTOR_CREDENTIAL`` keeps the value out of the command line
+    too.
 
 ``repeats``
     How many separate chains run the same injection spec, each its own

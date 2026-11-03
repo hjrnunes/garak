@@ -5,6 +5,48 @@
 
 command_options = "list_detectors list_probes list_generators list_buffs list_config plugin_info interactive report version fix".split()
 
+REDACTED = "[redacted]"
+CREDENTIAL_KEY = "interceptor_credential"
+
+
+def redact_credentials(value):
+    """Return ``value`` with every interceptor credential replaced by ``[redacted]``.
+
+    Garak logs its arguments at DEBUG, and a probe option can carry the remote
+    interceptor's bind credential. Mask the value before it reaches a log
+    record, so ``garak.log`` never holds it. A string that spells a JSON object
+    or array is parsed, redacted and re-serialised.
+    """
+    import argparse
+
+    if isinstance(value, argparse.Namespace):
+        return argparse.Namespace(**redact_credentials(vars(value)))
+    if isinstance(value, dict):
+        return {
+            key: REDACTED if key == CREDENTIAL_KEY else redact_credentials(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return type(value)(redact_credentials(item) for item in value)
+    if isinstance(value, str):
+        return _redact_json(value)
+    return value
+
+
+def _redact_json(text):
+    import json
+
+    if not text.lstrip().startswith(("{", "[")):
+        return text
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return text
+    redacted = redact_credentials(parsed)
+    if redacted == parsed:
+        return text
+    return json.dumps(redacted)
+
 
 def parse_cli_plugin_config(plugin_type, args):
     import os
@@ -316,10 +358,12 @@ def main(arguments=None) -> None:
             str(parser.description) + " - EXPERIMENTAL FEATURES ENABLED"
         )
 
-    logging.debug("args - raw argument string received: %s", arguments)
+    logging.debug(
+        "args - raw argument string received: %s", redact_credentials(arguments)
+    )
 
     args = parser.parse_args(arguments)
-    logging.debug("args - full argparse: %s", args)
+    logging.debug("args - full argparse: %s", redact_credentials(args))
 
     for deprecated_model_option in {"-m", "--model_name", "--model_type"}.intersection(
         set(arguments)
@@ -376,7 +420,7 @@ def main(arguments=None) -> None:
     for command_option in command_options:
         setattr(cli_args, command_option, getattr(args, command_option))
 
-    logging.debug("args - cli_args&commands stored: %s", cli_args)
+    logging.debug("args - cli_args&commands stored: %s", redact_credentials(cli_args))
 
     del args
     args = cli_args
@@ -399,7 +443,7 @@ def main(arguments=None) -> None:
             setattr(_config.reporting, param, value)
         else:
             ignored_params.append((param, value))
-    logging.debug("non-config params: %s", ignored_params)
+    logging.debug("non-config params: %s", redact_credentials(ignored_params))
 
     # put plugin spec into the _spec config value, if set at cli
     if "probes" in args:

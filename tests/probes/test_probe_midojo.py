@@ -1337,3 +1337,94 @@ def test_the_environment_names_the_service_when_the_probe_sets_no_interceptor(
     assert (
         trace["verdict"]["grade"]["security"] is True
     ), "the environment alone selects the same remote chain"
+
+
+SENTINEL = "sentinel-probe-option-credential-must-never-be-written"
+REDACTION_MARKER = "[redacted]"
+INTERCEPTOR_URL = "http://127.0.0.1:8767"
+
+
+def _cli_homes(tmp_path):
+    """A private garak data, config and cache home, so the run leaves the shell alone."""
+    homes = {}
+    for name in ("data", "config", "cache"):
+        home = tmp_path / name
+        home.mkdir()
+        homes[f"XDG_{name.upper()}_HOME"] = str(home)
+    return homes
+
+
+def _credential_route(tmp_path, route):
+    """The CLI arguments for one hand-supplied credential route."""
+    options = {
+        "midojo.InjectionSpecProbe": {
+            "interceptor_url": INTERCEPTOR_URL,
+            "interceptor_credential": SENTINEL,
+        }
+    }
+    if route == "probe_options":
+        return ["--probe_options", json.dumps(options)]
+    if route == "probe_option_file":
+        option_file = tmp_path / "probe_options.json"
+        option_file.write_text(json.dumps(options), encoding="utf-8")
+        return ["--probe_option_file", str(option_file)]
+    config_file = tmp_path / "credential.yaml"
+    config_file.write_text(
+        "plugins:\n"
+        "  probes:\n"
+        "    midojo.InjectionSpecProbe:\n"
+        f"      interceptor_url: {INTERCEPTOR_URL}\n"
+        f"      interceptor_credential: {SENTINEL}\n",
+        encoding="utf-8",
+    )
+    return ["--config", str(config_file)]
+
+
+@pytest.mark.parametrize("route", ["probe_options", "probe_option_file", "config"])
+def test_the_cli_keeps_a_hand_supplied_credential_out_of_the_log_and_the_report(
+    tmp_path, route
+):
+    log_path = tmp_path / "garak.log"
+    env = dict(os.environ, **_cli_homes(tmp_path), GARAK_LOG_FILE=str(log_path))
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "garak",
+            "--target_type",
+            "test",
+            "--probes",
+            "midojo.InjectionSpecProbe",
+            "--generations",
+            "1",
+            *_credential_route(tmp_path, route),
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    output = completed.stdout + completed.stderr
+
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "DEBUG" in log_text, "garak.log holds the run's debug lines"
+    assert SENTINEL not in log_text, "garak.log never records the credential"
+    assert (
+        "probe start for garak.probes.midojo.InjectionSpecProbe" in log_text
+    ), "the probe takes the hand-supplied credential, so the run reaches the bind"
+    assert "8767" in output, "and dials the interceptor URL"
+    if route == "probe_options":
+        assert (
+            "interceptor_credential" in log_text
+        ), "the log still records the option the run was given"
+        assert REDACTION_MARKER in log_text, "with its value masked"
+
+    reports = sorted((tmp_path / "data" / "garak" / "garak_runs").glob("*.jsonl"))
+    assert reports, f"the run wrote no report: {output[-2000:]}"
+    report_text = "\n".join(path.read_text(encoding="utf-8") for path in reports)
+    assert SENTINEL not in report_text, "report.jsonl never records the credential"
+    assert (
+        "midojo.InjectionSpecProbe" in report_text
+    ), "the report still records the plugin the run selected"

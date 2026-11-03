@@ -231,7 +231,9 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
     ``interceptor_url`` and ``interceptor_credential`` run each chain's
     interceptor in MiDojo's interceptor service instead, which serves the
     interceptor outside this process; a target the sandbox hosts needs it. Name
-    both or neither, and the credential never enters a log line or a trace.
+    both or neither. Garak logs its options at DEBUG, so it masks the credential
+    before logging one, and the probe keeps it out of the trace; the environment
+    route keeps it out of the command line as well.
     With neither named, the handle reads MiDojo's ``MIDOJO_INTERCEPTOR_URL`` and
     ``MIDOJO_INTERCEPTOR_CREDENTIAL``, so a run can select the service from its
     environment alone; a remote chain mirrors ``upstream``, which must then be
@@ -277,7 +279,7 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
         "upstream": None,
         # the interceptor service's base URL; it runs the interceptor instead of this process
         "interceptor_url": None,
-        # the interceptor service's bind credential; never logged
+        # the interceptor service's bind credential; Garak masks it in the log
         "interceptor_credential": None,
         # how many separate chains run the same injection spec
         "repeats": 1,
