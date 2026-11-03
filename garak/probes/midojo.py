@@ -116,6 +116,7 @@ def _midojo() -> SimpleNamespace:
             InjectionSpecDocumentError,
             UnsupportedDocumentVersion,
         )
+        from midojo.interception_host import RemoteInterception
         from midojo.runtimes import runtime_capabilities
     except ImportError as exc:
         raise ConfigFailure(_EXTRA_HINT) from exc
@@ -127,6 +128,7 @@ def _midojo() -> SimpleNamespace:
         InjectionSpec=InjectionSpec,
         InjectionSpecDocumentError=InjectionSpecDocumentError,
         UnsupportedDocumentVersion=UnsupportedDocumentVersion,
+        RemoteInterception=RemoteInterception,
         runtime_capabilities=runtime_capabilities,
     )
 
@@ -225,6 +227,15 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
     at most one handle is live. ``probe()`` seals any chain an error interrupted
     and closes every remaining handle in a ``finally``: each open evaluation
     holds a listening interceptor.
+
+    ``interceptor_url`` and ``interceptor_credential`` run each chain's
+    interceptor in MiDojo's interceptor service instead, which serves the
+    interceptor outside this process; a target the sandbox hosts needs it. Name
+    both or neither, and the credential never enters a log line or a trace.
+    With neither named, the handle reads MiDojo's ``MIDOJO_INTERCEPTOR_URL`` and
+    ``MIDOJO_INTERCEPTOR_CREDENTIAL``, so a run can select the service from its
+    environment alone; a remote chain mirrors ``upstream``, which must then be
+    the target's MCP URL rather than a server in this process.
     """
 
     extra_dependency_names = ["midojo"]
@@ -236,6 +247,8 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
     source_path: str | None
     episode_source: str | None
     upstream: str | None
+    interceptor_url: str | None
+    interceptor_credential: str | None
     repeats: int
 
     lang = "en"
@@ -262,6 +275,10 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
         "episode_source": None,
         # an MCP server URL that wins over each document's interception upstream
         "upstream": None,
+        # the interceptor service's base URL; it runs the interceptor instead of this process
+        "interceptor_url": None,
+        # the interceptor service's bind credential; never logged
+        "interceptor_credential": None,
         # how many separate chains run the same injection spec
         "repeats": 1,
         "end_condition": "verify",
@@ -274,6 +291,7 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
         except ModuleNotFoundError as exc:
             raise ConfigFailure(_EXTRA_HINT) from exc
         self._load_unsafe()
+        self._refuse_partial_interceptor()
         self.entries: List[InjectionSpecEntry] = []
         source = self._source_path()
         self._entry_documents = load_injection_spec_entries(
@@ -384,6 +402,25 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
                     "evaluation a fresh one; set repeats to 1 or declare a reset"
                 )
 
+    def _refuse_partial_interceptor(self) -> None:
+        """Refuse one interceptor parameter alone, which names no service."""
+        url, credential = self.interceptor_url, self.interceptor_credential
+        if (url is None) == (credential is None):
+            return
+        missing = "interceptor_url" if url is None else "interceptor_credential"
+        raise ConfigFailure(
+            f"{self.__class__.__name__}: a remote interception needs both "
+            f"interceptor_url and interceptor_credential, and {missing} is "
+            "missing; set both, or neither to run the interceptor in this process"
+        )
+
+    def _interception_option(self) -> dict:
+        """The handle's remote option, or nothing so it reads its environment pair."""
+        url, credential = self.interceptor_url, self.interceptor_credential
+        if url is None or credential is None:
+            return {}
+        return {"interception": self._midojo.RemoteInterception(url, credential)}
+
     # --- the chain hooks ---
 
     def _start_chain(self, chain: int) -> garak.attempt.Attempt:
@@ -395,6 +432,7 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
                 entry.injection_spec,
                 upstream=self.upstream,
                 reset=repeat > 0,
+                **self._interception_option(),
             )
         except self._midojo.InjectionSpecDocumentError as exc:
             raise ConfigFailure(
