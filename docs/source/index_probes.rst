@@ -34,7 +34,6 @@ For a guide to writing probes, see :doc:`extending.probe`.
    probes/goodside
    probes/grandma
    probes/injection
-   probes/ipi_episode
    probes/latentinjection
    probes/leakreplay
    probes/lmrc

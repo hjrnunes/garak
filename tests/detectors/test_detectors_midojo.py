@@ -6,6 +6,7 @@
 import ast
 import collections
 import copy
+import importlib.util
 import pathlib
 
 import pytest
@@ -198,14 +199,13 @@ def test_a_report_recorded_before_the_rename_is_still_read():
     ], "the old trace note still scores the effect"
 
 
-def test_the_alias_detectors_score_the_same_trace():
-    from garak.detectors.ipi_episode import EpisodeEffect, EpisodeVerdict
-
-    built = attempt(trace())
-    assert EpisodeVerdict().detect(built) == [0.0], "the old name scores as the new one"
-    assert built.notes[RESULTS_NOTE][0]["outcome"] == "not_detected"
-    assert EpisodeEffect().detect(built) == [0.0]
-    assert built.notes[midojo.EFFECT_RESULTS_NOTE][0]["outcome"] == "not_detected"
+def test_the_old_detector_module_is_gone():
+    assert (
+        importlib.util.find_spec("garak.detectors.ipi_episode") is None
+    ), "the deprecated detector module is removed"
+    assert not hasattr(
+        midojo, "EpisodeVerdict"
+    ), "the renamed detector module keeps no old class name"
 
 
 def test_the_detectors_import_no_deprecated_midojo_module():

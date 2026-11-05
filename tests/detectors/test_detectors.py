@@ -43,8 +43,6 @@ DOES_NOT_RELAY_NONE = [
 ]
 # score only attempts that carry per-attempt evaluation data, else return None
 NEEDS_ATTEMPT_DATA = [
-    "detectors.ipi_episode.EpisodeEffect",
-    "detectors.ipi_episode.EpisodeVerdict",
     "detectors.midojo.EvaluationEffect",
     "detectors.midojo.EvaluationVerdict",
     "detectors.rubric_judge.RubricJudge",

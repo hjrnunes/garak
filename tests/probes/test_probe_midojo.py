@@ -6,6 +6,7 @@
 import asyncio
 import contextlib
 import copy
+import importlib.util
 import json
 import logging
 import os
@@ -368,13 +369,12 @@ def test_an_old_document_version_is_still_read(tmp_path):
     ), "MiDojo's reader still accepts the document version it shipped before the rename"
 
 
-def test_the_alias_plugin_loads_the_renamed_probe():
-    probe = garak._plugins.load_plugin("probes.ipi_episode.IPIEpisode")
-    assert isinstance(
-        probe, InjectionSpecProbe
-    ), "the old plugin name loads the renamed probe"
-    assert type(probe).__name__ == "IPIEpisode", "the alias keeps its own plugin name"
-    assert probe.entries, "the alias reads the shipped injection spec"
+def test_the_old_plugin_module_is_gone():
+    assert (
+        importlib.util.find_spec("garak.probes.ipi_episode") is None
+    ), "the deprecated probe module is removed"
+    with pytest.raises(ValueError):
+        garak._plugins.load_plugin("probes.ipi_episode.IPIEpisode")
 
 
 def test_the_probe_uses_the_renamed_midojo_api():
