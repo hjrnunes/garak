@@ -132,6 +132,23 @@ audio_formats = ["wav", "mp3"]
 audio_pattern = re.compile("|".join(audio_formats))
 
 
+def _failed_generation(error: openai.APIStatusError) -> Message:
+    """Return the output for a generation the API rejected.
+
+    The output has no text. Its ``error`` note names the error type and, when
+    the API sent a response, its status code and body text as received.
+    """
+
+    note = {"type": type(error).__name__}
+    response = getattr(error, "response", None)
+    if response is not None:
+        note["status_code"] = response.status_code
+        body = getattr(response, "text", None)
+        if isinstance(body, str):
+            note["body"] = body
+    return Message(None, notes={"error": note})
+
+
 class OpenAICompatible(Generator):
     """Generator base class for OpenAI compatible text2text restful API. Implements shared initialization and execution methods."""
 
@@ -497,6 +514,8 @@ class OpenAIResponsesGenerator(OpenAICompatible):
     agentic loop (tool calls → execution → follow-up) on the server side,
     returning only the final text to garak.
 
+    A request the API rejects yields a :class:`Message` with no text whose
+    ``error`` note holds the error type, status code and response body.
     Every response that comes back yields one :class:`Message`, even when it has
     no text. Its notes hold the response's tool calls in ``tool_calls``, its
     ``status`` in ``response_status`` (so an incomplete or failed response is not
@@ -594,7 +613,7 @@ class OpenAIResponsesGenerator(OpenAICompatible):
         except openai.BadRequestError as e:
             logging.exception(e)
             logging.error("Bad request: %s", repr(prompt))
-            return [None]
+            return [_failed_generation(e)]
         except json.decoder.JSONDecodeError as e:
             logging.exception(e)
             raise garak.exception.GeneratorBackoffTrigger from e
