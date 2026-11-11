@@ -13,6 +13,7 @@ import pathlib
 import pickle
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -859,6 +860,31 @@ def test_the_capture_status_names_what_stops_a_condition():
 
     interrupted = {**undecided, "sealed": "interrupted"}
     assert InjectionSpecProbe._capture_status(interrupted) == "incomplete"
+
+
+@pytest.mark.parametrize(
+    ("status", "failures", "finished", "expected"),
+    [
+        ("complete", (), True, True),
+        ("not_collected", (), True, True),
+        ("failed", (), True, False),
+        ("incomplete", (), True, False),
+        ("unknown", (), True, False),
+        ("complete", ("timeout",), True, False),
+        ("complete", (), False, False),
+    ],
+)
+def test_capture_completeness_uses_the_verified_snapshot_rule(
+    status, failures, finished, expected
+):
+    snapshot = SimpleNamespace(
+        evidence_status={"function_calls": status},
+        capture_failures=failures,
+        function_calls=[SimpleNamespace(complete=finished)],
+    )
+    assert (
+        InjectionSpecProbe._capture_complete(snapshot) is expected
+    ), "only complete evidence and finished calls decide a capture"
 
 
 def test_an_unrecorded_delivery_is_named_in_the_condition_reason(tmp_path, report):

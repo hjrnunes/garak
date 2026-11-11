@@ -445,12 +445,16 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
 
     @staticmethod
     def _capture_complete(snapshot):
-        evidence = snapshot.evidence_status or {}
-        if any(status == "incomplete" for status in evidence.values()):
-            return False
-        if snapshot.capture_failures:
-            return False
-        return all(call.complete for call in snapshot.function_calls)
+        from garak.detectors.midojo import _capture_problem
+
+        evidence = {
+            "evidence_status": dict(snapshot.evidence_status),
+            "capture_failures": list(snapshot.capture_failures),
+            "function_calls": [
+                {"complete": call.complete} for call in snapshot.function_calls
+            ],
+        }
+        return _capture_problem({"capture_complete": True}, evidence) is None
 
     def _attach_trace(self, attempt, trace):
         attempt.notes[TRACE_NOTE] = trace
