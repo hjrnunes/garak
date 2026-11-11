@@ -1,0 +1,11 @@
+{
+  "authority": "asago-scenario-generator",
+  "contract": "tool-call-condition",
+  "files": {
+    "tool-call-condition-v1/README.md": "951188e1a7c611927ef06a0af66a41c6b923da5f1a9bb5939702b1a9d1f01305",
+    "tool-call-condition-v1/schema.json": "8a4598f912f08ba088a1fee55b3511cc6e81b6c6dd24b88be7a71312d8606dca",
+    "tool-call-condition-v1/vectors/evaluate.json": "7e0d3e72e2a20066483c5e8be6addef230198dd39b5a7017eaddbc2124790121",
+    "tool-call-condition-v1/vectors/validate.json": "e9d15815d970471f7c53ca6558e10519d3ca92b675a0ccd565bc84f1f36ab1cf"
+  },
+  "version": "tool-call-condition-v1"
+}
