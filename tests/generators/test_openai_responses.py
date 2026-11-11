@@ -4,12 +4,15 @@
 import json
 import logging
 import os
+import pickle
 import pytest
 from dataclasses import asdict
 from unittest.mock import MagicMock, patch
 
+import httpx
 import openai
 
+import garak.exception
 from garak.attempt import Message, Turn, Conversation
 from garak.generators.openai import OpenAIResponsesGenerator
 
@@ -599,3 +602,65 @@ def test_rejected_request_log_leaves_out_tool_credentials(generator, caplog):
     assert "Bad request" in caplog.text, "the rejection is still logged"
     assert secret not in caplog.text, "the log holds the error, not the prompt's notes"
     assert secret not in json.dumps(asdict(result[0])), "nor does the output"
+
+
+# ── API status errors ─────────────────────────────────────────────────────────
+
+
+def _status_error(error_class, status, body=b'{"error": {"message": "nope"}}'):
+    request = httpx.Request("POST", "http://localhost:8321/v1/responses")
+    response = httpx.Response(status, content=body, request=request)
+    return error_class(message="nope", response=response, body=None)
+
+
+@pytest.mark.parametrize(
+    "error_class, status",
+    [(openai.AuthenticationError, 401), (openai.PermissionDeniedError, 403)],
+)
+def test_rejected_credential_raises_a_picklable_garak_exception(
+    generator, error_class, status
+):
+    generator.client.responses.create.side_effect = _status_error(error_class, status)
+
+    with pytest.raises(garak.exception.GarakException) as raised:
+        generator._call_model(Conversation([Turn("user", Message("hi"))]))
+
+    assert str(status) in str(raised.value), "the message names the status"
+    assert generator.key_env_var in str(raised.value), "and the variable to check"
+    assert raised.value.__cause__ is None, "the unpicklable API error is not chained"
+    assert str(pickle.loads(pickle.dumps(raised.value))) == str(
+        raised.value
+    ), "multiprocessing workers can send it back"
+
+
+def test_other_api_status_error_is_a_failed_generation(generator):
+    generator.client.responses.create.side_effect = _status_error(
+        openai.NotFoundError, 404, b'{"error": {"code": "model_not_found"}}'
+    )
+
+    result = generator._call_model(Conversation([Turn("user", Message("hi"))]))
+
+    assert result[0].text is None, "an unknown model yields no text"
+    assert result[0].notes["error"] == {
+        "type": "NotFoundError",
+        "status_code": 404,
+        "body": '{"error": {"code": "model_not_found"}}',
+    }, "the note says what the API answered"
+
+
+@pytest.mark.parametrize(
+    "error_class, status",
+    [
+        (openai.RateLimitError, 429),
+        (openai.InternalServerError, 500),
+        (openai.APIStatusError, 408),
+    ],
+)
+def test_transient_api_status_error_is_retried(generator, error_class, status):
+    generator.client.responses.create.side_effect = _status_error(error_class, status)
+
+    with pytest.raises(garak.exception.GeneratorBackoffTrigger):
+        # the retry loop around _call_model would wait and ask again
+        OpenAIResponsesGenerator._call_model.__wrapped__(
+            generator, Conversation([Turn("user", Message("hi"))])
+        )

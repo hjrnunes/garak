@@ -520,7 +520,9 @@ class OpenAIResponsesGenerator(OpenAICompatible):
     returning only the final text to garak.
 
     A request the API rejects yields a :class:`Message` with no text whose
-    ``error`` note holds the error type, status code and response body.
+    ``error`` note holds the error type, status code and response body. A
+    rejected credential stops the run with a :class:`garak.exception.GarakException`,
+    and rate limits and server errors are retried.
     Every response that comes back yields one :class:`Message`, even when it has
     no text. Its notes hold the response's tool calls in ``tool_calls``, its
     ``mcp_call`` items, as the API sent them, in ``output_items`` (a later turn
@@ -670,10 +672,30 @@ class OpenAIResponsesGenerator(OpenAICompatible):
 
         try:
             response = self.client.responses.create(**create_args)
+        except (
+            openai.AuthenticationError,
+            openai.PermissionDeniedError,
+        ) as e:
+            # terminal, and openai.APIStatusError holds an httpx.Response that
+            # multiprocessing cannot pickle, so raise garak's own exception here
+            msg = (
+                f"OpenAI API authentication failed (HTTP {e.status_code}); "
+                f"verify {self.key_env_var} is valid. Original error: {e}"
+            )
+            logging.error(msg)
+            raise garak.exception.GarakException(msg) from None
         except openai.BadRequestError as e:
             # the prompt is left out: its notes can hold tool credentials
             logging.exception(e)
             logging.error("Bad request: %s", e)
+            return [_failed_generation(e)]
+        except openai.APIStatusError as e:
+            if (
+                isinstance(e, (openai.RateLimitError, openai.InternalServerError))
+                or e.status_code in self.transient_retry_codes
+            ):
+                raise garak.exception.GeneratorBackoffTrigger from e
+            logging.warning("HTTP %s from %s: %s", e.status_code, e.request.url, e)
             return [_failed_generation(e)]
         except json.decoder.JSONDecodeError as e:
             logging.exception(e)
