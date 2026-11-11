@@ -510,7 +510,11 @@ class OpenAIReasoningGenerator(OpenAIGenerator):
 class OpenAIResponsesGenerator(OpenAICompatible):
     """Generator using the OpenAI Responses API with server-side tool orchestration.
 
-    Supports MCP servers and function tools via the ``tools`` parameter.
+    Supports MCP servers and function tools via the ``tools`` parameter. A
+    conversation whose notes hold ``tools``, and optionally ``tool_choice``, sends
+    those in place of the configured tools and ``tool_choice``; function tools
+    and a ``tool_choice`` in the chat-completions shape are converted to the
+    Responses shape.
     Unlike the chat-completions generators, the Responses API runs the full
     agentic loop (tool calls → execution → follow-up) on the server side,
     returning only the final text to garak.
@@ -595,6 +599,22 @@ class OpenAIResponsesGenerator(OpenAICompatible):
         system_texts = [t.content.text for t in prompt.turns if t.role == "system"]
         return "\n".join(system_texts) if system_texts else None
 
+    @staticmethod
+    def _flatten_function_entry(entry):
+        """Convert a chat-completions function tool or tool_choice to the Responses shape.
+
+        ``{"type": "function", "function": {"name": ...}}`` becomes
+        ``{"type": "function", "name": ...}``; anything else is returned unchanged.
+        """
+        if (
+            isinstance(entry, dict)
+            and entry.get("type") == "function"
+            and isinstance(entry.get("function"), dict)
+        ):
+            flat = {k: v for k, v in entry.items() if k != "function"}
+            return {**entry["function"], **flat}
+        return entry
+
     @backoff.on_exception(
         backoff.fibo,
         (
@@ -625,11 +645,35 @@ class OpenAIResponsesGenerator(OpenAICompatible):
         for k, v in self.extra_params.items():
             create_args[k] = v
 
+        # tool definitions (and an optional tool_choice) can travel on
+        # Conversation.notes so each conversation carries its own schema; a
+        # prompt built with notes=None has none
+        if isinstance(prompt, Conversation):
+            conversation_notes = prompt.notes or {}
+            if conversation_notes.get("tools") is not None:
+                create_args["tools"] = conversation_notes["tools"]
+                if not create_args["tools"]:
+                    # an empty list switches the configured tools off for this
+                    # conversation; the API gets no tools rather than an empty array
+                    del create_args["tools"]
+            if conversation_notes.get("tool_choice") is not None:
+                create_args["tool_choice"] = conversation_notes["tool_choice"]
+
+        if "tools" in create_args:
+            create_args["tools"] = [
+                self._flatten_function_entry(tool) for tool in create_args["tools"]
+            ]
+        if "tool_choice" in create_args:
+            create_args["tool_choice"] = self._flatten_function_entry(
+                create_args["tool_choice"]
+            )
+
         try:
             response = self.client.responses.create(**create_args)
         except openai.BadRequestError as e:
+            # the prompt is left out: its notes can hold tool credentials
             logging.exception(e)
-            logging.error("Bad request: %s", repr(prompt))
+            logging.error("Bad request: %s", e)
             return [_failed_generation(e)]
         except json.decoder.JSONDecodeError as e:
             logging.exception(e)

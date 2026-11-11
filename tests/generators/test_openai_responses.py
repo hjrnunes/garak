@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import logging
 import os
 import pytest
 from dataclasses import asdict
@@ -455,3 +456,146 @@ def test_non_string_status_not_recorded(generator):
     )
 
     assert "response_status" not in result[0].notes, "absent status is not recorded"
+
+
+# ── per-conversation tools ────────────────────────────────────────────────────
+
+
+def test_conversation_tools_override_configured_tools(generator):
+    generator.tools = [{"type": "mcp", "server_url": "http://localhost:8888/sse"}]
+    generator.extra_params = {"tool_choice": "none"}
+    generator.client.responses.create.return_value = _make_response("ok")
+    conv_tools = [{"type": "function", "name": "send_email", "parameters": {}}]
+
+    generator._call_model(
+        Conversation(
+            [Turn(role="user", content=Message("hi"))],
+            notes={"tools": conv_tools, "tool_choice": "required"},
+        )
+    )
+
+    kwargs = generator.client.responses.create.call_args[1]
+    assert kwargs["tools"] == conv_tools, "conversation tools replace configured tools"
+    assert (
+        kwargs["tool_choice"] == "required"
+    ), "conversation tool_choice overrides extra_params"
+
+
+def test_empty_conversation_tools_switch_configured_tools_off(generator):
+    generator.tools = [{"type": "mcp", "server_url": "http://localhost:8888/sse"}]
+    generator.client.responses.create.return_value = _make_response("ok")
+
+    generator._call_model(
+        Conversation([Turn(role="user", content=Message("hi"))], notes={"tools": []})
+    )
+
+    kwargs = generator.client.responses.create.call_args[1]
+    assert (
+        "tools" not in kwargs
+    ), "a conversation that lists no tools must not expose the configured ones"
+
+
+@pytest.mark.parametrize("notes", [{"other": 1}, None])
+def test_configured_tools_kept_without_conversation_tools(generator, notes):
+    generator.tools = [{"type": "mcp", "server_url": "http://localhost:8888/sse"}]
+    generator.client.responses.create.return_value = _make_response("ok")
+
+    result = generator._call_model(
+        Conversation([Turn(role="user", content=Message("hi"))], notes=notes)
+    )
+
+    assert result[0].text == "ok", "a prompt whose notes are None is still sent"
+    kwargs = generator.client.responses.create.call_args[1]
+    assert kwargs["tools"] == generator.tools, "configured tools are the fallback"
+    assert "tool_choice" not in kwargs, "no tool_choice unless one is given"
+
+
+def test_chat_shaped_conversation_tools_are_flattened(generator):
+    generator.client.responses.create.return_value = _make_response("ok")
+    params = {"type": "object", "properties": {"recipient": {"type": "string"}}}
+    chat_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "send_email",
+                "description": "Send an email",
+                "parameters": params,
+            },
+        }
+    ]
+
+    generator._call_model(
+        Conversation(
+            [Turn(role="user", content=Message("hi"))],
+            notes={
+                "tools": chat_tools,
+                "tool_choice": {"type": "function", "function": {"name": "send_email"}},
+            },
+        )
+    )
+
+    kwargs = generator.client.responses.create.call_args[1]
+    assert kwargs["tools"] == [
+        {
+            "type": "function",
+            "name": "send_email",
+            "description": "Send an email",
+            "parameters": params,
+        }
+    ], "chat-completions function tools are sent in the Responses shape"
+    assert kwargs["tool_choice"] == {
+        "type": "function",
+        "name": "send_email",
+    }, "chat-completions tool_choice is sent in the Responses shape"
+
+
+@pytest.mark.parametrize("tool_choice", ["auto", {"type": "function", "name": "f"}])
+def test_flat_tools_and_tool_choice_pass_through(generator, tool_choice):
+    generator.client.responses.create.return_value = _make_response("ok")
+    flat_tools = [
+        {"type": "function", "name": "f", "parameters": {"type": "object"}},
+        {"type": "mcp", "server_label": "bank", "server_url": "http://localhost:8888"},
+    ]
+
+    generator._call_model(
+        Conversation(
+            [Turn(role="user", content=Message("hi"))],
+            notes={"tools": flat_tools, "tool_choice": tool_choice},
+        )
+    )
+
+    kwargs = generator.client.responses.create.call_args[1]
+    assert kwargs["tools"] == flat_tools, "flat and non-function tools are unchanged"
+    assert kwargs["tool_choice"] == tool_choice, "flat tool_choice is unchanged"
+
+
+def test_configured_chat_shaped_tools_are_flattened(generator):
+    generator.tools = [{"type": "function", "function": {"name": "f"}}]
+    generator.client.responses.create.return_value = _make_response("ok")
+
+    generator._call_model(Conversation([Turn(role="user", content=Message("hi"))]))
+
+    kwargs = generator.client.responses.create.call_args[1]
+    assert kwargs["tools"] == [
+        {"type": "function", "name": "f"}
+    ], "configured tools use the same conversion"
+
+
+def test_rejected_request_log_leaves_out_tool_credentials(generator, caplog):
+    secret = "sentinel-tool-credential-must-not-be-logged"
+    generator.client.responses.create.side_effect = openai.BadRequestError(
+        message="unsupported tool", response=MagicMock(status_code=400), body={}
+    )
+    tools = [{"type": "mcp", "server_label": "bank", "authorization": secret}]
+
+    with caplog.at_level(logging.DEBUG):
+        result = generator._call_model(
+            Conversation(
+                [Turn(role="user", content=Message("hi"))], notes={"tools": tools}
+            )
+        )
+
+    assert result[0].notes["error"]["type"] == "BadRequestError"
+    assert "Bad request" in caplog.text, "the rejection is still logged"
+    assert secret not in caplog.text, "the log holds the error, not the prompt's notes"
+    assert secret not in json.dumps(asdict(result[0])), "nor does the output"
