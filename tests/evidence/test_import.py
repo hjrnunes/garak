@@ -16,7 +16,7 @@ from garak.exception import GarakException
 try:
     garak.evidence.codec.encode({})
 except GarakException as error:
-    assert 'pip install garak[midojo-spec]' in str(error)
+    assert 'pip install garak[midojo]' in str(error)
 else:
     raise AssertionError('missing extra was not reported')
 """

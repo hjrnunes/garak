@@ -2,7 +2,7 @@
 
 from garak.exception import GarakException
 
-INSTALL_HINT = "Install the shared evidence codecs with pip install garak[midojo-spec]"
+INSTALL_HINT = "Install the shared evidence codecs with pip install garak[midojo]"
 
 
 class MissingSnapshotCodecError(GarakException):

@@ -2,7 +2,7 @@ evidence
 ========
 
 The evidence collector records tool calls made during one evaluation. Install the
-``midojo-spec`` extra to encode call bodies; the modules remain importable without it.
+``midojo`` extra to encode call bodies; the modules remain importable without it.
 Records freeze JSON values when they arrive, so later changes to a caller's objects
 cannot change evidence. A channel sets provenance, never the caller's body.
 
