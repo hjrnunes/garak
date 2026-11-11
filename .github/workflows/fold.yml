@@ -26,7 +26,7 @@ env:
   # pyproject extras that the fork adds beyond requirements.txt, comma separated
   FOLD_EXTRAS: "midojo"
   # tests that need those extras, space separated
-  FOLD_EXTRAS_TESTS: ""
+  FOLD_EXTRAS_TESTS: "tests/evidence"
   # pip requirement specifiers, space separated, that pin the source of an extra no index serves; the owner sets it when the pins are set
   FOLD_EXTRA_SOURCES: ""
 

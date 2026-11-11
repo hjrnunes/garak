@@ -67,6 +67,7 @@ Check out the :doc:`usage` section for further information, including :doc:`inst
    command
    _config
    exception
+   evidence
    interactive
    intents
    payloads
