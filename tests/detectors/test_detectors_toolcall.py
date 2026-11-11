@@ -1,14 +1,24 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the tool-call capture normalisation helpers."""
+"""Tests for tool-call condition validation and evaluation.
+
+The vendored contract vectors pin the condition language; these tests cover
+what they do not reach: the normalisation of the generator capture shapes and
+the evaluation semantics on normalised calls.
+"""
 
 import json
 
 import pytest
 
 from garak.attempt import Message
-from garak.detectors.toolcall import normalise_tool_call, read_tool_calls
+from garak.detectors.toolcall import (
+    evaluate_condition,
+    normalise_tool_call,
+    read_tool_calls,
+    validate_condition,
+)
 
 UNDECODABLE = "{not json}"
 
@@ -50,6 +60,40 @@ def output(*calls, complete=True):
     if not complete:
         notes["response_status"] = "in_progress"
     return Message(None, notes=notes)
+
+
+def arg(operation, argument):
+    return {"source": "argument", "operation": operation, "argument": argument}
+
+
+def literal(value):
+    return {"source": "literal", "value": value}
+
+
+def value(left, op, right):
+    return {"kind": "value", "left": left, "op": op, "right": right}
+
+
+def not_called(operation, where=None):
+    comparison = {"kind": "not_called", "operation": operation}
+    if where is not None:
+        comparison["where"] = where
+    return comparison
+
+
+_UNSET = object()
+
+
+def order(operation, prior, same=_UNSET):
+    """An order comparison; ``same`` left unset omits ``same_argument``."""
+    comparison = {"kind": "order", "operation": operation, "requires_prior": prior}
+    if same is not _UNSET:
+        comparison["same_argument"] = same
+    return comparison
+
+
+def condition(*comparisons):
+    return {"comparisons": list(comparisons)}
 
 
 # ── normalisation of the capture shapes ──────────────────────────────────────
@@ -204,3 +248,46 @@ def test_normalise_keeps_only_text_names(name):
 )
 def test_normalise_treats_text_python_cannot_parse_as_null(raw):
     assert normalise_tool_call({"name": "x", "arguments": raw})["arguments"] is None
+
+
+# ── evaluation on normalised calls ───────────────────────────────────────────
+
+
+def test_evaluate_condition_three_valued_on_normalised_calls():
+    cond = condition(
+        not_called("escalate"), value(arg("refund", "amount"), "gt", literal(10))
+    )
+    clean = [normalise_tool_call(call("refund", {"amount": 50}))]
+    assert evaluate_condition(cond, clean, True)[0] == "detected", "condition holds"
+    dirty = clean + [normalise_tool_call(call("escalate", {}))]
+    assert evaluate_condition(cond, dirty, True)[0] == "not_detected", "escalated"
+    missing = [normalise_tool_call(call("other", {}))]
+    assert (
+        evaluate_condition(cond, missing, False)[0] == "inconclusive"
+    ), "an incomplete capture may lack the refund"
+    assert (
+        evaluate_condition(condition(not_called("x")), [], False)[0] == "inconclusive"
+    ), "absence is only proven by a complete capture"
+
+
+def test_evaluate_condition_reads_blocked_calls():
+    cond = condition(order("refund", "lookup", "id"))
+    calls = [
+        normalise_tool_call(call("lookup", {"id": "A"}, blocked=True)),
+        normalise_tool_call(call("refund", {"id": "A"})),
+    ]
+    assert evaluate_condition(cond, calls, True)[:2] == (
+        "detected",
+        "the condition holds on the captured calls",
+    ), "a blocked lookup did not run"
+
+
+def test_validate_condition_names_the_first_problem():
+    assert validate_condition("not a dict") == "condition is not an object"
+    assert (
+        validate_condition(condition(value(arg("t", "a"), "approx", literal(1))))
+        == "comparisons[0] has unknown op 'approx'"
+    )
+    assert (
+        validate_condition(condition(order("pay", "check", None))) is None
+    ), "null same_argument is valid"
