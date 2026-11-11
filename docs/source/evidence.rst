@@ -33,6 +33,16 @@ capture failure records the other loss: a call record the interception layer cou
 deliver, identified by its call, function and phase alone, so a resent report replays
 whatever error it carries.
 
+Capture links
+-------------
+
+A capture link names the seam a channel records through. Its state is read from the
+binding itself: the beat clock, the loss flag and the peer's answer. A lost or stalled
+link is a loss the records cannot show; a released link is clean. A link's first end
+stands, so a release that follows a loss does not undo it. Links are
+diagnostics, never evidence: a lost or stalled one marks the call capture incomplete,
+and the collector's summary of them never enters a digest.
+
 Per-call cost
 -------------
 
@@ -70,3 +80,4 @@ work from them, which review has to catch.
    evidence/records
    evidence/ledger
    evidence/facts
+   evidence/links
