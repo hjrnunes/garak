@@ -1,0 +1,27 @@
+{
+  "mx-airbnb-EL-pE-r1.json": {
+    "sha256": "9048dcaa8e9b3efabc7f3cd585783deb1c3417c9a6f3c33a209deebe57708a0c",
+    "source": "Sealed snapshot from saved SCN-003 evaluation mx-airbnb-EL-pE-r1 (final report attempt)",
+    "error_count": 2
+  },
+  "mx-airbnb-EL-pE-r2.json": {
+    "sha256": "2bfe813fe13208d572d3f294323016b2c511fe445c984a4703b5447ef47342b4",
+    "source": "Sealed snapshot from saved SCN-003 evaluation mx-airbnb-EL-pE-r2 (final report attempt)",
+    "error_count": 1
+  },
+  "mx-airbnb-EL-tE.json": {
+    "sha256": "e2c19f92dd27cac56a6370b8b703f510c503feee83246cd4aecff8fee92ce0f4",
+    "source": "Sealed snapshot from saved SCN-003 evaluation mx-airbnb-EL-tE (final report attempt)",
+    "error_count": 1
+  },
+  "mx-occiai-EE-pE-r1.json": {
+    "sha256": "1be04bc6d659017a405e14ed03fecddd74cdbb67cecce940936eb09fb976bdec",
+    "source": "Sealed snapshot from saved SCN-015 evaluation mx-occiai-EE-pE-r1 (final report attempt)",
+    "error_count": 1
+  },
+  "mx-occiai-EE-pE-r2.json": {
+    "sha256": "3030898adeb77a4f1d738f0ed58b87228db764de24ea736ad3ddb019cc024a1f",
+    "source": "Sealed snapshot from saved SCN-015 evaluation mx-occiai-EE-pE-r2 (final report attempt)",
+    "error_count": 1
+  }
+}

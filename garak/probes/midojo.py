@@ -397,6 +397,7 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
                 "name": call.function,
                 "arguments": copy.deepcopy(call.args),
                 "result": call.result,
+                "error": call.error,
                 "blocked": call.blocked,
                 "disposition": call.disposition,
                 "complete": call.complete,
