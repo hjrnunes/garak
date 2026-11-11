@@ -518,6 +518,7 @@ class OpenAIResponsesGenerator(OpenAICompatible):
     ``error`` note holds the error type, status code and response body.
     Every response that comes back yields one :class:`Message`, even when it has
     no text. Its notes hold the response's tool calls in ``tool_calls``, its
+    ``mcp_call`` items, as the API sent them, in ``output_items``, its
     ``status`` in ``response_status`` (so an incomplete or failed response is not
     mistaken for a finished one) and its id, model, token usage, error and
     ``incomplete_details`` in ``response`` (see :meth:`_response_record`).
@@ -621,6 +622,7 @@ class OpenAIResponsesGenerator(OpenAICompatible):
         text_parts = []
         reasoning_parts = []
         tool_calls = []
+        output_items = []
 
         _TOOL_CALL_ATTRS = (
             "call_id",
@@ -641,6 +643,10 @@ class OpenAIResponsesGenerator(OpenAICompatible):
                     if val is not None:
                         entry[attr] = val
                 tool_calls.append(entry)
+                # an mcp_call item holds its own result, so keeping it whole lets
+                # a later request carry this turn's calls without server state
+                if item_type == "mcp_call" and isinstance(item, openai.BaseModel):
+                    output_items.append(item.model_dump(mode="json", by_alias=True))
                 continue
             if item_type == "message":
                 for part in item.content:
@@ -655,6 +661,8 @@ class OpenAIResponsesGenerator(OpenAICompatible):
         notes = {}
         if tool_calls:
             notes["tool_calls"] = tool_calls
+        if output_items:
+            notes["output_items"] = output_items
         if reasoning_parts:
             notes["reasoning"] = "\n".join(reasoning_parts)
         # detectors need the status to tell a finished turn from a truncated one
