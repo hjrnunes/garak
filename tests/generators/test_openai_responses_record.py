@@ -104,6 +104,35 @@ def test_failed_response_records_its_error(generator):
     json.dumps(asdict(reply))
 
 
+def test_record_is_not_resent_with_the_next_request(generator):
+    call = {
+        "type": "mcp_call",
+        "id": "fc_1",
+        "name": "issue_refund",
+        "arguments": '{"order_id": "ORD-104"}',
+        "output": None,
+        "server_label": "target",
+        "approval_request_id": None,
+        "error": "tool execution failed",
+        "status": "failed",
+    }
+    reply = _reply(generator, _response(call, REPLY))
+    conversation = Conversation(
+        [
+            Turn(role="user", content=Message("Refund ORD-104")),
+            Turn(role="assistant", content=Message(reply.text, notes=reply.notes)),
+            Turn(role="user", content=Message("Thanks")),
+        ]
+    )
+
+    assert OpenAIResponsesGenerator._build_input(conversation) == [
+        {"role": "user", "content": "Refund ORD-104"},
+        call,
+        {"role": "assistant", "content": "Done."},
+        {"role": "user", "content": "Thanks"},
+    ], "only the output items are input items; the response record is not"
+
+
 def test_response_without_record_fields_adds_no_note(generator):
     response = MagicMock()
     response.output = []

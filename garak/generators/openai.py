@@ -11,6 +11,7 @@ Sources:
 * https://platform.openai.com/docs/model-index-for-researchers
 """
 
+import copy
 import inspect
 import json
 import logging
@@ -518,8 +519,9 @@ class OpenAIResponsesGenerator(OpenAICompatible):
     ``error`` note holds the error type, status code and response body.
     Every response that comes back yields one :class:`Message`, even when it has
     no text. Its notes hold the response's tool calls in ``tool_calls``, its
-    ``mcp_call`` items, as the API sent them, in ``output_items``, its
-    ``status`` in ``response_status`` (so an incomplete or failed response is not
+    ``mcp_call`` items, as the API sent them, in ``output_items`` (a later turn
+    whose message carries that note sends the items again, see
+    :meth:`_build_input`), its ``status`` in ``response_status`` (so an incomplete or failed response is not
     mistaken for a finished one) and its id, model, token usage, error and
     ``incomplete_details`` in ``response`` (see :meth:`_response_record`).
     """
@@ -566,12 +568,26 @@ class OpenAIResponsesGenerator(OpenAICompatible):
 
         System turns are excluded — callers should promote them to ``instructions``
         via :meth:`_extract_system_prompt` before calling this method.
+
+        A turn whose message carries a list of Responses output items (for example
+        ``mcp_call``) in ``notes["output_items"]`` sends those items just before
+        the turn's own message, so a later request can include the tool calls and
+        results an earlier response produced, in the order they happened. A turn
+        with no text, such as a reply that only called tools, sends its items and
+        no message, because the API accepts no null message content.
         """
         turns = OpenAICompatible._conversation_to_list(prompt)
-        non_system = [t for t in turns if t.get("role") != "system"]
-        if len(non_system) == 1 and isinstance(non_system[0].get("content"), str):
-            return non_system[0]["content"]
-        return non_system
+        items = []
+        for turn, entry in zip(prompt.turns, turns):
+            if entry.get("role") == "system":
+                continue
+            notes = turn.content.notes or {}
+            items.extend(copy.deepcopy(notes.get("output_items", [])))
+            if entry.get("content") is not None:
+                items.append(entry)
+        if len(items) == 1 and isinstance(items[0].get("content"), str):
+            return items[0]["content"]
+        return items
 
     @staticmethod
     def _extract_system_prompt(prompt: Conversation) -> Union[str, None]:
