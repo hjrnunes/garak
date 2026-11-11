@@ -464,9 +464,11 @@ def pxd_run(generator, probe_names, detector_names, evaluator, buffs):
 
 
 def _enumerate_obj_values(o):
+    from garak.cli import redact_credentials
+
     for i in dir(o):
         if i[:2] != "__" and not callable(getattr(o, i)):
-            print(f"    {i}: {getattr(o, i)}")
+            print(f"    {i}: {redact_credentials(getattr(o, i))}")
 
 
 def list_config():

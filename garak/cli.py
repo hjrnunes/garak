@@ -5,6 +5,76 @@
 
 command_options = "list_detectors list_probes list_intents list_generators list_buffs list_config plugin_info interactive report version fix".split()
 
+REDACTED = "[redacted]"
+# option names that hold a secret, compared in lower case: a generator's key, and
+# the credentials a tool definition carries, such as an MCP server's authorization
+CREDENTIAL_KEYS = frozenset(
+    {"api_key", "authorization", "proxy-authorization", "x-api-key"}
+)
+
+
+def redact_credentials(value):
+    """Return ``value`` with the value of every credential option replaced by ``[redacted]``.
+
+    garak logs its arguments at DEBUG, and a ``--generator_options`` or
+    ``--probe_options`` value can carry a key or a tool's credentials. Mask them
+    before they reach a log record, so ``garak.log`` never holds them. A string
+    that spells a JSON object or array is parsed, redacted and re-serialised.
+    """
+    import argparse
+
+    if isinstance(value, argparse.Namespace):
+        return argparse.Namespace(**redact_credentials(vars(value)))
+    if isinstance(value, dict):
+        return {
+            key: (
+                REDACTED
+                if isinstance(key, str) and key.lower() in CREDENTIAL_KEYS
+                else redact_credentials(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_credentials(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(redact_credentials(item) for item in value)
+    if isinstance(value, str):
+        return _redact_json(value)
+    return value
+
+
+def _redact_json(text):
+    """Return ``text`` with the JSON object or array it spells redacted.
+
+    An option can spell its JSON on the option's own token, as
+    ``--generator_options={...}`` does, so the name before the ``=`` is split off
+    and the rest parsed. A string that is not JSON, or holds no credential, is
+    returned unchanged. A string that opens like JSON, does not parse, and names
+    a credential option is masked whole, because it is logged before the run
+    reports the parse error and its values cannot be told apart.
+    """
+    import json
+    import re
+
+    name = ""
+    body = text
+    option = re.match(r"(--?[^\s=]+)=", text)
+    if option is not None:
+        name = option.group(1)
+        body = text[option.end() :]
+    if not body.lstrip().startswith(("{", "[")):
+        return text
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        if any(key in body.lower() for key in CREDENTIAL_KEYS):
+            return f"{name}={REDACTED}" if name else REDACTED
+        return text
+    redacted = redact_credentials(parsed)
+    if redacted == parsed:
+        return text
+    return f"{name}={json.dumps(redacted)}" if name else json.dumps(redacted)
+
 
 def parse_cli_plugin_config(plugin_type, args):
     import os
@@ -324,10 +394,12 @@ def main(arguments=None) -> None:
             str(parser.description) + " - EXPERIMENTAL FEATURES ENABLED"
         )
 
-    logging.debug("args - raw argument string received: %s", arguments)
+    logging.debug(
+        "args - raw argument string received: %s", redact_credentials(arguments)
+    )
 
     args = parser.parse_args(arguments)
-    logging.debug("args - full argparse: %s", args)
+    logging.debug("args - full argparse: %s", redact_credentials(args))
 
     for deprecated_model_option in {"-m", "--model_name", "--model_type"}.intersection(
         set(arguments)
@@ -388,7 +460,7 @@ def main(arguments=None) -> None:
     for command_option in command_options:
         setattr(cli_args, command_option, getattr(args, command_option))
 
-    logging.debug("args - cli_args&commands stored: %s", cli_args)
+    logging.debug("args - cli_args&commands stored: %s", redact_credentials(cli_args))
 
     del args
     args = cli_args
@@ -411,7 +483,7 @@ def main(arguments=None) -> None:
             setattr(_config.reporting, param, value)
         else:
             ignored_params.append((param, value))
-    logging.debug("non-config params: %s", ignored_params)
+    logging.debug("non-config params: %s", redact_credentials(ignored_params))
 
     # detectors are not part of run.spec; they keep their own legacy spec surface
     if "detectors" in args:
@@ -622,7 +694,7 @@ def main(arguments=None) -> None:
             command.print_generators()
 
         elif args.list_config:
-            print("cli args:\n ", args)
+            print("cli args:\n ", redact_credentials(args))
             command.list_config()
 
         elif args.fix:
