@@ -591,6 +591,28 @@ def test_attempt_sticky_params(capsys):
     assert complete_with_notes["notes"] != complete_without_notes["notes"]
 
 
+@pytest.mark.parametrize("content", [None, ""])
+def test_turn_from_dict_accepts_empty_content(content):
+    turn = garak.attempt.Turn.from_dict({"role": "assistant", "content": content})
+    assert turn.role == "assistant"
+    assert turn.content.text == content, "empty content is kept as given"
+
+
+def test_conversation_from_openai_accepts_tool_call_turn_without_content():
+    conversation = garak.attempt.Conversation.from_openai(
+        [
+            {"role": "user", "content": "what is the balance?"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "call_1", "type": "function"}],
+            },
+        ]
+    )
+    assert [turn.role for turn in conversation.turns] == ["user", "assistant"]
+    assert conversation.turns[-1].content.text is None, "null content stays null"
+
+
 def test_prompt_for():
     og_prompt = garak.attempt.Message("Enabran Tain", lang="en")
     og_conv = garak.attempt.Conversation([garak.attempt.Turn("user", og_prompt)])
