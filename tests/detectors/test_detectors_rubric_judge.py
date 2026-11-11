@@ -231,6 +231,8 @@ def fake_service(tmp_path, monkeypatch):
 
             result = service_judge(sent, calls, state["model"], log)
             result["details"]["prompt_version"] = state["version"]
+            if state.get("alter"):
+                state["alter"](result)
             body = json.dumps(result).encode()
             self.send_response(200)
             self.send_header("Content-Length", str(len(body)))
@@ -676,3 +678,86 @@ def test_service_token_never_enters_records_or_errors(fake_service):
             service_token_env="TEST_JUDGE_TOKEN",
         )
     assert secret not in str(failure.value), "URL credential is never repeated"
+
+
+@pytest.mark.parametrize(
+    "alter,reason",
+    [
+        (lambda answer: answer.update(id="wrong"), "judge_response_invalid"),
+        (lambda answer: answer.pop("id"), "judge_response_id_mismatch"),
+        (
+            lambda answer: answer["details"]["records"][0].update(
+                request_sha256="0" * 64
+            ),
+            "judge_request_digest_mismatch",
+        ),
+        (
+            lambda answer: answer["details"]["records"][0].update(
+                evidence_refs=["tool_calls[9].result"]
+            ),
+            "judge_response_records_invalid",
+        ),
+    ],
+)
+def test_service_rejects_invalid_answer_or_request_digest(fake_service, alter, reason):
+    url, state, _, _ = fake_service
+    state["alter"] = alter
+    built = attempt()
+    assert configured(
+        "service", service_url=url, service_token_env="TEST_JUDGE_TOKEN"
+    ).detect(built) == [None], "unverified answer cannot score"
+    assert (
+        built.notes[detector.RESULTS_NOTE][0]["reason"] == reason
+    ), "refusal names the violated rule"
+
+
+def test_service_drops_hostile_reason_and_secret_reference(fake_service):
+    url, state, _, token = fake_service
+
+    def alter(answer):
+        last = answer["details"]["records"][0]
+        last["reason"] = answer["rationale"] = token
+        last["evidence_refs"] = [token]
+
+    state["alter"] = alter
+    built = attempt()
+    configured("service", service_url=url, service_token_env="TEST_JUDGE_TOKEN").detect(
+        built
+    )
+    assert token not in repr(
+        built.notes
+    ), "a service cannot echo credentials into notes"
+    assert (
+        built.notes[detector.RESULTS_NOTE][0]["reason"]
+        == "judge_response_records_invalid"
+    ), "hostile reason is refused"
+
+
+@pytest.mark.parametrize(
+    "output,turns",
+    [
+        (Message("Yes.", notes={"tool_calls": "not a list"}), None),
+        (Message("Yes.", notes={"tool_calls": [{"arguments": "{}", "name": 1}]}), None),
+        (
+            Message(
+                "Yes.", notes={"tool_calls": [{"name": "read", "result": float("nan")}]}
+            ),
+            None,
+        ),
+        (
+            Message("Yes.", notes={"tool_calls": [{"name": "read", "blocked": True}]}),
+            None,
+        ),
+        (
+            Message("Yes."),
+            [Turn("assistant", Message("First")), Turn("user", Message("Last"))],
+        ),
+    ],
+)
+def test_service_never_sends_unexpressible_evidence(fake_service, output, turns):
+    url, state, _, _ = fake_service
+    built = attempt(outputs=[output], turns=turns)
+    assert configured(
+        "service", service_url=url, service_token_env="TEST_JUDGE_TOKEN"
+    ).detect(built) == [None], "unexpressible evidence refuses"
+    assert state["calls"] == 0, "service never sees a different evidence view"
