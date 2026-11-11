@@ -43,6 +43,32 @@ stands, so a release that follows a loss does not undo it. Links are
 diagnostics, never evidence: a lost or stalled one marks the call capture incomplete,
 and the collector's summary of them never enters a digest.
 
+The collector
+-------------
+
+A :class:`~garak.evidence.collector.Collector` stages one evaluation's evidence:
+``open`` admits every write, ``closing`` admits no new call but lets calls already
+started finish until none is unfinished or the closure deadline passes, ``collecting``
+takes the final observations, and ``sealed`` fixes the immutable snapshot. Each event
+takes its arrival time from an injectable monotonic clock, so an event arriving past
+the deadline finds the collector collecting even when nobody drained it. A closure wait
+must be finite and not negative, and a link name opens once, so that a second link
+cannot hide the loss of the first.
+
+The disposition rule on completion is narrower than a symmetric wildcard: the start's
+and the finish's dispositions disagree only when both are named and differ; a start
+that named none lets the finish name one. Late facts never change a sealed snapshot or
+its digest; they appear in the collector's overlay status, and the ones kept before
+the seal are folded into the snapshot's evidence status.
+
+The seal reads every capture link's state from the binding itself, never waiting for a
+dispatcher to notice a loss, so a stalled dispatcher with an expired binding cannot
+hold the seal open or let it claim a complete capture. An interception layer in the
+agent may fail open, so an agent-mode evaluation sealed with no record at all has an
+incomplete capture, and so does any call such a layer started whose finish never
+arrived; a host-started call does not mark the capture, because the host sends the
+seal and the finish alike.
+
 The sealed snapshot
 -------------------
 
@@ -91,4 +117,8 @@ work from them, which review has to catch.
    evidence/ledger
    evidence/facts
    evidence/links
+   evidence/intake
    evidence/seal
+   evidence/sealing
+   evidence/world
+   evidence/collector
