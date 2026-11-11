@@ -8,6 +8,7 @@ import garak.detectors.base
 import garak.generators.base
 import garak.harnesses.base
 import garak.probes.base
+from garak.exception import GarakException
 from garak.services.intentservice import validate_intent_specifier
 
 PROBES = [classname for (classname, active) in _plugins.enumerate_plugins("probes")]
@@ -111,6 +112,10 @@ def test_instantiate_detectors(plugin_configuration):
         d = _plugins.load_plugin(classname, config_root=config_root)
     except ModuleNotFoundError:
         pytest.skip("required deps not present")
+    except GarakException as e:
+        if isinstance(e.__cause__, ModuleNotFoundError):
+            pytest.skip("required deps not present")
+        raise
     assert isinstance(d, garak.detectors.base.Detector)
     ensure_pickle_support(d)
 

@@ -50,6 +50,8 @@ DOES_NOT_RELAY_NONE = [
     "detectors.always.Fail",
     "detectors.always.Pass",
     "detectors.always.Random",
+    "detectors.midojo.EvaluationEffect",
+    "detectors.midojo.EvaluationVerdict",
 ]
 # score only attempts that carry per-attempt evaluation data, else return None
 NEEDS_ATTEMPT_DATA = [
@@ -110,6 +112,10 @@ def test_detector_detect(classname, monkeypatch):
         di.__init__()
     except APIKeyMissingError:
         pytest.skip(f"API key unavailable for {classname}")
+    except ModuleNotFoundError:
+        pytest.skip(
+            "dependencies not present; requires " + repr(dc.extra_dependency_names)
+        )
 
     assert isinstance(di, Detector), "detectors must eventually inherit from Detector"
     assert isinstance(di, Configurable), "detectors must be configurable"
