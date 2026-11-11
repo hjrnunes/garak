@@ -1,0 +1,200 @@
+{
+ "agg": {
+  "eval": {
+   "lmrc": {
+    "lmrc.QuackMedicine": {
+     "lmrc.QuackMedicine": {
+      "absolute_score": 1.0,
+      "passed": 1,
+      "total_evaluated": 1
+     }
+    }
+   },
+   "test": {
+    "test.Test": {
+     "always.Pass": {
+      "absolute_score": 1.0,
+      "passed": 8,
+      "total_evaluated": 8
+     }
+    }
+   }
+  },
+  "probe_counts": {
+   "lmrc.QuackMedicine": {},
+   "test.Test": {}
+  },
+  "technique_intent_matrix": {}
+ },
+ "metric_kinds_baseline": {
+  "eval": {
+   "test": {
+    "test.Blank": {
+     "always.Fail": {
+      "absolute_score": 0.0,
+      "passed": 0,
+      "total_evaluated": 18
+     },
+     "always.Mixed": {
+      "absolute_score": 0.5384615384615384,
+      "passed": 7,
+      "total_evaluated": 13
+     },
+     "always.Pass": {
+      "absolute_score": 1.0,
+      "passed": 18,
+      "total_evaluated": 18
+     }
+    },
+    "test.Test": {
+     "always.Mixed": {
+      "absolute_score": 0.4,
+      "passed": 4,
+      "total_evaluated": 10
+     },
+     "always.Pass": {
+      "absolute_score": 1.0,
+      "passed": 12,
+      "total_evaluated": 12
+     }
+    }
+   }
+  },
+  "probe_counts": {
+   "test.Blank": {
+    "detection_counts": {
+     "detectors": [
+      "always.Mixed",
+      "always.Pass",
+      "always.Fail"
+     ],
+     "fails": 24,
+     "nones": 5,
+     "passed": 25
+    },
+    "inference_counts": {
+     "nones": 0,
+     "total_evaluated": 18
+    }
+   },
+   "test.Test": {
+    "detection_counts": {
+     "detectors": [
+      "always.Mixed",
+      "always.Pass"
+     ],
+     "fails": 6,
+     "nones": 2,
+     "passed": 16
+    },
+    "inference_counts": {
+     "nones": 0,
+     "total_evaluated": 12
+    }
+   }
+  },
+  "technique_intent_matrix": {
+   "demon:Tech:Alpha": {
+    "S003": {
+     "name": "Illegal",
+     "nones": 1,
+     "passed": 15,
+     "probe_detector_pairs": [
+      [
+       "test.Blank",
+       "always.Fail"
+      ],
+      [
+       "test.Blank",
+       "always.Mixed"
+      ],
+      [
+       "test.Blank",
+       "always.Pass"
+      ]
+     ],
+     "score": 0.5769230769230769,
+     "total_evaluated": 26
+    },
+    "S005": {
+     "name": "Toxicity",
+     "nones": 4,
+     "passed": 10,
+     "probe_detector_pairs": [
+      [
+       "test.Blank",
+       "always.Fail"
+      ],
+      [
+       "test.Blank",
+       "always.Mixed"
+      ],
+      [
+       "test.Blank",
+       "always.Pass"
+      ]
+     ],
+     "score": 0.43478260869565216,
+     "total_evaluated": 23
+    },
+    "_summary": {
+     "description": null,
+     "n_detectors": 3,
+     "n_intents": 2,
+     "name": null
+    }
+   }
+  }
+ },
+ "quack": {
+  "eval": {
+   "lmrc": {
+    "lmrc.QuackMedicine": {
+     "lmrc.QuackMedicine": {
+      "absolute_score": 1.0,
+      "passed": 1,
+      "total_evaluated": 1
+     }
+    }
+   }
+  },
+  "probe_counts": {
+   "lmrc.QuackMedicine": {}
+  },
+  "technique_intent_matrix": {}
+ },
+ "test": {
+  "eval": {
+   "test": {
+    "test.Test": {
+     "always.Pass": {
+      "absolute_score": 1.0,
+      "passed": 8,
+      "total_evaluated": 8
+     }
+    }
+   }
+  },
+  "probe_counts": {
+   "test.Test": {}
+  },
+  "technique_intent_matrix": {}
+ },
+ "test_with_ci": {
+  "eval": {
+   "test": {
+    "test.Test": {
+     "always.Pass": {
+      "absolute_score": 0.74,
+      "passed": 37,
+      "total_evaluated": 50
+     }
+    }
+   }
+  },
+  "probe_counts": {
+   "test.Test": {}
+  },
+  "technique_intent_matrix": {}
+ }
+}
