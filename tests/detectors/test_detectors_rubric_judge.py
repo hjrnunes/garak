@@ -6,6 +6,7 @@
 import dataclasses
 import hashlib
 import json
+import random
 import subprocess
 import sys
 import threading
@@ -25,6 +26,7 @@ from midojo_spec import rubric_judge as rules
 from garak.attempt import Attempt, Conversation, Message, Turn
 from garak.detectors import rubric_judge as detector
 from garak.exception import GarakException
+from garak.generators.openai import OpenAICompatible, OpenAIResponsesGenerator
 
 MODEL = "test-judge"
 RUBRIC = {"question": "Does the reply say yes?", "criteria": ["Read the reply."]}
@@ -196,6 +198,8 @@ def fake_service(tmp_path, monkeypatch):
                 self.headers.get("Authorization") == f"Bearer {token}"
             ), "service gets token only in header"
             sent = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if "replies" in state:
+                state["reply"] = state["replies"][sent["reply"]]
             assert (
                 shared_judge.request_problem(sent) is None
             ), "service request has valid shape"
@@ -761,3 +765,725 @@ def test_service_never_sends_unexpressible_evidence(fake_service, output, turns)
         "service", service_url=url, service_token_env="TEST_JUDGE_TOKEN"
     ).detect(built) == [None], "unexpressible evidence refuses"
     assert state["calls"] == 0, "service never sees a different evidence view"
+
+
+def test_replay_is_offline_and_needs_no_provider_credentials(fake_service, monkeypatch):
+    url, _, path, _ = fake_service
+    configured("service", service_url=url, service_token_env="TEST_JUDGE_TOKEN").detect(
+        attempt()
+    )
+    monkeypatch.delenv("TEST_JUDGE_TOKEN")
+    monkeypatch.delenv("OPENAICOMPATIBLE_API_KEY", raising=False)
+    monkeypatch.setattr(
+        detector.RubricJudge,
+        "_load_generator",
+        lambda self: pytest.fail("replay must not load a generator"),
+    )
+    monkeypatch.setattr(
+        detector.RubricJudge,
+        "_post",
+        lambda self, sent: pytest.fail("replay must not post"),
+    )
+    saved = attempt()
+    replay = configured("replay", replay_path=str(path))
+    assert replay.detect(saved) == [
+        1.0
+    ], "replay uses the recorded reply without credentials"
+
+
+@pytest.mark.parametrize("redacted", [True, False])
+def test_replay_refuses_unverifiable_prompt(fake_service, redacted):
+    url, _, path, _ = fake_service
+    configured("service", service_url=url, service_token_env="TEST_JUDGE_TOKEN").detect(
+        attempt()
+    )
+    row = exchange.read_exchanges(path)[0]
+    alternative = path.parent / "unverifiable.jsonl"
+    change = (
+        {"redacted": True}
+        if redacted
+        else {"messages": (("system", "wrong"), row.messages[-1])}
+    )
+    exchange.ExchangeLog(alternative).append(dataclasses.replace(row, **change))
+    built = attempt()
+    replay = configured("replay", replay_path=str(alternative))
+    assert replay.detect(built) == [None], "unverifiable prompt cannot score"
+    assert built.notes[detector.RESULTS_NOTE][0]["reason"] == (
+        "judge-replay-request-mismatch"
+    ), "prompt mismatch has a stable refusal"
+
+
+def test_unscorable_attempts_have_the_same_record_on_every_backend(
+    fake_service, monkeypatch
+):
+    _, state, path, _ = fake_service
+    path.touch()
+    native = configured_native(monkeypatch, YES)
+    service = configured(
+        "service",
+        service_url="http://127.0.0.1:1/",
+        service_token_env="TEST_JUDGE_TOKEN",
+    )
+    replay = configured("replay", replay_path=str(path))
+    for rubric, outputs in (
+        (None, [Message("Yes.")]),
+        ({"question": False}, [Message("Yes.")]),
+        (RUBRIC, [None]),
+    ):
+        records = []
+        for backend in (native, service, replay):
+            built = attempt(rubric=rubric, outputs=outputs)
+            assert backend.detect(built) == [None], "preflight cannot score"
+            records.append(built.notes[detector.RESULTS_NOTE][0])
+        assert records[0] == records[1] == records[2], "preflight records agree"
+    assert state["calls"] == 0, "no preflight case asks the service"
+
+
+@pytest.mark.parametrize(
+    "module,backend",
+    [
+        ("rubric_judge", "native"),
+        ("judge", "service"),
+        ("judge_replay", "replay"),
+    ],
+)
+def test_missing_shared_module_names_the_module(
+    module, backend, fake_service, monkeypatch
+):
+    _, _, path, _ = fake_service
+    imported = detector.importlib.import_module
+
+    def unavailable(name):
+        if name == f"midojo_spec.{module}":
+            raise ModuleNotFoundError(name)
+        return imported(name)
+
+    monkeypatch.setattr(detector.importlib, "import_module", unavailable)
+    if backend == "native":
+        monkeypatch.setattr(detector.RubricJudge, "_load_generator", lambda self: None)
+    with pytest.raises(GarakException, match=f"midojo_spec.{module}"):
+        configured(
+            backend,
+            service_url="http://127.0.0.1:1/",
+            service_token_env="TEST_JUDGE_TOKEN",
+            replay_path=str(path),
+        )
+
+
+def sdk_generator(monkeypatch, create, *, generator_type=OpenAICompatible):
+    """Load an offline chat resource with the real Garak create path."""
+
+    class Resource:
+        def create(
+            self,
+            *,
+            model,
+            messages,
+            n=None,
+            temperature=None,
+            seed=None,
+            top_p=None,
+            logprobs=None,
+            max_completion_tokens=None,
+            response_format=None,
+            extra_body=None,
+        ):
+            return create(
+                {k: v for k, v in locals().items() if k not in ("self", "create")}
+            )
+
+    fake = generator_type.__new__(generator_type)
+    fake.name = MODEL
+    fake.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=Resource()),
+        completions=object(),
+        close=lambda: None,
+    )
+    fake.generator = fake.client.chat.completions
+    fake.suppressed_params = set()
+    fake.extra_params = {"logprobs": True, "top_p": 0.9}
+    fake.seed = 123
+    fake._rng = random.Random()
+    fake.supports_multiple_generations = True
+    fake.temperature = 0.8
+    fake.top_p = 0.9
+    fake.logprobs = True
+    fake.retry_json = True
+    fake.transient_retry_codes = [429, 503]
+    monkeypatch.setattr(
+        detector.RubricJudge,
+        "_load_generator",
+        lambda self: setattr(self, "evaluation_generator", fake),
+    )
+    return configured("native")
+
+
+def test_native_timeout_is_one_create_without_generator_backoff(monkeypatch):
+    calls = []
+
+    def create(kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise openai.APITimeoutError(request=None)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=YES))]
+        )
+
+    judge = sdk_generator(monkeypatch, create)
+    built = attempt()
+    assert judge.detect(built) == [None], "timeout never retries a judge request"
+    assert len(calls) == 1, "one create is the maximum even on timeout"
+    assert built.notes[detector.RESULTS_NOTE][0]["reason"] == (
+        "judge_failed:APITimeoutError"
+    ), "the timeout remains unresolved"
+
+
+def test_native_success_uses_one_create_and_exact_shared_body(monkeypatch):
+    calls = []
+
+    def create(kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=YES))]
+        )
+
+    judge = sdk_generator(monkeypatch, create)
+    built = attempt()
+    assert judge.detect(built) == [1.0], "one successful create scores"
+    assert len(calls) == 1, "a successful judge call is sent once"
+    sent = {k: v for k, v in calls[0].items() if v is not None}
+    body = rules.request_body(MODEL, built.notes[detector.RESULTS_NOTE][0]["prompt"])
+    assert sent == {
+        **{k: v for k, v in body.items() if k != "chat_template_kwargs"},
+        "extra_body": {"chat_template_kwargs": body["chat_template_kwargs"]},
+    }, "configured seed, sampling, and extra parameters cannot alter the request"
+
+
+@pytest.mark.parametrize("question", ["", "  \t "])
+def test_blank_question_refuses_all_backends_before_call(
+    fake_service, monkeypatch, question
+):
+    url, state, path, _ = fake_service
+    path.touch()
+    judges = (
+        configured_native(monkeypatch, YES),
+        configured("service", service_url=url, service_token_env="TEST_JUDGE_TOKEN"),
+        configured("replay", replay_path=str(path)),
+    )
+    records = []
+    for judge in judges:
+        built = attempt(rubric={"question": question})
+        assert judge.detect(built) == [None], "blank question never scores"
+        records.append(built.notes[detector.RESULTS_NOTE][0])
+    assert records[0] == records[1] == records[2], "preflight agrees exactly"
+    assert records[0]["reason"] == "judge_spec_invalid", "blank claim is invalid"
+    assert state["calls"] == 0, "no invalid request reaches the service"
+
+
+@pytest.mark.parametrize(
+    "raw", ['{"verdict":' + "9" * 5000 + "}", "[" * 10000 + "0" + "]" * 10000]
+)
+def test_hostile_json_parse_is_unresolved_with_original_reply(
+    fake_service, monkeypatch, raw
+):
+    url, _, path, _ = fake_service
+    configured("service", service_url=url, service_token_env="TEST_JUDGE_TOKEN").detect(
+        attempt()
+    )
+    original = exchange.read_exchanges(path)[0]
+    alternate = path.parent / "hostile.jsonl"
+    exchange.ExchangeLog(alternate).append(
+        dataclasses.replace(
+            original, reply=raw, response_sha256=exchange.sha256_text(raw)
+        )
+    )
+    native = configured_native(monkeypatch, raw)
+    replay = configured("replay", replay_path=str(alternate))
+    for judge in (native, replay):
+        built = attempt()
+        assert judge.detect(built) == [None], "invalid JSON cannot score"
+        record = built.notes[detector.RESULTS_NOTE][0]
+        assert record["reason"] == "judge_parse_failed", "parse error is classified"
+        assert record["raw_response"] == raw, "original response is preserved"
+        assert record["model"] == MODEL and record["prompt"], "identity is retained"
+
+
+@pytest.mark.parametrize("replacement", [None, "replacement-token"])
+def test_service_checks_token_sent_even_after_environment_changes(
+    fake_service, monkeypatch, replacement
+):
+    url, state, _, token = fake_service
+    judge = configured("service", service_url=url, service_token_env="TEST_JUDGE_TOKEN")
+    post = judge._post
+
+    def rotate(sent):
+        result = post(sent)
+        if replacement is None:
+            monkeypatch.delenv("TEST_JUDGE_TOKEN")
+        else:
+            monkeypatch.setenv("TEST_JUDGE_TOKEN", replacement)
+        return result
+
+    monkeypatch.setattr(judge, "_post", rotate)
+    built = attempt()
+    assert judge.detect(built) == [1.0], "token rotation cannot invalidate a valid ref"
+    assert token not in repr(built.notes), "the sent token stays private"
+    assert state["calls"] == 1, "the service saw the request"
+
+
+def test_service_refuses_reference_containing_sent_token_after_rotation(
+    fake_service, monkeypatch
+):
+    url, state, _, token = fake_service
+    state["alter"] = lambda answer: answer["details"]["records"][0].update(
+        evidence_refs=[f"messages[0].content:{token}"]
+    )
+    judge = configured("service", service_url=url, service_token_env="TEST_JUDGE_TOKEN")
+    post = judge._post
+
+    def rotate(sent):
+        result = post(sent)
+        monkeypatch.setenv("TEST_JUDGE_TOKEN", "different")
+        return result
+
+    monkeypatch.setattr(judge, "_post", rotate)
+    built = attempt()
+    assert judge.detect(built) == [None], "token in evidence ref is refused"
+    assert token not in repr(built.notes), "refused token never enters notes"
+
+
+def test_native_refuses_responses_resource_and_allows_chat_subclass(monkeypatch):
+    class ChatSubclass(OpenAICompatible):
+        pass
+
+    chat = sdk_generator(
+        monkeypatch,
+        lambda _: SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=YES))]
+        ),
+        generator_type=ChatSubclass,
+    )
+    assert chat.detect(attempt()) == [1.0], "chat subclass is supported"
+    responses = OpenAIResponsesGenerator.__new__(OpenAIResponsesGenerator)
+    responses.name = MODEL
+    responses.suppressed_params = set()
+    responses.extra_params = {}
+    responses.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=object()),
+        responses=SimpleNamespace(create=lambda **kwargs: None),
+        close=lambda: None,
+    )
+    responses.generator = responses.client.responses
+    monkeypatch.setattr(
+        detector.RubricJudge,
+        "_load_generator",
+        lambda self: setattr(self, "evaluation_generator", responses),
+    )
+    with pytest.raises(GarakException, match="chat.completions"):
+        configured("native")
+
+
+def test_multi_output_records_match_across_all_backends(fake_service, monkeypatch):
+    url, state, path, _ = fake_service
+    state["replies"] = {"Yes.": YES, "No.": NO, "Hostile.": "not json"}
+    outputs = [Message("Yes."), None, Message("No."), Message("Hostile.")]
+
+    native = configured_native(monkeypatch, YES)
+    service = configured(
+        "service", service_url=url, service_token_env="TEST_JUDGE_TOKEN"
+    )
+    current = attempt(outputs=outputs)
+    remaining = iter(output.text for output in outputs if output is not None)
+
+    def routed(_messages):
+        return state["replies"][next(remaining)]
+
+    monkeypatch.setattr(native, "_native_call", routed)
+    native_scores = native.detect(current)
+    remote = attempt(outputs=outputs)
+    service_scores = service.detect(remote)
+    replay = configured("replay", replay_path=str(path))
+    saved = attempt(outputs=outputs)
+    replay_scores = replay.detect(saved)
+    assert (
+        native_scores == service_scores == replay_scores == [1.0, None, 0.0, None]
+    ), "scores remain in output order"
+    native_records = current.notes[detector.RESULTS_NOTE]
+    service_records = remote.notes[detector.RESULTS_NOTE]
+    replay_records = saved.notes[detector.RESULTS_NOTE]
+    rows = exchange.read_exchanges(path)
+    assert len(rows) == 3, "one exchange is recorded per judged output"
+    for i, (n, s, r) in enumerate(zip(native_records, service_records, replay_records)):
+        assert n == r, f"native and replay full record {i} agree"
+        if outputs[i] is None:
+            assert n == s, "empty output has identical preflight records"
+        else:
+            assert {
+                **s,
+                "raw_response": rows.pop(0).reply,
+            } == n, f"service summary and exchange reproduce full record {i}"
+    assert [r["reason"] for r in native_records] == [
+        "judge_completed",
+        "no_output",
+        "judge_completed",
+        "judge_parse_failed",
+    ], "notes preserve distinct verdicts and hostile output"
+
+
+@pytest.mark.parametrize(
+    "text",
+    ['{"verdict":' + "9" * 5000 + "}", "[" * 10000 + "0" + "]" * 10000],
+)
+def test_hostile_bytes_and_text_match_on_native_and_replay(
+    fake_service, monkeypatch, text
+):
+    url, _, path, _ = fake_service
+    configured("service", service_url=url, service_token_env="TEST_JUDGE_TOKEN").detect(
+        attempt()
+    )
+    row = exchange.read_exchanges(path)[0]
+    records = []
+    for reply in (text, text.encode("utf-8")):
+        native = configured_native(monkeypatch, reply)
+        saved = attempt()
+        assert native.detect(saved) == [None], "hostile reply cannot score"
+        records.append(saved.notes[detector.RESULTS_NOTE][0])
+        monkeypatch.setattr(
+            detector._shared("judge_replay"),
+            "replay",
+            lambda *_args, **_kwargs: dataclasses.replace(row, reply=reply),
+        )
+        replay = configured("replay", replay_path=str(path))
+        saved = attempt()
+        assert replay.detect(saved) == [None], "replayed hostile reply cannot score"
+        records.append(saved.notes[detector.RESULTS_NOTE][0])
+    assert all(
+        record == records[0] for record in records
+    ), "both types and backends agree"
+    assert (
+        records[0]["reason"] == "judge_parse_failed"
+    ), "hostile JSON is a parse failure"
+    assert records[0]["raw_response"] == text, "shared path retains decoded text"
+
+
+@pytest.mark.parametrize(
+    "reply,expected",
+    [(YES.encode("utf-8"), YES), (b"\xff", None)],
+)
+def test_native_and_replay_share_utf8_reply_handling(
+    fake_service, monkeypatch, reply, expected
+):
+    url, _, path, _ = fake_service
+    configured("service", service_url=url, service_token_env="TEST_JUDGE_TOKEN").detect(
+        attempt()
+    )
+    row = exchange.read_exchanges(path)[0]
+    native = configured_native(monkeypatch, reply)
+    monkeypatch.setattr(
+        detector._shared("judge_replay"),
+        "replay",
+        lambda *_args, **_kwargs: dataclasses.replace(row, reply=reply),
+    )
+    replay = configured("replay", replay_path=str(path))
+    records = []
+    for backend in (native, replay):
+        built = attempt()
+        backend.detect(built)
+        records.append(built.notes[detector.RESULTS_NOTE][0])
+    assert records[0] == records[1], "both backends decode or refuse identically"
+    assert records[0]["raw_response"] == expected, "shared raw reply is preserved"
+    assert records[0]["reason"] == (
+        "judge_completed" if expected is not None else "judge_parse_failed"
+    ), "invalid UTF-8 is refused without raw content"
+
+
+def test_native_respects_chat_subclass_refusal_without_create(monkeypatch):
+    class RefusingChat(OpenAICompatible):
+        calls = 0
+
+        def _call_model(self, prompt, generations_this_call=1):
+            self.calls += 1
+            return [None]
+
+    created = []
+    judge = sdk_generator(
+        monkeypatch, lambda kwargs: created.append(kwargs), generator_type=RefusingChat
+    )
+    built = attempt()
+    assert judge.detect(built) == [None], "subclass refusal cannot score"
+    assert judge.evaluation_generator.calls == 1, "the subclass sees the request"
+    assert created == [], "refused requests never reach create"
+    assert built.notes[detector.RESULTS_NOTE][0]["reason"] == (
+        "judge_parse_failed"
+    ), "the refusal has a stable unresolved reason"
+
+
+def test_native_dispatches_chat_subclass_with_shared_request_body(monkeypatch):
+    class ForwardingChat(OpenAICompatible):
+        calls = 0
+
+        def _call_model(self, prompt, generations_this_call=1):
+            self.calls += 1
+            return super()._call_model(prompt, generations_this_call)
+
+    created = []
+
+    def create(kwargs):
+        created.append(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=YES))]
+        )
+
+    judge = sdk_generator(monkeypatch, create, generator_type=ForwardingChat)
+    built = attempt()
+    assert judge.detect(built) == [1.0], "forwarding subclass scores"
+    assert (
+        judge.evaluation_generator.calls == len(created) == 1
+    ), "subclass and resource each run once"
+    body = rules.request_body(MODEL, built.notes[detector.RESULTS_NOTE][0]["prompt"])
+    assert {k: v for k, v in created[0].items() if v is not None} == {
+        **{k: v for k, v in body.items() if k != "chat_template_kwargs"},
+        "extra_body": {"chat_template_kwargs": body["chat_template_kwargs"]},
+    }, "the subclass sends only the shared request body"
+
+
+def test_native_subclass_retry_cannot_create_twice(monkeypatch):
+    class ForwardingChat(OpenAICompatible):
+        calls = 0
+
+        def _call_model(self, prompt, generations_this_call=1):
+            self.calls += 1
+            return super()._call_model(prompt, generations_this_call)
+
+    created = []
+
+    def create(kwargs):
+        created.append(kwargs)
+        if len(created) == 1:
+            raise openai.APITimeoutError(request=None)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=YES))]
+        )
+
+    delays = []
+    monkeypatch.setattr("backoff._sync.time.sleep", delays.append)
+    judge = sdk_generator(monkeypatch, create, generator_type=ForwardingChat)
+    built = attempt()
+    assert judge.detect(built) == [None], "a transient failure cannot score a retry"
+    assert len(created) == 1, "a retry cannot send a second request"
+    assert judge.evaluation_generator.calls == 1, "the subclass handles the first call"
+    assert built.notes[detector.RESULTS_NOTE][0]["reason"] == (
+        "judge_failed:APITimeoutError"
+    ), "the first failure keeps its error label"
+    assert all(
+        0 <= delay <= 1 for delay in delays
+    ), "the first Fibonacci backoff has at most one second of jitter"
+
+
+def test_shared_native_generator_serialises_guards_across_detectors(monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+    second_started = threading.Event()
+    second_done = threading.Event()
+    created = []
+    outcomes = {}
+
+    def create(kwargs):
+        created.append(kwargs)
+        if len(created) == 1:
+            entered.set()
+            if not release.wait(timeout=8):
+                raise RuntimeError("first request was not released")
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=YES))]
+        )
+
+    first = sdk_generator(monkeypatch, create)
+    second = configured("native")
+    assert (
+        first.evaluation_generator is second.evaluation_generator
+    ), "both detectors use the same generator and resource"
+    resource = first.evaluation_generator.generator
+    original_create = resource.create
+
+    def run(judge, number):
+        if number == 1:
+            second_started.set()
+        try:
+            built = attempt()
+            outcomes[number] = (
+                judge.detect(built),
+                built.notes[detector.RESULTS_NOTE][0]["reason"],
+            )
+        except (GarakException, RuntimeError, AttributeError) as exc:
+            outcomes[number] = type(exc).__name__
+        finally:
+            if number == 1:
+                second_done.set()
+
+    workers = (
+        threading.Thread(target=run, args=(first, 0), daemon=True),
+        threading.Thread(target=run, args=(second, 1), daemon=True),
+    )
+    workers[0].start()
+    try:
+        assert entered.wait(timeout=5), "first call reaches create"
+        workers[1].start()
+        assert second_started.wait(timeout=5), "second call starts while first waits"
+        second_done.wait(timeout=2)
+    finally:
+        release.set()
+        for worker in workers:
+            if worker.ident is not None:
+                worker.join(timeout=5)
+    assert not any(worker.is_alive() for worker in workers), "both calls finish"
+    assert outcomes == {
+        0: ([1.0], "judge_completed"),
+        1: ([1.0], "judge_completed"),
+    }, "each detector judges its own successful reply"
+    assert len(created) == 2, "each judgement makes exactly one create"
+    assert resource.create == original_create, "the original resource is restored"
+
+
+def test_native_reloads_closed_generator_with_sdk_retries_disabled(monkeypatch):
+    class ReloadableChat(OpenAICompatible):
+        reload_count = 0
+
+        def _load_unsafe(self):
+            self.reload_count += 1
+            resource = self.saved_resource
+            chat = SimpleNamespace(completions=resource)
+
+            def with_options(*, max_retries):
+                return SimpleNamespace(
+                    chat=chat,
+                    completions=object(),
+                    max_retries=max_retries,
+                    close=lambda: None,
+                )
+
+            self.client = SimpleNamespace(
+                chat=chat,
+                completions=object(),
+                with_options=with_options,
+                close=lambda: None,
+            )
+            self.generator = resource
+
+    created = []
+
+    def create(kwargs):
+        created.append(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=YES))]
+        )
+
+    judge = sdk_generator(monkeypatch, create, generator_type=ReloadableChat)
+    generator = judge.evaluation_generator
+    generator.saved_resource = generator.generator
+    generator.close()
+    built = attempt()
+    assert judge.detect(built) == [1.0], "closed generator reloads and scores"
+    assert generator.reload_count == 1, "the generator owns its client reload"
+    assert generator.client.max_retries == 0, "reloaded SDK client disables retries"
+    assert len(created) == 1, "the reloaded resource is called once"
+
+
+@pytest.mark.parametrize("error_type", [ValueError, openai.OpenAIError])
+def test_native_reload_failure_records_unresolved_without_create(
+    monkeypatch, error_type
+):
+    class FailingReload(OpenAICompatible):
+        def _load_unsafe(self):
+            raise error_type("reload unavailable")
+
+    created = []
+    judge = sdk_generator(
+        monkeypatch, lambda kwargs: created.append(kwargs), generator_type=FailingReload
+    )
+    judge.evaluation_generator.close()
+    built = attempt()
+    assert judge.detect(built) == [None], "reload failure is unresolved"
+    assert built.notes[detector.RESULTS_NOTE][0]["reason"] == (
+        f"judge_failed:{error_type.__name__}"
+    ), "failure names only its exception type"
+    assert created == [], "failed reload never asks the resource"
+
+
+@pytest.mark.parametrize("same_detector", [False, True], ids=["shared", "self"])
+def test_reentrant_native_judgement_refuses_only_inner(monkeypatch, same_detector):
+    class ReentrantChat(OpenAICompatible):
+        entering = False
+
+        def generate(self, conversation, generations_this_call=1, typecheck=True):
+            if not self.entering:
+                self.entering = True
+                try:
+                    built = attempt()
+                    self.inner_scores = self.nested.detect(built)
+                    self.inner_record = built.notes[detector.RESULTS_NOTE][0]
+                finally:
+                    self.entering = False
+            return super().generate(conversation, generations_this_call, typecheck)
+
+    created = []
+
+    def create(kwargs):
+        created.append(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=YES))]
+        )
+
+    outer = sdk_generator(monkeypatch, create, generator_type=ReentrantChat)
+    generator = outer.evaluation_generator
+    generator.nested = outer if same_detector else configured("native")
+    resource = generator.generator
+    original_create = resource.create
+    for count in (1, 2):
+        built = attempt()
+        assert outer.detect(built) == [1.0], "outer judgement scores its one reply"
+        assert built.notes[detector.RESULTS_NOTE][0]["reason"] == (
+            "judge_completed"
+        ), "nested refusal cannot change the outer verdict"
+        assert generator.inner_scores == [None], "inner judgement stays unresolved"
+        assert generator.inner_record["reason"] == (
+            "judge_failed:ReentrantJudgeCall"
+        ), "inner refusal has a named and bounded reason"
+        assert len(created) == count, "only the outer judgement calls create"
+        assert resource.create == original_create, "the original create is restored"
+
+
+@pytest.mark.parametrize("interrupt", [False, True], ids=["error", "interrupt"])
+def test_native_reentry_flag_clears_after_guard_failure(monkeypatch, interrupt):
+    class PrivateInterrupt(KeyboardInterrupt):
+        pass
+
+    created = []
+
+    def create(kwargs):
+        created.append(kwargs)
+        if len(created) == 1:
+            if interrupt:
+                raise PrivateInterrupt("offline interruption")
+            raise GarakException("offline failure")
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=YES))]
+        )
+
+    judge = sdk_generator(monkeypatch, create)
+    resource = judge.evaluation_generator.generator
+    original_create = resource.create
+    if interrupt:
+        with pytest.raises(PrivateInterrupt):
+            judge.detect(attempt())
+    else:
+        failed = attempt()
+        assert judge.detect(failed) == [None], "generator failure is unresolved"
+        assert failed.notes[detector.RESULTS_NOTE][0]["reason"] == (
+            "judge_failed:GarakException"
+        ), "ordinary failure keeps its existing reason"
+    assert resource.create == original_create, "failed call restores create"
+    built = attempt()
+    assert judge.detect(built) == [1.0], "next call on the same thread can score"
+    assert len(created) == 2, "each judgement reaches create at most once"
+    assert resource.create == original_create, "successful call restores create"
