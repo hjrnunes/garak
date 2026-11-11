@@ -25,7 +25,7 @@ for top_path in TOP_PATHS:
     module_names[top_path] = [
         i.name.replace(".py", "")
         for i in Path(f"garak/{top_path}").glob("*py")
-        if not str(i).endswith("__init__.py")
+        if not i.name.startswith("_")
     ]
 
 ROOT_MODULES = list(Path("garak").glob("*py"))
@@ -285,7 +285,8 @@ def test_user_docs_avoid_deprecated_cli_flags():
                 if flag in line:
                     stale_references.append(f"{doc_path}:{line_number}: {flag}")
 
-    assert not stale_references, (
-        "User documentation must use current CLI flags; stale references: "
-        + ", ".join(stale_references)
+    assert (
+        not stale_references
+    ), "User documentation must use current CLI flags; stale references: " + ", ".join(
+        stale_references
     )

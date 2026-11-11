@@ -7,7 +7,7 @@ import tomllib
 import garak._plugins
 
 # midojo-spec is not on PyPI, so requirements.txt cannot list it
-EXTRAS_OUTSIDE_REQUIREMENTS = {"midojo", "midojo-mim"}
+EXTRAS_OUTSIDE_REQUIREMENTS = {"midojo", "midojo-mim", "midojo-runtime"}
 
 
 def test_requirements_txt_pyproject_toml():
