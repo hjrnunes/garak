@@ -458,8 +458,15 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
         if output is None:
             output = garak.attempt.Message("")
             self._store_output(attempt, output)
+        original = (output.notes or {}).get("tool_calls")
+        preserved = (output.notes or {}).get("generator_tool_calls")
         output.notes = {
             **(output.notes or {}),
+            **(
+                {"generator_tool_calls": copy.deepcopy(original)}
+                if original is not None and preserved is None
+                else {}
+            ),
             "tool_calls": copy.deepcopy(trace["tool_calls"]),
             "response_status": self._capture_status(trace),
         }

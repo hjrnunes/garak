@@ -543,6 +543,34 @@ def test_second_turn_carries_the_first_reply(tmp_path, report):
     }
 
 
+def test_generator_and_interceptor_calls_survive_separately_in_order():
+    generated = [{"name": "first"}, {"name": "second"}]
+    recorded = [{"name": "intercepted-two"}, {"name": "intercepted-one"}]
+    attempt = garak.attempt.Attempt(
+        prompt=garak.attempt.Conversation([garak.attempt.Turn("user", Message("test"))])
+    )
+    attempt.outputs = [
+        Message(
+            "reply", notes={"response_status": "completed", "tool_calls": generated}
+        )
+    ]
+    probe = object.__new__(InjectionSpecProbe)
+    trace = {**_sealed_trace(), "tool_calls": recorded}
+    probe._attach_trace(attempt, trace)
+    generated[0]["name"] = "changed"
+    assert attempt.outputs[0].notes["generator_tool_calls"] == [
+        {"name": "first"},
+        {"name": "second"},
+    ], "the generator's ordered calls are copied, not overwritten"
+    assert (
+        attempt.outputs[0].notes["tool_calls"] == recorded
+    ), "the interceptor's ordered calls remain the detector input"
+    probe._attach_trace(attempt, trace)
+    assert (
+        attempt.outputs[0].notes["generator_tool_calls"][0]["name"] == "first"
+    ), "a second attachment never replaces the original generator record"
+
+
 def test_harness_scores_a_two_turn_chain_once(tmp_path, report, monkeypatch):
     probe = _probe(tmp_path, entry("Look up ORD-101.", "And ORD-201."))
     agent = ScriptedAgent(
