@@ -159,15 +159,23 @@ def test_call_model_max_tokens_mapped_to_max_output_tokens(generator):
     assert "max_tokens" not in kwargs
 
 
-def test_call_model_empty_output_returns_none(generator):
+def test_call_model_empty_output_returns_empty_message(generator):
     response = MagicMock()
     response.output = []
+    response.status = "completed"
     generator.client.responses.create.return_value = response
 
     result = generator._call_model(
         Conversation([Turn(role="user", content=Message("Hello"))])
     )
-    assert result == [None]
+    assert len(result) == 1
+    assert isinstance(
+        result[0], Message
+    ), "a returned response yields a Message even when empty"
+    assert result[0].text is None
+    assert result[0].notes == {
+        "response_status": "completed"
+    }, "an empty response carries only its status"
 
 
 def test_call_model_bad_request_returns_none(generator):
@@ -280,7 +288,9 @@ def test_unknown_output_item_type_ignored(generator):
         Conversation([Turn(role="user", content=Message("Generate an image"))])
     )
 
-    assert result == [None]
+    assert isinstance(result[0], Message), "unknown items still yield a Message"
+    assert result[0].text is None, "unknown items contribute no text"
+    assert "tool_calls" not in result[0].notes, "unknown items are not tool calls"
 
 
 def test_tool_calls_stored_in_notes_and_serializable(generator):
@@ -397,3 +407,49 @@ def test_tool_calls_only_returns_message_not_none(generator):
     assert isinstance(result[0], Message)
     assert result[0].text is None
     assert result[0].notes["tool_calls"][0]["name"] == "get_balance"
+
+
+# ── response status ───────────────────────────────────────────────────────────
+
+
+def test_response_with_null_output_still_returns_its_status(generator):
+    response = _make_response("unused")
+    response.output = None
+    response.status = "failed"
+    generator.client.responses.create.return_value = response
+
+    result = generator._call_model(Conversation([Turn("user", Message("hi"))]))
+
+    assert len(result) == 1 and isinstance(
+        result[0], Message
+    ), "one Message, not an error"
+    assert result[0].text is None, "there is no output to take text from"
+    assert result[0].notes["response_status"] == "failed", "the status is kept"
+
+
+@pytest.mark.parametrize("status", ["incomplete", "failed", "completed"])
+def test_response_status_recorded_in_notes(generator, status):
+    response = _make_response("partial")
+    response.status = status
+    generator.client.responses.create.return_value = response
+
+    result = generator._call_model(
+        Conversation([Turn(role="user", content=Message("hi"))])
+    )
+
+    assert (
+        result[0].notes["response_status"] == status
+    ), "the API response status is recorded"
+    json.dumps(asdict(result[0]))
+
+
+def test_non_string_status_not_recorded(generator):
+    response = _make_response("ok")
+    response.status = None
+    generator.client.responses.create.return_value = response
+
+    result = generator._call_model(
+        Conversation([Turn(role="user", content=Message("hi"))])
+    )
+
+    assert "response_status" not in result[0].notes, "absent status is not recorded"

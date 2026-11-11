@@ -496,6 +496,12 @@ class OpenAIResponsesGenerator(OpenAICompatible):
     Unlike the chat-completions generators, the Responses API runs the full
     agentic loop (tool calls → execution → follow-up) on the server side,
     returning only the final text to garak.
+
+    Every response that comes back yields one :class:`Message`, even when it has
+    no text. Its notes hold the response's tool calls in ``tool_calls``, its
+    ``status`` in ``response_status`` (so an incomplete or failed response is not
+    mistaken for a finished one) and its id, model, token usage, error and
+    ``incomplete_details`` in ``response`` (see :meth:`_response_record`).
     """
 
     ENV_VAR = "OPENAI_API_KEY"
@@ -607,7 +613,7 @@ class OpenAIResponsesGenerator(OpenAICompatible):
             "status",
             "server_label",
         )
-        for item in response.output:
+        for item in response.output or []:
             item_type = getattr(item, "type", None)
             if item_type is not None and item_type.endswith("_call"):
                 entry = {"type": item_type, "id": getattr(item, "id", None)}
@@ -632,10 +638,33 @@ class OpenAIResponsesGenerator(OpenAICompatible):
             notes["tool_calls"] = tool_calls
         if reasoning_parts:
             notes["reasoning"] = "\n".join(reasoning_parts)
+        # detectors need the status to tell a finished turn from a truncated one
+        status = getattr(response, "status", None)
+        if isinstance(status, str):
+            notes["response_status"] = status
+        record = self._response_record(response)
+        if record:
+            notes["response"] = record
 
-        if text is not None or notes:
-            return [Message(text, notes=notes)]
-        return [None]
+        return [Message(text, notes=notes)]
+
+    @staticmethod
+    def _response_record(response) -> dict:
+        """Return what the report keeps of a response besides its output.
+
+        The record holds the response ``id``, the ``model`` that served it and its
+        token ``usage``, plus its ``error`` and ``incomplete_details`` when set.
+        """
+        record = {}
+        for attr in ("id", "model"):
+            value = getattr(response, attr, None)
+            if isinstance(value, str):
+                record[attr] = value
+        for attr in ("usage", "error", "incomplete_details"):
+            value = getattr(response, attr, None)
+            if isinstance(value, openai.BaseModel):
+                record[attr] = value.model_dump(mode="json", by_alias=True)
+        return record
 
 
 DEFAULT_CLASS = "OpenAIGenerator"
