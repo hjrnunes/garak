@@ -269,6 +269,39 @@ class CallBody:
             frozen_outcomes,
         )
 
+    @classmethod
+    def build_start(
+        cls,
+        *,
+        function: str,
+        args: dict,
+        disposition: Disposition | None = None,
+    ) -> CallBody:
+        """Validate a call's start and detach its JSON values from the caller.
+
+        A started call has no result yet, so ``result`` is None and the fields
+        only a finish carries are refused here: a start says nothing about
+        them.
+        """
+        if type(function) is not str or not function:
+            raise InvalidRequestError("function must be non-empty text")
+        if type(args) is not dict:
+            raise InvalidRequestError("args must be an object")
+        if disposition is not None and (
+            type(disposition) is not str or disposition not in DISPOSITIONS
+        ):
+            raise InvalidRequestError("disposition is unknown")
+        return cls(
+            function,
+            _freeze_field("args", args),
+            None,
+            None,
+            False,
+            disposition,
+            None,
+            None,
+        )
+
     def encoded(self, fields: tuple[str, ...] = BODY_FIELDS) -> str:
         """Compare selected body fields type for type, excluding disposition by default."""
         return encode({name: thaw(getattr(self, name)) for name in fields})
@@ -303,3 +336,37 @@ class CallRecord(CallBody):
             "pre_environment": None,
             "post_environment": None,
         }
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> CallRecord:
+        """Rebuild a record from its sealed JSON, unfinished ones included.
+
+        The data comes from a digest-verified snapshot, so the body checks
+        ``build()`` makes are not repeated; the JSON values are frozen again,
+        so a caller editing the mapping it read from changes nothing.
+        """
+        if not (
+            type(data.get("function")) is str
+            and type(data.get("args")) is dict
+            and (data.get("result") is None or type(data.get("result")) is str)
+        ):
+            raise InvalidRequestError("the sealed call record has an invalid body")
+        return cls(
+            function=data["function"],
+            args=_freeze_field("args", data["args"]),
+            result=data["result"],
+            error=data["error"],
+            blocked=data["blocked"],
+            disposition=data["disposition"],
+            structured_content=_freeze_field(
+                "structured_content", data["structured_content"]
+            ),
+            injection_outcomes=_freeze_field(
+                "injection_outcomes", data["injection_outcomes"]
+            ),
+            call_id=data["call_id"],
+            complete=data["complete"],
+            provenance=data["provenance"],
+            timestamp=data["timestamp"],
+            turn=data["turn"],
+        )

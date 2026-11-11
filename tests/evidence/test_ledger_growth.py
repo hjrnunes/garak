@@ -12,7 +12,7 @@ import pytest
 pytest.importorskip("midojo_spec")
 
 from garak.evidence.ledger import CallLedger
-from garak.evidence.records import RejectedError
+from garak.evidence.records import BODY_FIELDS, CallBody, RejectedError
 
 
 def run_calls(observer=None, ledger=None):
@@ -37,6 +37,36 @@ def run_calls(observer=None, ledger=None):
         elapsed.append(time.perf_counter_ns() - start)
         if observer is not None:
             observer(inserted)
+    return ledger, elapsed
+
+
+def start_body(args):
+    """A validated start body for the same call shape."""
+    return CallBody.build_start(function="tool", args=dict(args))
+
+
+def finish_body(args, result):
+    """A validated finish body for the same call shape."""
+    return CallBody.build(function="tool", args=dict(args), result=result)
+
+
+def run_lifecycle(ledger=None, observer=None):
+    """Run 500 started calls: most finish, some replay, a few stay unfinished."""
+    if ledger is None:
+        ledger = CallLedger()
+    args = {"payload": "b" * 256, "parts": [False, 2, 2.0]}
+    elapsed = []
+    for index in range(500):
+        call_id = f"call-{index}"
+        body = start_body(args)
+        start = time.perf_counter_ns()
+        ledger.start("host", call_id, body, body.encoded(("function", "args")))
+        if index % 4 != 3:
+            finished = finish_body(args, "ok")
+            ledger.complete(call_id, finished, finished.encoded())
+        elapsed.append(time.perf_counter_ns() - start)
+        if observer is not None:
+            observer(index)
     return ledger, elapsed
 
 
@@ -122,6 +152,10 @@ def watch_ledger(ledger):
     ledger._calls = watched(list, LIST_WHOLE, seen)(ledger._calls)
     ledger._positions = watched(dict, DICT_WHOLE, seen)(ledger._positions)
     ledger._encoded_by_id = watched(dict, DICT_WHOLE, seen)(ledger._encoded_by_id)
+    ledger._start_encoded_by_id = watched(dict, DICT_WHOLE, seen)(
+        ledger._start_encoded_by_id
+    )
+    ledger._unfinished = watched(dict, DICT_WHOLE, seen)(ledger._unfinished)
     return seen
 
 
@@ -138,6 +172,21 @@ def test_intake_touches_single_entries_only():
     assert not seen, f"whole-ledger operations during intake: {sorted(set(seen))}"
 
 
+def test_lifecycle_intake_touches_single_entries_only():
+    """Start, in-place completion and replay use no whole-container method."""
+    ledger = CallLedger()
+    seen = watch_ledger(ledger)
+    run_lifecycle(ledger=ledger)
+    for index in range(20):
+        ledger.get(f"call-{index}")
+    operations = sorted(set(seen))
+    # unfinished() is a deliberate whole-ledger read, checked after the guard.
+    unfinished = len(ledger.unfinished())
+    assert len(ledger) == 500, "lifecycle run inserted the wrong number of records"
+    assert unfinished == 125, "unfinished count is wrong"
+    assert not operations, f"whole-ledger operations during intake: {operations}"
+
+
 WHOLE_LEDGER_OPERATIONS = {
     "list": lambda ledger: list(ledger._calls),
     "tuple": lambda ledger: tuple(ledger._calls),
@@ -148,6 +197,8 @@ WHOLE_LEDGER_OPERATIONS = {
     "dict copy": lambda ledger: dict(ledger._positions),
     "dict items": lambda ledger: list(ledger._encoded_by_id.items()),
     "dict keys": lambda ledger: sorted(ledger._positions),
+    "start dict items": lambda ledger: list(ledger._start_encoded_by_id.items()),
+    "unfinished dict copy": lambda ledger: dict(ledger._unfinished),
 }
 
 
@@ -170,6 +221,28 @@ def test_whole_ledger_operations_are_detected(operation):
     ledger = Regressed()
     seen = watch_ledger(ledger)
     run_calls(ledger=ledger)
+    assert seen, "guard missed a whole-ledger operation"
+
+
+@pytest.mark.parametrize(
+    "operation",
+    list(WHOLE_LEDGER_OPERATIONS.values()),
+    ids=list(WHOLE_LEDGER_OPERATIONS),
+)
+def test_lifecycle_operations_are_detected(operation):
+    """The guard fails when start or completion uses a whole-container method."""
+
+    class Regressed(CallLedger):
+        """A ledger whose start does work proportional to the calls it holds."""
+
+        def start(self, *args, **kwargs):
+            if len(self._calls) > 1:
+                operation(self)
+            return super().start(*args, **kwargs)
+
+    ledger = Regressed()
+    seen = watch_ledger(ledger)
+    run_lifecycle(ledger=ledger)
     assert seen, "guard missed a whole-ledger operation"
 
 
@@ -199,6 +272,28 @@ def late_over_early(ledger_class):
     return statistics.median(elapsed[-1000:]) / statistics.median(elapsed[500:1500])
 
 
+def lifecycle_late_over_early(ledger_class):
+    """Time a long start+finish run and return late over early median per-call cost."""
+    ledger = ledger_class()
+    args = {"n": 3, "payload": "p" * 128}
+    elapsed = []
+    collecting = gc.isenabled()
+    gc.disable()
+    try:
+        for index in range(SCALE_CALLS):
+            call_id = f"id-{index}"
+            start = time.perf_counter_ns()
+            body = start_body(args)
+            ledger.start("host", call_id, body, body.encoded(("function", "args")))
+            finished = finish_body(args, "ok")
+            ledger.complete(call_id, finished, finished.encoded())
+            elapsed.append(time.perf_counter_ns() - start)
+    finally:
+        if collecting:
+            gc.enable()
+    return statistics.median(elapsed[-1000:]) / statistics.median(elapsed[500:1500])
+
+
 def test_per_call_time_is_flat_at_scale():
     """A long run is as fast at the end as near the start, in at least one of three."""
     ratios = []
@@ -209,11 +304,31 @@ def test_per_call_time_is_flat_at_scale():
     pytest.fail(f"late calls grew in every run: {ratios}")
 
 
+def test_lifecycle_per_call_time_is_flat_at_scale():
+    """A long start+finish run stays flat at the end, in at least one of three."""
+    ratios = []
+    for _ in range(3):
+        ratios.append(lifecycle_late_over_early(CallLedger))
+        if ratios[-1] <= FLAT_RATIO:
+            return
+    pytest.fail(f"late lifecycle calls grew in every run: {ratios}")
+
+
 REACHING_AROUND_THE_GUARD = {
     "list method": lambda ledger: list.copy(ledger._calls),
     "dict method": lambda ledger: dict.copy(ledger._positions),
     "base iteration": lambda ledger: sum(1 for _ in list.__iter__(ledger._calls)),
 }
+
+# What a lifecycle regression does per event: touch every container the
+# ledger holds, the way a deep copy of the evaluation would.
+LIFECYCLE_REGRESSION = lambda ledger: (  # noqa: E731 - a parametrised operation
+    list.copy(ledger._calls),
+    dict.copy(ledger._positions),
+    dict.copy(ledger._encoded_by_id),
+    dict.copy(ledger._start_encoded_by_id),
+    dict.copy(ledger._unfinished),
+)
 
 
 @pytest.mark.parametrize(
@@ -232,3 +347,18 @@ def test_scale_run_detects_work_that_avoids_the_watched_methods(operation):
             return super()._insert(*args, **kwargs)
 
     assert late_over_early(Regressed) > FLAT_RATIO, "long run missed whole-ledger work"
+
+
+def test_lifecycle_scale_run_detects_work_that_avoids_the_watched_methods():
+    """A start that copies every container still shows in a long timed run."""
+
+    class Regressed(CallLedger):
+        """A ledger whose start touches every container it holds."""
+
+        def start(self, *args, **kwargs):
+            LIFECYCLE_REGRESSION(self)
+            return super().start(*args, **kwargs)
+
+    assert (
+        lifecycle_late_over_early(Regressed) > FLAT_RATIO
+    ), "long lifecycle run missed whole-ledger work"

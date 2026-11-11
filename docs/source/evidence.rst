@@ -17,6 +17,13 @@ out, because an omitted disposition says nothing and repeats the first record. A
 disposition the replay names must be the first record's, so a replay cannot add one to
 a record that has none.
 
+A call starts as an unfinished record, and its finish completes that record in place,
+keeping the start's position, provenance, timestamp and turn. A start needs a call ID,
+because the ID is what pairs it with its finish. A call that starts and
+never finishes stays visible: a lost report hides whatever the call did. A replay of a
+start compares only the fields a start carries, so a finish's result never conflicts
+with the start it completes.
+
 Per-call cost
 -------------
 
@@ -31,16 +38,18 @@ times per event took about 0.5 ms per whole-call record for the first calls and 
 with a 1 KB result for calls 20 to 70 and about 0.024 ms for calls 470 to 520, measured
 on a development laptop.
 
-``tests/evidence/test_ledger_growth.py`` guards the bound three ways:
+``tests/evidence/test_ledger_growth.py`` guards the bound three ways, for whole-call
+records and for starts and finishes alike:
 
 * Over 500 calls, per-call time and retained memory must stay flat. This catches heavy
   per-record work such as re-exporting or deep-copying every earlier call.
 * A copy of 500 references is too quick for a timer, so a second test logs every
   whole-container method (iteration, slicing, copying, ``index``, ``keys``, ``items``)
   that intake, replay, lookup or refusal calls on the ledger's list and indexes, and
-  fails on any.
+  fails on any. The start and completion paths run under the same guard.
 * Code that calls a built-in method directly skips those logs, so a third test times
-  12,000 calls and fails when the last thousand cost more than 1.5 times the first.
+  12,000 calls and fails when the last thousand cost more than 1.5 times the first. A
+  start-and-finish run at the same scale fails the same way.
 
 The tests catch regressions made by accident. They cannot stop code written to hide
 work from them, which review has to catch.

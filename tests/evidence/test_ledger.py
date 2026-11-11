@@ -7,7 +7,11 @@ import pytest
 pytest.importorskip("midojo_spec")
 
 from garak.evidence.ledger import CallLedger
-from garak.evidence.records import InvalidRequestError, RejectedError
+from garak.evidence.records import (
+    CallBody,
+    InvalidRequestError,
+    RejectedError,
+)
 
 
 def intake(channel, **changes):
@@ -182,3 +186,87 @@ def test_concurrent_replay_and_distinct_ids():
     ), "replays returned different records"
     assert all(receipt.inserted for receipt in distinct), "distinct ID was dropped"
     assert len(ledger) == 17, "concurrent calls were lost"
+
+
+def started(ledger, call_id="one", **changes):
+    """Start a call on the ledger with caller-supplied changes."""
+    values = dict(function="tool", args={"a": 1}, disposition=None)
+    values.update(changes)
+    body = CallBody.build_start(**values)
+    return ledger.start("host", call_id, body, body.encoded(("function", "args")))
+
+
+def test_start_appends_an_unfinished_record():
+    """A start holds no result and keeps the channel's provenance and turn."""
+    ledger = CallLedger(
+        clock=lambda: "2026-01-01T00:00:00+00:00", current_turn=lambda: 2
+    )
+    receipt = started(ledger)
+    record = receipt.record
+    assert (receipt.inserted, record.complete, record.result) == (
+        True,
+        False,
+        None,
+    ), "a start completed the call"
+    assert (record.provenance, record.timestamp, record.turn) == (
+        "host",
+        "2026-01-01T00:00:00+00:00",
+        2,
+    ), "a start lost its metadata"
+    assert ledger.unfinished() == (record,), "the start is not unfinished"
+
+
+def test_unfinished_calls_come_back_in_start_order():
+    """The unfinished list follows start order, whatever order finishes arrive in."""
+    ledger = CallLedger()
+    ids = [f"call-{index}" for index in range(12)]
+    for call_id in ids:
+        started(ledger, call_id)
+    body = CallBody.build(function="tool", args={"a": 1}, result="ok")
+    done = ("call-3", "call-0", "call-7")
+    for call_id in done:
+        ledger.complete(call_id, body, body.encoded())
+    assert [record.call_id for record in ledger.unfinished()] == [
+        call_id for call_id in ids if call_id not in done
+    ], "unfinished calls left start order"
+
+
+def test_start_needs_a_call_id():
+    """A start without an ID cannot be paired with its finish, so it is refused."""
+    ledger = CallLedger(new_call_id=lambda: "assigned")
+    body = CallBody.build_start(function="tool", args={"a": 1})
+    with pytest.raises(InvalidRequestError):
+        ledger.start("host", None, body, body.encoded(("function", "args")))
+    assert len(ledger) == 0, "a start without an ID was recorded"
+
+
+def test_completion_happens_in_place():
+    """A finish completes the record at its position, keeping its metadata."""
+    ledger = CallLedger(
+        clock=lambda: "2026-01-01T00:00:00+00:00", current_turn=lambda: 3
+    )
+    first = started(ledger, "one")
+    other = started(ledger, "two")
+    body = CallBody.build(function="tool", args={"a": 1}, result="ok")
+    receipt = ledger.complete("one", body, body.encoded())
+    finished = receipt.record
+    assert finished.complete and finished.result == "ok", "the call did not complete"
+    assert finished.call_id == "one" and finished.turn == 3, "identity changed"
+    assert finished.provenance == "host", "the finish changed the provenance"
+    assert finished.timestamp == first.record.timestamp, "the finish changed the time"
+    assert ledger.calls() == (finished, other.record), "the record left its position"
+    assert ledger.unfinished() == (other.record,), "a finished call stayed unfinished"
+
+
+def test_completion_keeps_a_start_disposition_when_finish_omits_one():
+    """A finish that names no disposition keeps the start's."""
+    ledger = CallLedger()
+    started(ledger, "one", disposition="forwarded")
+    body = CallBody.build(function="tool", args={"a": 1}, result="ok")
+    finished = ledger.complete("one", body, body.encoded()).record
+    assert finished.disposition == "forwarded", "the start's disposition was lost"
+    body = CallBody.build(
+        function="tool", args={"a": 1}, result="ok", disposition="forwarded"
+    )
+    finished = ledger.complete("one", body, body.encoded()).record
+    assert finished.disposition == "forwarded", "a named one replaced the start's"

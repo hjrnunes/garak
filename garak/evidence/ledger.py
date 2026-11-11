@@ -15,6 +15,7 @@ from garak.evidence.records import (
     CallBody,
     CallRecord,
     Disposition,
+    InvalidRequestError,
     Provenance,
     RejectedError,
     check_call_id,
@@ -44,6 +45,8 @@ class CallLedger:
         self._calls: list[CallRecord] = []
         self._positions: dict[str, int] = {}
         self._encoded_by_id: dict[str, str] = {}
+        self._start_encoded_by_id: dict[str, str] = {}
+        self._unfinished: dict[str, None] = {}
         self._lock = threading.Lock()
 
     def __len__(self) -> int:
@@ -62,9 +65,98 @@ class CallLedger:
         with self._lock:
             return tuple(self._calls)
 
+    def unfinished(self) -> tuple[CallRecord, ...]:
+        """Return the unfinished records in start order.
+
+        A deliberate whole-ledger read: intake paths never call it, so it
+        costs nothing per call. The IDs are kept in the order calls started.
+        """
+        with self._lock:
+            return tuple(
+                self._calls[self._positions[call_id]] for call_id in self._unfinished
+            )
+
+    def encoded(self, call_id: str) -> str:
+        """Return the stored whole-body encoding of one recorded call."""
+        with self._lock:
+            return self._encoded_by_id[call_id]
+
+    def start_encoded(self, call_id: str) -> str:
+        """Return the stored start-field encoding of one recorded call."""
+        with self._lock:
+            return self._start_encoded_by_id[call_id]
+
     def channel(self, provenance: Provenance) -> CallChannel:
         """Bind the authority of subsequent writes to a channel."""
         return CallChannel(self, provenance)
+
+    def start(
+        self,
+        provenance: Provenance,
+        call_id: str,
+        body: CallBody,
+        start_encoded: str,
+    ) -> Receipt:
+        """Append an unfinished record whose finish completes it in place.
+
+        The caller has validated the body and decided admission against the
+        collector's stage; only an ID nobody holds reaches here. Validation
+        and encoding run before the lock.
+        """
+        if call_id is None:
+            raise InvalidRequestError("a start needs a call_id to pair with its finish")
+        check_call_id(call_id)
+        whole = body.encoded()
+        with self._lock:
+            record = CallRecord(
+                **{name: getattr(body, name) for name in (*BODY_FIELDS, "disposition")},
+                call_id=call_id,
+                complete=False,
+                provenance=provenance,
+                timestamp=self._clock(),
+                turn=self._current_turn(),
+            )
+            self._positions[call_id] = len(self._calls)
+            self._calls.append(record)
+            self._encoded_by_id[call_id] = whole
+            self._start_encoded_by_id[call_id] = start_encoded
+            self._unfinished[call_id] = None
+            return Receipt(record, True)
+
+    def complete(
+        self,
+        call_id: str,
+        body: CallBody,
+        whole_encoded: str,
+    ) -> Receipt:
+        """Finish an unfinished record in place, keeping its start's metadata.
+
+        The record keeps its list position, provenance, timestamp and turn;
+        only the body fields and ``complete`` change. The caller has validated
+        the body against the start under the collector's lock.
+        """
+        with self._lock:
+            position = self._positions[call_id]
+            started = self._calls[position]
+            finished = CallRecord(
+                function=body.function,
+                args=body.args,
+                result=body.result,
+                error=body.error,
+                blocked=body.blocked,
+                disposition=body.disposition or started.disposition,
+                structured_content=body.structured_content,
+                injection_outcomes=body.injection_outcomes,
+                call_id=started.call_id,
+                complete=True,
+                provenance=started.provenance,
+                timestamp=started.timestamp,
+                turn=started.turn,
+            )
+            self._calls[position] = finished
+            self._encoded_by_id[call_id] = whole_encoded
+            self._unfinished.pop(call_id, None)
+            return Receipt(finished, True)
 
     def _insert(
         self,
@@ -108,6 +200,7 @@ class CallLedger:
             self._positions[assigned] = len(self._calls)
             self._calls.append(record)
             self._encoded_by_id[assigned] = encoded
+            self._start_encoded_by_id[assigned] = body.encoded(("function", "args"))
             return Receipt(record, True)
 
 
