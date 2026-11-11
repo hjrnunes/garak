@@ -11,6 +11,7 @@ import sys
 sys.modules['midojo_spec'] = None
 import garak.evidence.codec
 import garak.evidence.records
+import garak.evidence.ledger
 from garak.exception import GarakException
 try:
     garak.evidence.codec.encode({})
