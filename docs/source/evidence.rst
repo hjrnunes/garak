@@ -43,6 +43,16 @@ stands, so a release that follows a loss does not undo it. Links are
 diagnostics, never evidence: a lost or stalled one marks the call capture incomplete,
 and the collector's summary of them never enters a digest.
 
+The sealed snapshot
+-------------------
+
+The seal fixes an immutable snapshot named by the shared digest of its content: no
+caller chooses the ID, and equal content has an equal one. The exported JSON is fresh
+and detached on every read, so mutating it, or the objects the snapshot was built from,
+changes neither the digest nor a later read. A snapshot may be pickled and copied,
+because it is a pure frozen value; an unfinished call seals with ``complete`` false and
+``result`` null, and no result is ever invented for it.
+
 Per-call cost
 -------------
 
@@ -81,3 +91,4 @@ work from them, which review has to catch.
    evidence/ledger
    evidence/facts
    evidence/links
+   evidence/seal
