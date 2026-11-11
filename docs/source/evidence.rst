@@ -24,6 +24,15 @@ never finishes stays visible: a lost report hides whatever the call did. A repla
 start compares only the fields a start carries, so a finish's result never conflicts
 with the start it completes.
 
+Late facts and capture failures
+-------------------------------
+
+A write a stage refuses when it has moved on is kept as a late fact, once per distinct
+write, with the evidence keys it marks incomplete and its payload as frozen JSON. A
+capture failure records the other loss: a call record the interception layer could not
+deliver, identified by its call, function and phase alone, so a resent report replays
+whatever error it carries.
+
 Per-call cost
 -------------
 
@@ -60,3 +69,4 @@ work from them, which review has to catch.
    evidence/codec
    evidence/records
    evidence/ledger
+   evidence/facts

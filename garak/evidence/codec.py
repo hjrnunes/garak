@@ -27,6 +27,15 @@ def injection_codec():
     return injection
 
 
+def recorder_codec():
+    """Load the optional recorder vocabulary when a capture reason is cut."""
+    try:
+        from midojo_spec import recorder
+    except ImportError as exc:
+        raise MissingSnapshotCodecError(INSTALL_HINT) from exc
+    return recorder
+
+
 def encode(value: object) -> str:
     """Encode JSON data without conflating numeric types, signs, or key order."""
     codec = snapshot_codec()
