@@ -24,6 +24,7 @@ import backoff
 
 from garak import _config
 from garak.attempt import Message, Conversation
+from garak.cli import REDACTED, credential_values, redact_credentials
 import garak.exception
 from garak.generators.base import Generator
 
@@ -133,11 +134,45 @@ audio_formats = ["wav", "mp3"]
 audio_pattern = re.compile("|".join(audio_formats))
 
 
-def _failed_generation(error: openai.APIStatusError) -> Message:
+class _RedactRequestOptions(logging.Filter):
+    """Mask credentials in the openai client's debug record of each request.
+
+    The client logs the request it builds, body included, at DEBUG, and the body
+    of a Responses request holds the ``authorization`` and ``headers`` of its MCP
+    tools. garak writes DEBUG records from every logger to its log file.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, dict):
+            record.args = redact_credentials(record.args)
+        elif record.args:
+            record.args = tuple(redact_credentials(arg) for arg in record.args)
+        return True
+
+
+logging.getLogger("openai._base_client").addFilter(_RedactRequestOptions())
+
+
+def _scrub(text: str, secrets) -> str:
+    """Return ``text`` with each of ``secrets`` replaced by the redaction marker.
+
+    A server can answer a rejected request by echoing it, so text that came back
+    from one can hold a credential the request carried. A secret is matched as
+    written and as a JSON string escapes it.
+    """
+
+    for secret in sorted(set(secrets), key=len, reverse=True):
+        for spelling in (secret, json.dumps(secret)[1:-1]):
+            text = text.replace(spelling, REDACTED)
+    return text
+
+
+def _failed_generation(error: openai.APIStatusError, secrets=()) -> Message:
     """Return the output for a generation the API rejected.
 
     The output has no text. Its ``error`` note names the error type and, when
-    the API sent a response, its status code and body text as received.
+    the API sent a response, its status code and body text as received, apart
+    from any of ``secrets`` the body echoes.
     """
 
     note = {"type": type(error).__name__}
@@ -146,7 +181,7 @@ def _failed_generation(error: openai.APIStatusError) -> Message:
         note["status_code"] = response.status_code
         body = getattr(response, "text", None)
         if isinstance(body, str):
-            note["body"] = body
+            note["body"] = _scrub(body, secrets)
     return Message(None, notes={"error": note})
 
 
@@ -670,6 +705,13 @@ class OpenAIResponsesGenerator(OpenAICompatible):
                 create_args["tool_choice"]
             )
 
+        # an API can answer a rejected request by echoing it, so what comes back
+        # in an error is scrubbed of the credentials the request carried; the
+        # prompt itself is never logged, as its notes can hold tool credentials
+        secrets = credential_values(create_args)
+        if isinstance(getattr(self, "api_key", None), str):
+            secrets.append(self.api_key)
+
         try:
             response = self.client.responses.create(**create_args)
         except (
@@ -680,23 +722,27 @@ class OpenAIResponsesGenerator(OpenAICompatible):
             # multiprocessing cannot pickle, so raise garak's own exception here
             msg = (
                 f"OpenAI API authentication failed (HTTP {e.status_code}); "
-                f"verify {self.key_env_var} is valid. Original error: {e}"
+                f"verify {self.key_env_var} is valid. "
+                f"Original error: {_scrub(str(e), secrets)}"
             )
             logging.error(msg)
             raise garak.exception.GarakException(msg) from None
         except openai.BadRequestError as e:
-            # the prompt is left out: its notes can hold tool credentials
-            logging.exception(e)
-            logging.error("Bad request: %s", e)
-            return [_failed_generation(e)]
+            logging.error("Bad request: %s", _scrub(str(e), secrets))
+            return [_failed_generation(e, secrets)]
         except openai.APIStatusError as e:
             if (
                 isinstance(e, (openai.RateLimitError, openai.InternalServerError))
                 or e.status_code in self.transient_retry_codes
             ):
                 raise garak.exception.GeneratorBackoffTrigger from e
-            logging.warning("HTTP %s from %s: %s", e.status_code, e.request.url, e)
-            return [_failed_generation(e)]
+            logging.warning(
+                "HTTP %s from %s: %s",
+                e.status_code,
+                e.request.url,
+                _scrub(str(e), secrets),
+            )
+            return [_failed_generation(e, secrets)]
         except json.decoder.JSONDecodeError as e:
             logging.exception(e)
             raise garak.exception.GeneratorBackoffTrigger from e

@@ -43,6 +43,28 @@ def redact_credentials(value):
     return value
 
 
+def credential_values(value):
+    """Return the secret strings that credential options hold anywhere in ``value``.
+
+    Use the result to scrub text that can echo a credential, such as the error a
+    server returns for a request that carried one. A value with a scheme, such
+    as ``Bearer abc``, comes back whole and as its last word, because a server
+    can echo either.
+    """
+    found = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if isinstance(key, str) and key.lower() in CREDENTIAL_KEYS:
+                if isinstance(item, str) and item.strip():
+                    found.extend([item, item.split()[-1]])
+            else:
+                found.extend(credential_values(item))
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            found.extend(credential_values(item))
+    return found
+
+
 def _redact_json(text):
     """Return ``text`` with the JSON object or array it spells redacted.
 
