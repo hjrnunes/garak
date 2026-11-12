@@ -69,6 +69,8 @@ Let's take a look at the core config.
     plugins:
         target_type:
         target_name:
+        injector_type:
+        environment_type:
         detector_spec: auto
         extended_detectors: false
         buffs_include_original_prompt: false
@@ -144,6 +146,8 @@ Plugins Config Items
 
 * ``target_type`` - The type of target generator, e.g. "nim" or "huggingface"
 * ``target_name`` - The specific name of the target to be used (optional - if blank, type-specific default is used)
+* ``injector_type`` - Injector component name (for example ``mim``); configuration overrides a context request's injector.
+* ``environment_type`` - Environment component name (for example ``unmanaged``); configuration overrides a context request's environment.
 * ``detector_spec`` - An optional spec of detectors to be used, if overriding those recommended in probes. Specifying ``detector_spec`` means the ``pxd`` harness will be used. This is equivalent to passing `-d` to the CLI
 * ``extended_detectors`` - Should just the primary detector be used per probe, or should the extended detectors also be run? The former is fast, the latter thorough.
 * ``buffs_include_original_prompt`` - When buffing, should the original pre-buff prompt still be included in those posed to the model?

@@ -24,6 +24,8 @@ class _UnmanagedScope(EnvironmentScope):
 class Unmanaged(Environment):
     """Leave a target's setup, disposal and observation to its caller."""
 
+    capabilities = frozenset()
+
     def __init__(self, config_root=None):
         super().__init__(config_root=config_root)
         if self.isolation is not None or self.observations != ():

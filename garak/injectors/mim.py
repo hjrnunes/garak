@@ -100,6 +100,7 @@ class _RedactSecrets(logging.Filter):
 class Mim(Injector):
     """Configure a binding service without starting it or importing optional packages."""
 
+    capabilities = frozenset({"mcp_tools", "tool_output", "binding_stream"})
     extra_dependency_names = ["midojo_spec", "midojo_mim"]
     service_url: str | None = None
     bind_credential: str | None = None

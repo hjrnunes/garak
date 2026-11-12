@@ -65,6 +65,7 @@ Check out the :doc:`usage` section for further information, including :doc:`inst
    attempt
    cli
    command
+   coordinator
    _config
    exception
    evidence

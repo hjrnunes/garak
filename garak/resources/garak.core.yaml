@@ -21,6 +21,8 @@ run:
 plugins:
   target_type:
   target_name:
+  injector_type:
+  environment_type:
   detector_spec: auto
   extended_detectors: true
   buffs_include_original_prompt: false
