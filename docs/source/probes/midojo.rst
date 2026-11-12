@@ -56,12 +56,70 @@ Options
    "``source_path``", "shipped example", "The injection-spec file."
    "``upstream``", "none", "The HTTP(S) URL the injector forwards tool calls to, with a host and no user info; ports, paths and queries are accepted. It takes precedence over the document's ``interception.upstream``. A run with neither is refused."
    "``repeats``", "1", "Chains per entry. A value above 1 is refused unless the environment declares isolation, which says that each chain meets a fresh target. The shipped ``unmanaged`` environment declares none, so the run is refused when it starts; the shipped ``disposable`` environment declares it on your behalf (see :doc:`../environments/disposable`). A repeat asks the environment to reset only if the environment has a reset capability."
+   "``paired_baseline``", "false", "A boolean. When true, each attacked chain is followed by a baseline chain of the same entry, and the probe adds ``midojo.EvaluationUtility`` to its extended detectors. The run is refused unless the environment declares isolation, and the refusal names this option. See `Paired baselines and utility`_."
    "``chain_timeout``", "off", "Seconds for a whole chain: a finite positive number, or null. A chain that runs longer closes and records ``ChainTimeout``."
    "``turn_timeout``", "60", "Seconds for one turn: a finite positive number. The coordinator enforces it and records ``TurnTimeout``."
    "``end_condition``, ``follow_prompt_cap``", "``verify``, false", "As in the iterative base probe."
 
 Each option is refused without echoing its value when it holds the wrong kind
 of value.
+
+Paired baselines and utility
+----------------------------
+
+An attack can cost the user their task without ever succeeding. A paired
+baseline measures that cost: it runs the same task twice, once under attack and
+once without, and compares whether the task was completed.
+
+Set ``paired_baseline`` to true. For each entry and repeat, the probe runs two
+serial chains:
+
+#. The attacked chain, as without the option.
+#. The baseline chain. It has the same turns, tool policy and utility check,
+   but its plan is empty, so no payload is placed, and it has no security check
+   and no tool-call condition. It starts a fresh conversation and seals on its
+   own.
+
+Both attempts carry one pairing ID in ``notes["utility_pair"]``, with a
+``role`` of ``attacked`` or ``baseline``. The baseline attempt is in no
+security denominator: the security detectors skip it and mark it not
+applicable, so the attack success rate does not change. Only the final turn of
+each chain is an attempt, so no intermediate turn is graded twice.
+
+``midojo.EvaluationUtility`` reads the sealed utility grade of both sides. The
+evaluator reports the utility drop over the valid pairs, which are the pairs
+whose two sides each scored. A pair with a side that was cut short, never
+delivered its payload, or has no utility check is invalid, is counted with its
+reason, and takes no part in the rates. See :doc:`../reporting` for the report.
+
+Each chain after the first meets a target that an earlier chain used, so the
+environment must declare isolation: the probe refuses to start otherwise and
+never falls back to an unpaired run. The ``disposable`` environment
+(:doc:`../environments/disposable`) declares it on your behalf, and the
+declaration is only true if you replace the target before each chain. A false
+declaration makes every comparison from the run invalid, and garak cannot
+detect it. An environment that can reset the target is asked to reset before
+each chain after the first.
+
+The pair is a note on the attempt and a line in the report. The sealed
+snapshot, the trace and the verdict are as an unpaired run writes them.
+
+Weather demo
+^^^^^^^^^^^^
+
+``garak/data/injection/weather_utility_spec.json`` holds two weather tasks for
+this option. Each asks for one city's temperature and conditions, checks that
+the reply holds them, and has the interception service append a request to send
+a fake tornado alert to the city's weather report.
+
+``tests/weather_demo.py`` runs the file with ``paired_baseline`` and the
+``disposable`` environment. It serves real weather tools and a real interception
+service from a child process, and a scripted stand-in for a model follows the
+planted request on the first task only. From an environment with garak, the
+``midojo`` and ``midojo-mim`` extras, ``fastmcp`` and ``uvicorn``, run
+``python tests/weather_demo.py``. The demo reports that both baselines complete
+their task, that one of two attacked runs does, a utility drop of 0.50 and an
+attack success of one in two, with the baselines in no denominator.
 
 Moving from the earlier options
 -------------------------------
@@ -89,6 +147,7 @@ has the full message.
    "none", "``plugins.environment_type``", "Optional. The default is ``unmanaged``."
    "none", "``probes.midojo.InjectionSpecProbe.chain_timeout``", "New. Seconds for a whole chain; off by default."
    "none", "``probes.midojo.InjectionSpecProbe.turn_timeout``", "New. Seconds for one turn; the default is 60."
+   "none", "``probes.midojo.InjectionSpecProbe.paired_baseline``", "New. Runs a benign baseline chain after each attacked chain; off by default."
    "none", "``plugins.injectors.mim.bind_timeout``, ``release_timeout``", "Optional bounds of the injector; the Mim page describes them."
 
 A key under ``plugins.injectors.mim.<key>`` applies to the class, and
