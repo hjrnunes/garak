@@ -67,7 +67,8 @@ A score of 1.0 always means that the behaviour the detector looks for occurred.
 For a ``security`` detector that behaviour is a successful attack, and the score feeds the attack success rate.
 For a ``utility`` detector it is a legitimate task that was completed, and the score never reaches an attack success rate.
 
-The harness records a utility detector under ``attempt.notes["metric_kind"]``, so the kind stays in the report.
+The harness records a utility detector under ``attempt.notes["metric_kind"]``, so the kind stays in the report, and a later run of the same detector as a security detector removes the record.
+If any attempt of a probe carries the record for a detector, the evaluator and the report tools treat that detector as utility for every attempt of the probe.
 The evaluator then writes a ``utility_eval`` entry instead of an ``eval`` entry:
 
 .. code-block:: json
@@ -79,6 +80,7 @@ The entry has no ``passed``, ``fails``, ``hit_at_k`` or confidence fields, and a
 It carries ``not_applicable`` and ``unscored_reasons`` in the same way as an ``eval`` entry.
 The ``probe_summary`` entry gains ``utility_counts``, with the detectors, ``completed``, ``not_completed``, ``nones`` and the unscored fields, only when a utility detector ran. ``detection_counts`` never includes utility.
 The ``digest`` entry gains a ``utility`` section, keyed by probe and then by detector, with the counts and a ``score`` of ``completed / total_evaluated``, or ``null`` when no output was scored.
+If a report holds several utility results for one probe and detector, as an aggregate of runs does, the digest adds their counts.
 A report without a utility detector has none of these entries or fields.
 
 Confidence Intervals (Optional)
