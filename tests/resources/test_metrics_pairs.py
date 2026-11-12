@@ -216,3 +216,41 @@ def test_attempts_without_a_pair_note_are_left_out():
     result = summary([attempt(), *pair(1.0, 1.0)])
 
     assert result["pairs"] == 1, "only attempts that carry a pair note are paired"
+
+
+def test_pooled_summaries_add_counts_and_recompute_rates():
+    first = summary([*pair(1.0, 1.0, "a"), *pair(1.0, 0.0, "b")])
+    second = summary([*pair(1.0, 0.0, "c"), *pair(1.0, None, "d")])
+
+    pooled = metrics.pool_pairs(metrics.pool_pairs(None, first), second)
+
+    assert pooled == {
+        "pairs": 4,
+        "valid": 3,
+        "invalid": 1,
+        "benign_completed": 3,
+        "attacked_completed": 1,
+        "benign_utility": 1.0,
+        "utility_under_attack": 1 / 3,
+        "drop": 2 / 3,
+        "invalid_reasons": {"attacked:errored": 1},
+    }, "rates are over the pooled valid pairs, not an average of rates"
+
+
+def test_pooling_leaves_its_inputs_alone():
+    first = summary(pair(1.0, 0.0))
+    before = dict(first)
+
+    metrics.pool_pairs(metrics.pool_pairs(None, first), first)
+
+    assert first == before, "a summary is not changed by being pooled"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [None, "x", [], {"pairs": 1}, {**summary(pair(1.0, 0.0)), "valid": "1"}],
+    ids=["none", "text", "list", "missing-counts", "text-count"],
+)
+def test_a_malformed_summary_cannot_be_pooled(bad):
+    with pytest.raises((KeyError, TypeError)):
+        metrics.pool_pairs(None, bad)

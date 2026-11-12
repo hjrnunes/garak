@@ -24,6 +24,7 @@ import garak._plugins
 from garak.data import path as data_path
 import garak.analyze
 import garak.analyze.calibration
+import garak.resources.metrics
 import garak.resources.scoring
 from garak.evaluators.base import CI_DISPLAY_MIN_WIDTH
 from garak.exception import ReportIncompatibleError
@@ -622,6 +623,10 @@ def _summarise_utility(utility_evals: list) -> dict:
                     reasons[reason] = reasons.get(reason, 0) + count
             evaluated = entry["total_evaluated"]
             entry["score"] = entry["completed"] / evaluated if evaluated else None
+            if "pairs" in record:
+                entry["pairs"] = garak.resources.metrics.pool_pairs(
+                    entry.get("pairs"), record["pairs"]
+                )
         except (KeyError, TypeError, AttributeError) as e:
             raise ReportIncompatibleError(
                 "Report utility_eval entry is malformed; "

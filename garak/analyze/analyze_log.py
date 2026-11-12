@@ -105,6 +105,12 @@ def analyze_log(report_path: str) -> None:
                     f"## utility, not an attack: {record['probe']} {record['detector']} "
                     f"completed {record['completed']}/{record['total_evaluated']}"
                 )
+                pairs = record.get("pairs")
+                if pairs and pairs.get("valid"):
+                    print(
+                        f"## utility drop under attack: {pairs['drop']:.4f} "
+                        f"over {pairs['valid']}/{pairs['pairs']} valid pairs"
+                    )
 
     if not started_attempt_uuids:
         print("## no attempts in log")

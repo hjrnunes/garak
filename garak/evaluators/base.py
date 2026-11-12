@@ -274,13 +274,25 @@ class Evaluator:
 
         A score that the evaluator would call a hit is a completed task. There
         is no hit log, hit@k or interval: a completed task is not an attack.
+
+        The counts cover the attempts under test. The baseline attempts of
+        pairs are not among them, because a rate that mixed benign runs with
+        runs under attack would describe neither; their results are in the
+        ``pairs`` member, which is present only if an attempt is in a pair.
         """
+        metrics = garak.resources.metrics
         completed = 0
         not_completed = 0
         nones = 0
         not_applicable = 0
         unscored_reasons: dict[str, int] = defaultdict(int)
+        attempts = list(attempts)
+        pairs = metrics.pair_summary(
+            attempts, detector_name, lambda score: not self.test(score)
+        )
         for attempt in attempts:
+            if metrics.is_baseline(attempt):
+                continue
             reason, attempt_not_applicable = garak.resources.metrics.unscored_mark(
                 attempt, detector_name
             )
@@ -299,6 +311,8 @@ class Evaluator:
         self.print_utility(detector_name, completed, evaluated)
         if nones:
             self.print_unscored(nones, not_applicable, unscored_reasons)
+        if pairs is not None:
+            self.print_pairs(pairs)
 
         utility_record = {
             "entry_type": "utility_eval",
@@ -314,6 +328,8 @@ class Evaluator:
             utility_record["not_applicable"] = not_applicable
         if unscored_reasons:
             utility_record["unscored_reasons"] = dict(sorted(unscored_reasons.items()))
+        if pairs is not None:
+            utility_record["pairs"] = pairs
         _config.transient.reportfile.write(
             json.dumps(utility_record, ensure_ascii=False) + "\n"
         )
@@ -418,6 +434,10 @@ class Evaluator:
                 for k in ("completed", "not_completed", "nones"):
                     utility_counts[k] += utility_summary[k]
                 self._pool_unscored(utility_counts, utility_summary)
+                if "pairs" in utility_summary:
+                    utility_counts["pairs"] = garak.resources.metrics.pool_pairs(
+                        utility_counts.get("pairs"), utility_summary["pairs"]
+                    )
                 continue
             eval_summary = self._evaluate_one_detector(attempt_subset, detector_to_eval)
             detection_counts["detectors"].add(detector_to_eval)
@@ -484,6 +504,22 @@ class Evaluator:
         if reasons:
             text += "; " + ", ".join(f"{k}: {v}" for k, v in sorted(reasons.items()))
         print(f"    {Fore.LIGHTYELLOW_EX}unscored:{Style.RESET_ALL} {nones} ({text})")
+
+    @staticmethod
+    def print_pairs(pairs: dict) -> None:
+        """Print the utility of a utility detector's pairs, and its drop"""
+        text = f"{pairs['valid']}/{pairs['pairs']} valid"
+        if pairs["valid"]:
+            text += (
+                f"; benign {pairs['benign_utility']:.2%}"
+                f", under attack {pairs['utility_under_attack']:.2%}"
+                f", drop {pairs['drop']:.2%}"
+            )
+        if pairs.get("invalid_reasons"):
+            text += "; invalid " + ", ".join(
+                f"{k}: {v}" for k, v in sorted(pairs["invalid_reasons"].items())
+            )
+        print(f"    {Fore.LIGHTCYAN_EX}pairs:{Style.RESET_ALL} {text}")
 
     def print_utility(self, detector_name: str, completed: int, evals: int) -> None:
         """Print how many tasks a utility detector found completed"""

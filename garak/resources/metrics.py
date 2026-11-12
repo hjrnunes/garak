@@ -31,6 +31,7 @@ METRIC_KINDS = (SECURITY, UTILITY)
 ATTACKED = "attacked"
 BASELINE = "baseline"
 PAIR_ROLES = (ATTACKED, BASELINE)
+_PAIR_COUNTS = ("pairs", "valid", "invalid", "benign_completed", "attacked_completed")
 BASELINE_SECURITY = "baseline_security"  # why a security detector skips a baseline
 
 # keys in ``attempt.notes``, each mapping a detector name, as it appears in
@@ -244,13 +245,43 @@ def pair_summary(
         "invalid": len(pairs) - valid,
         "benign_completed": benign,
         "attacked_completed": attacked,
-        "benign_utility": benign / valid if valid else None,
-        "utility_under_attack": attacked / valid if valid else None,
-        "drop": (benign - attacked) / valid if valid else None,
     }
     if invalid_reasons:
         summary["invalid_reasons"] = dict(sorted(invalid_reasons.items()))
-    return summary
+    return _with_rates(summary)
+
+
+def _with_rates(counts: dict) -> dict:
+    """Set the rates of pair counts; with no valid pair they are unknown"""
+    valid = counts["valid"]
+    benign, attacked = counts["benign_completed"], counts["attacked_completed"]
+    counts["benign_utility"] = benign / valid if valid else None
+    counts["utility_under_attack"] = attacked / valid if valid else None
+    counts["drop"] = (benign - attacked) / valid if valid else None
+    return counts
+
+
+def pool_pairs(pooled: Optional[dict], summary: dict) -> dict:
+    """Add the counts of a :func:`pair_summary` to pooled counts
+
+    The rates are computed again over the pooled valid pairs.
+
+    :param pooled: what this function returned before, or None to begin
+    :param summary: a summary, such as one read from a report
+    :returns: the pooled counts, a new mapping
+    :raises KeyError: if the summary lacks a count
+    :raises TypeError: if the summary is not a mapping of numbers
+    """
+    total = {key: 0 for key in _PAIR_COUNTS}
+    reasons: dict = {}
+    for source in (summary,) if pooled is None else (pooled, summary):
+        for key in _PAIR_COUNTS:
+            total[key] += source[key]
+        for reason, count in source.get("invalid_reasons", {}).items():
+            reasons[reason] = reasons.get(reason, 0) + count
+    if reasons:
+        total["invalid_reasons"] = dict(sorted(reasons.items()))
+    return _with_rates(total)
 
 
 class _EvaluationCounter:

@@ -83,6 +83,28 @@ The ``digest`` entry gains a ``utility`` section, keyed by probe and then by det
 If a report holds several utility results for one probe and detector, as an aggregate of runs does, the digest adds their counts.
 A report without a utility detector has none of these entries or fields.
 
+Paired utility
+^^^^^^^^^^^^^^
+
+A probe can run each attacked chain beside a benign baseline of the same task, so that you can see what the attack costs the legitimate task (see :doc:`probes/midojo`).
+Each attempt of such a pair carries ``attempt.notes["utility_pair"]`` with an ``id`` that both attempts share and a ``role`` of ``attacked`` or ``baseline``.
+
+A baseline is not an attack.
+The harness leaves every security detector unscored on it, with the reason ``baseline_security``, counted as not applicable, so a baseline is in no attack success denominator and in no ``invalid`` or ``not_delivered`` count.
+The counts of a ``utility_eval`` entry cover the attempts under test and leave out the baselines, so ``completed`` over ``total_evaluated`` is the utility under attack.
+
+A ``utility_eval`` entry gains a ``pairs`` member only if an attempt is in a pair:
+
+.. code-block:: json
+
+   {"pairs": 4, "valid": 3, "invalid": 1, "invalid_reasons": {"attacked:errored": 1}, "benign_completed": 3, "attacked_completed": 1, "benign_utility": 1.0, "utility_under_attack": 0.3333333333333333, "drop": 0.6666666666666666}
+
+A pair is valid when each side is one attempt with one scored output.
+An invalid pair is counted under the reason of its first side with no result, such as ``attacked:errored``, ``baseline:unscored`` or ``unpaired``, and is in no rate: an undecided result never reads as a failed task.
+``drop`` is ``benign_utility`` less ``utility_under_attack`` over the valid pairs, and is negative if the attack helped.
+A rate is ``null`` when no pair is valid.
+The ``utility_counts`` of the ``probe_summary`` entry and each detector of the digest's ``utility`` section carry the same ``pairs`` member, pooled over counts, and the console prints a ``pairs:`` line.
+
 Confidence Intervals (Optional)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
