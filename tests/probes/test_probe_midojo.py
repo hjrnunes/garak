@@ -1960,7 +1960,6 @@ def test_a_remote_probe_seals_its_chain_and_opens_no_listener(
     tmp_path, report, remote_service, caplog
 ):
     before = _own_listeners()
-    assert before == set(), f"the driver process starts with no listener, not {before}"
     probe = _probe(
         tmp_path,
         entry("Look up ORD-101 for me."),

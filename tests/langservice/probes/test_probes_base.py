@@ -389,6 +389,9 @@ def test_probe_prompt_translation(classname, mocker):
     except GarakException:
         pytest.skip("Probe could not be configured with available data")
 
+    if classname == "probes.midojo.InjectionSpecProbe":
+        pytest.skip("Injection spec turns require a configured live interceptor")
+
     if probe_instance.lang != "en" or classname == "probes.tap.PAIR":
         pytest.skip("Probe does not engage with language provision")
 
