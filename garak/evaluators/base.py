@@ -267,6 +267,71 @@ class Evaluator:
 
         return eval_record
 
+    def _evaluate_one_utility_detector(
+        self, attempts: Iterable[garak.attempt.Attempt], detector_name: str
+    ) -> dict:
+        """Count completed tasks for a utility detector
+
+        A score that the evaluator would call a hit is a completed task. There
+        is no hit log, hit@k or interval: a completed task is not an attack.
+        """
+        completed = 0
+        not_completed = 0
+        nones = 0
+        not_applicable = 0
+        unscored_reasons: dict[str, int] = defaultdict(int)
+        for attempt in attempts:
+            reason, attempt_not_applicable = garak.resources.metrics.unscored_mark(
+                attempt, detector_name
+            )
+            for score in attempt.detector_results[detector_name]:
+                if score is None:
+                    nones += 1
+                    not_applicable += attempt_not_applicable
+                    if reason is not None:
+                        unscored_reasons[reason] += 1
+                elif self.test(float(score)):
+                    not_completed += 1
+                else:
+                    completed += 1
+
+        evaluated = completed + not_completed
+        self.print_utility(detector_name, completed, evaluated)
+        if nones:
+            self.print_unscored(nones, not_applicable, unscored_reasons)
+
+        utility_record = {
+            "entry_type": "utility_eval",
+            "probe": self.probename,
+            "detector": detector_name,
+            "completed": completed,
+            "not_completed": not_completed,
+            "nones": nones,
+            "total_evaluated": evaluated,
+            "total_processed": evaluated + nones,
+        }
+        if not_applicable:
+            utility_record["not_applicable"] = not_applicable
+        if unscored_reasons:
+            utility_record["unscored_reasons"] = dict(sorted(unscored_reasons.items()))
+        _config.transient.reportfile.write(
+            json.dumps(utility_record, ensure_ascii=False) + "\n"
+        )
+        for key in ("entry_type", "probe", "detector"):
+            utility_record.pop(key)
+        return utility_record
+
+    @staticmethod
+    def _pool_unscored(counts: dict, summary: dict) -> None:
+        """Add the unscored fields of one detector's record to pooled counts"""
+        if "not_applicable" in summary:
+            counts["not_applicable"] = (
+                counts.get("not_applicable", 0) + summary["not_applicable"]
+            )
+        for reason, count in summary.get("unscored_reasons", {}).items():
+            pooled = counts.setdefault("unscored_reasons", {})
+            pooled[reason] = pooled.get(reason, 0) + count
+
     def evaluate(self, attempts: Iterable[garak.attempt.Attempt]) -> None:
         """evaluate feedback from detectors
 
@@ -327,22 +392,38 @@ class Evaluator:
             for attempt_detector in attempt_detectors:
                 detector_to_attempt_ids[attempt_detector].append(idx)
 
+        utility_counts = None
         for detector_to_eval in sorted(detectors_to_eval):
             attempt_subset = [
                 attempts[i] for i in detector_to_attempt_ids[detector_to_eval]
             ]
+            # one detector has one kind: a utility mark on any of its attempts
+            # keeps the whole detector out of the attack success rate
+            if any(
+                garak.resources.metrics.metric_kind(a, detector_to_eval)
+                == garak.resources.metrics.UTILITY
+                for a in attempt_subset
+            ):
+                if utility_counts is None:
+                    utility_counts = {
+                        "detectors": set(),
+                        "completed": 0,
+                        "not_completed": 0,
+                        "nones": 0,
+                    }
+                utility_summary = self._evaluate_one_utility_detector(
+                    attempt_subset, detector_to_eval
+                )
+                utility_counts["detectors"].add(detector_to_eval)
+                for k in ("completed", "not_completed", "nones"):
+                    utility_counts[k] += utility_summary[k]
+                self._pool_unscored(utility_counts, utility_summary)
+                continue
             eval_summary = self._evaluate_one_detector(attempt_subset, detector_to_eval)
             detection_counts["detectors"].add(detector_to_eval)
             for k in ("passed", "fails", "nones"):
                 detection_counts[k] += eval_summary[k]
-            if "not_applicable" in eval_summary:
-                detection_counts["not_applicable"] = (
-                    detection_counts.get("not_applicable", 0)
-                    + eval_summary["not_applicable"]
-                )
-            for reason, count in eval_summary.get("unscored_reasons", {}).items():
-                pooled = detection_counts.setdefault("unscored_reasons", {})
-                pooled[reason] = pooled.get(reason, 0) + count
+            self._pool_unscored(detection_counts, eval_summary)
 
         detection_counts["detectors"] = list(
             detection_counts["detectors"]
@@ -353,6 +434,9 @@ class Evaluator:
             "inference_counts": inference_counts,
             "detection_counts": detection_counts,
         }
+        if utility_counts is not None:
+            utility_counts["detectors"] = sorted(utility_counts["detectors"])
+            probe_record["utility_counts"] = utility_counts
 
         _config.transient.reportfile.write(
             json.dumps(probe_record, ensure_ascii=False) + "\n"
@@ -400,6 +484,24 @@ class Evaluator:
         if reasons:
             text += "; " + ", ".join(f"{k}: {v}" for k, v in sorted(reasons.items()))
         print(f"    {Fore.LIGHTYELLOW_EX}unscored:{Style.RESET_ALL} {nones} ({text})")
+
+    def print_utility(self, detector_name: str, completed: int, evals: int) -> None:
+        """Print how many tasks a utility detector found completed"""
+        outcome = f"{Style.BRIGHT}{Fore.LIGHTCYAN_EX}UTILITY{Style.RESET_ALL}"
+        if _config.system.narrow_output:
+            if self.probename != self._last_probe_printed:
+                print(f"{self.probename}")
+            self._last_probe_printed = self.probename
+            short_detector_name = detector_name.split(".")[-1]
+            print(
+                f"  {outcome} completed {completed:>4}/{evals:>4} -- {short_detector_name:<20}"
+            )
+            return
+        rate = f"   ({100 * completed / evals:6.2f}%)" if evals else ""
+        print(
+            f"{self.probename:<50}{detector_name:>50}: {outcome}",
+            f" completed {completed:>4}/{evals:>4}{rate}",
+        )
 
     def print_results_wide(
         self,

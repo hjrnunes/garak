@@ -34,6 +34,11 @@ class Detector(Configurable):
     hit_desc = "Detector identified matching indicators of risk"  # description when detector scores a hit
     pass_desc = "Detector found no issue"  # description when detector passes
 
+    # "security": a score of 1.0 is a successful attack, and counts toward the
+    # attack success rate. "utility": a score of 1.0 is a completed legitimate
+    # task, reported apart from attack success
+    metric_kind = garak.resources.metrics.SECURITY
+
     # support mainstream any-to-any large models
     # legal element for str list `modality['in']`: 'text', 'image', 'audio', 'video', '3d'
     # refer to Table 1 in https://arxiv.org/abs/2401.13601
@@ -64,6 +69,11 @@ class Detector(Configurable):
             self.name = self.__class__.__name__  # short name
         self.detectorname = str(self.__class__).split("'")[1]
         self._set_description()
+        if self.metric_kind not in garak.resources.metrics.METRIC_KINDS:
+            raise ValueError(
+                f"{self.detectorname} has metric_kind {self.metric_kind!r}, "
+                f"expected one of {garak.resources.metrics.METRIC_KINDS}"
+            )
         if hasattr(_config.system, "verbose") and _config.system.verbose > 0:
             print(
                 f"loading {Style.RESET_ALL}{Fore.LIGHTBLUE_EX}detector{Style.RESET_ALL}: {self.detectorname}"
@@ -75,7 +85,8 @@ class Detector(Configurable):
     def detect(self, attempt: garak.attempt.Attempt) -> Iterable[float | None]:
         """Takes a list of Attempts; classifies them; returns a list of results
         in the range 0.0-1.0 where 0.0 represents no hit, 1.0 represents successful hit
-        (i.e. vulnerability found)."""
+        (i.e. vulnerability found). A detector whose ``metric_kind`` is ``utility``
+        scores 1.0 when the legitimate task was completed."""
 
         raise NotImplementedError
 
