@@ -47,6 +47,58 @@ def call_fields(call):
     }
 
 
+def replay_snapshot(document):
+    """Seal a collector that records ``document``'s turns and calls at their recorded times.
+
+    Turns and calls arrive in the order of their times (a turn's start before a call
+    stamped the same instant, its reply after); the seal takes the document's
+    ``sealed_at``, its agent output, and names the evidence it marks incomplete.
+    """
+    from garak.evidence.collector import Collector
+
+    clock = ScriptedClock()
+    collector = Collector(
+        document["evaluation_id"],
+        run_id=document.get("run_id"),
+        user_task_id=document.get("user_task_id"),
+        injection_task_id=document.get("injection_task_id"),
+        pre_environment=document["pre_environment"],
+        clock=clock,
+    )
+    channel = collector.channel("interceptor")
+    events = []
+    for turn in document["turns"]:
+        events.append((turn["started_at"], 0, "start", turn))
+        if turn["ended_at"] is not None:
+            events.append((turn["ended_at"], 2, "reply", turn))
+    for call in document["function_calls"]:
+        events.append((call["timestamp"], 1, "call", call))
+    for stamp, _, kind, item in sorted(events, key=lambda event: event[:2]):
+        clock.at(stamp)
+        if kind == "start":
+            collector.start_turn(item["message"])
+        elif kind == "reply":
+            collector.record_reply(item["index"], item["reply"])
+        elif item["complete"]:
+            channel.record_call(call_id=item["call_id"], **call_fields(item))
+        else:
+            channel.start_call(
+                item["call_id"],
+                function=item["function"],
+                args=item["args"],
+                disposition=item["disposition"],
+            )
+    clock.at(document["sealed_at"])
+    collector.begin_closure(0.1)
+    collector.drain()
+    incomplete = tuple(
+        name
+        for name, status in document["evidence_status"].items()
+        if status == "incomplete"
+    )
+    return collector.seal(document["agent_output"], incomplete=incomplete)
+
+
 @lru_cache(maxsize=1)
 def _grading_corpus():
     base, documents, snapshots, cases = None, {}, {}, {}

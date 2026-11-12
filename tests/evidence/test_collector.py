@@ -498,6 +498,72 @@ def test_turns_stamp_calls_and_refuse_overlaps():
     assert [turn["reply"] for turn in turns] == ["hi", None], "turn replies changed"
 
 
+def test_a_turn_answered_with_no_text_keeps_its_chain():
+    """A tool-only turn has an empty reply, which answers it: the next turn starts."""
+    unit, _ = collector()
+    channel = unit.channel("interceptor")
+    unit.start_turn("look it up")
+    channel.record_call(call_id="one", function="tool", args={}, result="ok")
+    answered = unit.record_reply(0, "")
+    assert answered.reply == "", "an empty reply was not recorded as text"
+    assert unit.start_turn("and then?").index == 1, "an answered turn blocked the chain"
+    with pytest.raises(RejectedError) as caught:
+        unit.record_reply(0, "again")
+    assert caught.value.kind == "turn_answered", "an empty reply left its turn open"
+    unit.record_reply(1, "done")
+    unit.begin_closure(0.0)
+    unit.drain()
+    document = unit.seal("done").to_json()
+    assert [turn["reply"] for turn in document["turns"]] == [
+        "",
+        "done",
+    ], "reply is None"
+    assert document["function_calls"][0]["turn"] == 0, "the call left its turn"
+
+
+@pytest.mark.parametrize(
+    "reply", [None, b"", b"text", 0, ["text"], type("Text", (str,), {})("")]
+)
+def test_a_reply_that_is_not_exactly_text_is_refused(reply):
+    """Only an exact ``str`` answers a turn; anything else leaves it pending."""
+    unit, _ = collector()
+    unit.start_turn("hello")
+    with pytest.raises(InvalidRequestError):
+        unit.record_reply(0, reply)
+    with pytest.raises(RejectedError) as caught:
+        unit.start_turn("more")
+    assert caught.value.kind == "turn_pending", "a refused reply answered its turn"
+
+
+def test_a_turn_message_is_still_non_empty_text():
+    """The rule for a reply does not loosen the one for a message."""
+    unit, _ = collector()
+    with pytest.raises(InvalidRequestError):
+        unit.start_turn("")
+
+
+def test_an_empty_reply_outside_open_is_a_late_fact():
+    """An empty reply is a turn fact like any other: after the closure it is late."""
+    unit, clock = collector()
+    unit.start_turn("hello")
+    unit.begin_closure(1.0)
+    clock.advance(2.0)
+    with pytest.raises(LateFactError):
+        unit.record_reply(0, "")
+    assert unit.late_facts[0].evidence_keys() == {"turns"}, "wrong evidence key"
+    unit.seal("done")
+    assert unit.evidence_status["turns"] == "incomplete", "overlay missed the reply"
+
+
+def test_the_agent_output_may_be_empty_text():
+    """A seal accepts an agent output of empty text, as it did."""
+    unit, clock = collector()
+    unit.begin_closure(0.0)
+    clock.advance(1.0)
+    unit.drain()
+    assert unit.seal("").to_json()["agent_output"] == "", "empty output was refused"
+
+
 def test_turn_times_come_from_the_injected_clock():
     """A turn's times come from the injected clock; an unanswered turn has no end."""
     unit, clock = collector()

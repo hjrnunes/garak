@@ -67,8 +67,13 @@ class WorldMixin:
                 return turn
 
     def record_reply(self, index: int, reply: str) -> Turn:
-        """Record the agent's reply to turn ``index``."""
-        require_text(reply, "turn's reply")
+        """Record the agent's reply to turn ``index``.
+
+        An empty reply is a reply: an agent that answers a turn with tool calls
+        and no text has answered it, and the runtime records ``""`` for it.
+        """
+        if type(reply) is not str:
+            raise InvalidRequestError("turn's reply must be text")
         arrival = self._monotonic()
         at = self._clock()
         with self._condition:

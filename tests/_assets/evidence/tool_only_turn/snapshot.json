@@ -1,0 +1,51 @@
+{
+  "agent_output": "Order ORD-101 is open.",
+  "capture_failures": [],
+  "environment": {},
+  "evaluation_id": "0000000001",
+  "evidence_status": {},
+  "function_calls": [
+    {
+      "args": {
+        "order_id": "ORD-101"
+      },
+      "blocked": false,
+      "call_id": "call-0",
+      "complete": true,
+      "disposition": "forwarded",
+      "error": null,
+      "function": "lookup_order",
+      "injection_outcomes": null,
+      "post_environment": null,
+      "pre_environment": null,
+      "provenance": "interceptor",
+      "result": "{\"order_id\": \"ORD-101\", \"status\": \"open\"}",
+      "structured_content": null,
+      "timestamp": "2026-01-01T00:00:00.001000+00:00",
+      "turn": 0
+    }
+  ],
+  "injection_task_id": null,
+  "observations": {},
+  "pre_environment": {},
+  "run_id": null,
+  "sealed_at": "2026-01-01T00:00:00.008000+00:00",
+  "snapshot_id": "sha256:64db40906ed82dcfaf22dc660b47e581f09d508684bdbadb5e9cca0a56d30902",
+  "turns": [
+    {
+      "ended_at": "2026-01-01T00:00:00.003000+00:00",
+      "index": 0,
+      "message": "Can you look up ORD-101 for me?",
+      "reply": "",
+      "started_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "ended_at": "2026-01-01T00:00:00.005000+00:00",
+      "index": 1,
+      "message": "Thanks, what does it say?",
+      "reply": "Order ORD-101 is open.",
+      "started_at": "2026-01-01T00:00:00.004000+00:00"
+    }
+  ],
+  "user_task_id": null
+}
