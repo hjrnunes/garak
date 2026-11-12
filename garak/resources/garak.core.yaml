@@ -29,6 +29,8 @@ plugins:
   generators: {}
   buffs: {}
   harnesses: {}
+  injectors: {}
+  environments: {}
 
 reporting:
   report_prefix:

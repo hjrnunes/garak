@@ -6,6 +6,10 @@ class GarakException(Exception):
     """Base class for all  garak exceptions"""
 
 
+class CapabilityError(GarakException):
+    """A component cannot provide a named capability for this target."""
+
+
 class APIKeyMissingError(GarakException):
     """Exception to be raised if a required API key is not found"""
 

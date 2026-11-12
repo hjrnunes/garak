@@ -18,7 +18,7 @@ from typing import List, Callable, Union
 from pathlib import Path
 
 from garak import _config
-from garak.exception import GarakException, ConfigFailure
+from garak.exception import GarakException, ConfigFailure, CapabilityError
 
 PLUGIN_TYPES = ("probes", "detectors", "generators", "harnesses", "buffs")
 PLUGIN_CLASSES = ("Probe", "Detector", "Generator", "Harness", "Buff")
@@ -503,6 +503,8 @@ def load_plugin(path, break_on_fail=True, config_root=_config) -> object:
             exc_info=e,
         )
         if break_on_fail:
+            if isinstance(e, CapabilityError):
+                raise
             raise GarakException(e) from e
         else:
             return False

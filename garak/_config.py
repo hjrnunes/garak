@@ -92,7 +92,15 @@ reporting = GarakSubConfig()
 
 def _lock_config_as_dict():
     global plugins
-    for plugin_type in ("probes", "generators", "buffs", "detectors", "harnesses"):
+    for plugin_type in (
+        "probes",
+        "generators",
+        "buffs",
+        "detectors",
+        "harnesses",
+        "injectors",
+        "environments",
+    ):
         setattr(plugins, plugin_type, _crystallise(getattr(plugins, plugin_type)))
 
 
@@ -114,6 +122,8 @@ plugins.generators = nested_dict()
 plugins.detectors = nested_dict()
 plugins.buffs = nested_dict()
 plugins.harnesses = nested_dict()
+plugins.injectors = nested_dict()
+plugins.environments = nested_dict()
 reporting.taxonomy = None  # set here to enable report_digest to be called directly
 
 buffmanager = BuffManager()

@@ -68,6 +68,7 @@ Check out the :doc:`usage` section for further information, including :doc:`inst
    _config
    exception
    evidence
+   environments
    interactive
    intents
    payloads

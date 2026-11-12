@@ -77,6 +77,8 @@ Let's take a look at the core config.
         generators: {}
         buffs: {}
         harnesses: {}
+        injectors: {}
+        environments: {}
         probes:
             encoding:
                 payloads:
@@ -151,6 +153,8 @@ Plugins Config Items
 * ``buffs`` - Root note for buff plugin configs
 * ``harnesses`` - Root note for harness plugin configs
 * ``probes`` - Root note for probe plugin configs
+* ``environments`` - Root node for environment components, for example ``plugins.environments.unmanaged``
+* ``injectors`` - Root node for injector components, for example ``plugins.injectors.mim``
 
 .. note::
    ``plugins.probe_spec``, ``plugins.buff_spec`` and ``run.probe_tags`` are
