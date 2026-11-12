@@ -11,11 +11,14 @@ Sources:
 * https://platform.openai.com/docs/model-index-for-researchers
 """
 
+import collections
+import contextlib
 import copy
 import inspect
 import json
 import logging
 import re
+import threading
 from typing import List, Union
 
 import httpx
@@ -151,6 +154,74 @@ class _RedactRequestOptions(logging.Filter):
 
 
 logging.getLogger("openai._base_client").addFilter(_RedactRequestOptions())
+
+_ACTIVE_SECRETS = collections.Counter()
+_ACTIVE_SECRETS_LOCK = threading.Lock()
+
+
+class _ScrubActiveSecrets(logging.Filter):
+    """Scrub the credentials of the requests in flight from every log record.
+
+    A server can echo a credential it received in what it sends back, and the
+    client and the HTTP libraries under it log the response, headers and reason
+    phrase included, before garak sees it. The filter sits on the handlers, not
+    on a logger, so it covers a record whichever logger wrote it.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        with _ACTIVE_SECRETS_LOCK:
+            secrets = list(_ACTIVE_SECRETS)
+        if not secrets:
+            return True
+        try:
+            message = record.getMessage()
+        except (TypeError, ValueError, KeyError):
+            message = str(record.msg)
+        record.msg, record.args = scrub_secrets(message, secrets), None
+        if record.exc_info and not record.exc_text:
+            record.exc_text = logging.Formatter().formatException(record.exc_info)
+        if record.exc_text:
+            record.exc_text = scrub_secrets(record.exc_text, secrets)
+        if record.stack_info:
+            record.stack_info = scrub_secrets(record.stack_info, secrets)
+        return True
+
+
+_SCRUB_ACTIVE_SECRETS = _ScrubActiveSecrets()
+
+
+def _handlers():
+    """Return every handler of every logger that exists now, the root's included."""
+    loggers = [logging.getLogger(), *logging.Logger.manager.loggerDict.values()]
+    return [
+        handler
+        for logger in loggers
+        if isinstance(logger, logging.Logger)
+        for handler in list(logger.handlers)
+    ]
+
+
+@contextlib.contextmanager
+def _logs_scrubbed_of(secrets):
+    """Scrub ``secrets`` from every log record written while the block runs.
+
+    A record reaches the handlers of its own logger before the root's, so the
+    filter goes on every existing handler. A handler added while the block runs
+    is not covered.
+    """
+    secrets = list(secrets)
+    for handler in _handlers():
+        if _SCRUB_ACTIVE_SECRETS not in handler.filters:
+            handler.addFilter(_SCRUB_ACTIVE_SECRETS)
+    with _ACTIVE_SECRETS_LOCK:
+        _ACTIVE_SECRETS.update(secrets)
+    try:
+        yield
+    finally:
+        with _ACTIVE_SECRETS_LOCK:
+            _ACTIVE_SECRETS.subtract(secrets)
+            for secret in [s for s, n in _ACTIVE_SECRETS.items() if n <= 0]:
+                del _ACTIVE_SECRETS[secret]
 
 
 def _failed_generation(error: openai.APIStatusError, secrets=()) -> Message:
@@ -699,7 +770,8 @@ class OpenAIResponsesGenerator(OpenAICompatible):
             secrets.append(self.api_key)
 
         try:
-            response = self.client.responses.create(**create_args)
+            with _logs_scrubbed_of(secrets):
+                response = self.client.responses.create(**create_args)
         except (
             openai.AuthenticationError,
             openai.PermissionDeniedError,
@@ -722,10 +794,12 @@ class OpenAIResponsesGenerator(OpenAICompatible):
                 or e.status_code in self.transient_retry_codes
             ):
                 raise garak.exception.GeneratorBackoffTrigger from e
+            # the request URL is the one the client reached after any redirect,
+            # and a server chooses where it redirects to
             logging.warning(
                 "HTTP %s from %s: %s",
                 e.status_code,
-                e.request.url,
+                scrub_secrets(str(e.request.url), secrets),
                 scrub_secrets(str(e), secrets),
             )
             return [_failed_generation(e, secrets)]
