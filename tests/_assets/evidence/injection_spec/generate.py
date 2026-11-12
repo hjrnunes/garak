@@ -376,7 +376,7 @@ def _document_cases() -> None:
     for label, value in [
         ("empty", ""),
         ("v0", "midojo-injection-spec-v0"),
-        ("v2", "midojo-injection-spec-v2"),
+        ("v9", "midojo-injection-spec-v9"),
         ("upper", V1.upper()),
         ("padded", f" {V1}"),
         ("trailing", f"{V1}\n"),

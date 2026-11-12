@@ -170,13 +170,13 @@ def test_supported_versions():
 
 def test_a_version_other_than_v1_is_named():
     document = full()
-    document["schema_version"] = "midojo-injection-spec-v2"
+    document["schema_version"] = "midojo-injection-spec-v9"
     with pytest.raises(UnsupportedDocumentVersion) as caught:
         InjectionSpec.from_document(document)
-    assert caught.value.version == "midojo-injection-spec-v2"
+    assert caught.value.version == "midojo-injection-spec-v9"
     assert caught.value.supported == (V1,)
     assert caught.value.gap is None
-    assert "midojo-injection-spec-v2" in str(caught.value)
+    assert "midojo-injection-spec-v9" in str(caught.value)
 
 
 @pytest.mark.parametrize("version", [None, 1, ["midojo-injection-spec-v1"]])

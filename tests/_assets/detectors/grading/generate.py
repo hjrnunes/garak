@@ -1730,7 +1730,7 @@ def build(runtime: dict[str, Any]) -> Corpus:
         "version-none": {"schema_version": None},
         "version-number": {"schema_version": 1},
         "version-empty": {"schema_version": ""},
-        "version-other": {"schema_version": "midojo-injection-spec-v2"},
+        "version-other": {"schema_version": "midojo-injection-spec-v9"},
         "version-case": {"schema_version": "MIDOJO-INJECTION-SPEC-V1"},
         "version-padded": {"schema_version": "midojo-injection-spec-v1 "},
         "member-unknown": {"securty": leaf("T", 0)},

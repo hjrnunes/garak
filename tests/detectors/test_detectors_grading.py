@@ -868,9 +868,9 @@ def test_document_must_name_its_version():
 
 
 def test_document_version_is_named_in_the_refusal():
-    with pytest.raises(grading.DocumentRefused, match="midojo-injection-spec-v2"):
+    with pytest.raises(grading.DocumentRefused, match="midojo-injection-spec-v9"):
         grading.grade_sealed(
-            document(TRUE, schema_version="midojo-injection-spec-v2"), sealed()
+            document(TRUE, schema_version="midojo-injection-spec-v9"), sealed()
         )
 
 
