@@ -150,21 +150,31 @@ class Harness(Configurable):
             )
         else:
             attempt_iterator.set_description("detectors." + detector_probe_name)
+        metrics = garak.resources.metrics
+        kind = (
+            metrics.UTILITY
+            if detector_instance.metric_kind == metrics.UTILITY
+            else metrics.SECURITY
+        )
         for attempt in attempt_iterator:
             if detector_instance.skip:
                 continue
-            attempt.detector_results[detector_probe_name] = list(
-                detector_instance.detect(attempt)
-            )
-            garak.resources.metrics.mark_kind(
-                attempt,
-                detector_probe_name,
-                (
-                    garak.resources.metrics.UTILITY
-                    if detector_instance.metric_kind == garak.resources.metrics.UTILITY
-                    else garak.resources.metrics.SECURITY
-                ),
-            )
+            if kind == metrics.SECURITY and metrics.is_baseline(attempt):
+                # a baseline is a benign run, so no attack succeeds or fails on it
+                attempt.detector_results[detector_probe_name] = [None] * len(
+                    attempt.outputs
+                )
+                metrics.mark_unscored(
+                    attempt,
+                    detector_probe_name,
+                    metrics.BASELINE_SECURITY,
+                    not_applicable=True,
+                )
+            else:
+                attempt.detector_results[detector_probe_name] = list(
+                    detector_instance.detect(attempt)
+                )
+            metrics.mark_kind(attempt, detector_probe_name, kind)
 
     def run(self, model, probes, detectors, evaluator, announce_probe=True) -> None:
         """Core harness method

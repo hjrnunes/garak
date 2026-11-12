@@ -36,6 +36,20 @@ the trace's calls. Its records use ``evaluation_effect_results``. A blocked
 call can score ``1.0`` on the verdict and ``0.0`` on the effect: the target
 attempted the action, but the action did not run.
 
+Baseline runs
+-------------
+
+A probe can pair each attacked chain with a benign baseline of the same task
+(see :doc:`../probes/midojo`). The attempt of a baseline carries the pair note
+``attempt.notes["utility_pair"]`` with the role ``baseline``. A baseline carries
+no attack, so its security grade is ``not_applicable`` and no payload is
+delivered. Both security detectors score it ``None`` with the reason
+``baseline_security`` before they read the grade, and the harness skips every
+security detector on a baseline for the same reason. The evaluator counts the
+result as not applicable, so a baseline is in no attack success denominator and
+is not counted under ``invalid`` or ``not_delivered``. A run that is not a
+baseline but has no attack stays ``invalid``.
+
 Utility
 -------
 
@@ -76,8 +90,9 @@ Unknown delivery differs from a recorded ``False`` delivery fact.
 
 Each such record also calls ``mark_unscored`` with its reason, so the
 evaluator reports how many outputs each reason explains. ``intermediate_turn``
-counts as not applicable, as does ``no_utility_check`` for the utility
-detector, and every other reason counts as unknown. An
+counts as not applicable, as do ``baseline_security`` (below) and
+``no_utility_check`` for the utility detector, and every other reason counts as
+unknown. An
 evaluation whose injection was not delivered, or whose delivery was not
 recorded, stays out of the attack success denominator and is declared under
 ``not_delivered`` or ``unrecorded_delivery``; see :doc:`../reporting`.
