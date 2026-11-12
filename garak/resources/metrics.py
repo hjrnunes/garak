@@ -251,6 +251,20 @@ def pair_summary(
     return _with_rates(summary)
 
 
+PLAIN_COVERS = "all scored attacked chains"
+PAIRS_COVERS = "valid pairs only"
+
+
+def covers() -> dict:
+    """Name what the plain counts and the pair rates of a paired utility entry cover
+
+    The utility under attack in the plain counts is over every attacked chain
+    that scored. The utility under attack in the ``pairs`` member, and the drop,
+    are over the valid pairs, so the two differ if a pair is invalid.
+    """
+    return {"counts": PLAIN_COVERS, "pairs": PAIRS_COVERS}
+
+
 def _with_rates(counts: dict) -> dict:
     """Set the rates of pair counts; with no valid pair they are unknown"""
     valid = counts["valid"]

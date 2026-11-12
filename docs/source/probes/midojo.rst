@@ -92,7 +92,10 @@ whose two sides each scored. A pair with a side that was cut short, never
 delivered its payload, or has no utility check is invalid, is counted with its
 reason, and takes no part in the pair rates. The plain completed count of the
 attacked chains is not a pair rate: it covers every attacked chain that
-scored, in a valid pair or not. See :doc:`../reporting` for the report.
+scored, in a valid pair or not. The report names both figures, as "utility
+under attack: all scored attacked chains" and "paired drop: valid pairs only",
+and counts the invalid pairs beside them. See :doc:`../reporting` for the
+report.
 
 Each chain after the first meets a target that an earlier chain used, so the
 environment must declare isolation: the probe refuses to start otherwise and

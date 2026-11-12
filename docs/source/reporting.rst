@@ -104,7 +104,17 @@ An invalid pair is counted under the reason of its first side with no result, su
 The attacked side of an invalid pair, if it scored, stays in ``completed`` and ``total_evaluated``, so ``utility_under_attack`` can differ from that plain rate; it is the rate over the valid pairs alone.
 ``drop`` is ``benign_utility`` less ``utility_under_attack`` over the valid pairs, and is negative if the attack helped.
 A rate is ``null`` when no pair is valid.
-The ``utility_counts`` of the ``probe_summary`` entry and each detector of the digest's ``utility`` section carry the same ``pairs`` member, pooled over counts, and the console prints a ``pairs:`` line.
+The ``utility_counts`` of the ``probe_summary`` entry and each detector of the digest's ``utility`` section carry the same ``pairs`` member, pooled over counts.
+
+An entry with ``pairs`` also has a ``covers`` member that names what each of its two utilities under attack covers, so that you can see why they differ if a pair is invalid:
+
+.. code-block:: json
+
+   {"covers": {"counts": "all scored attacked chains", "pairs": "valid pairs only"}}
+
+The console says the same. The completed line ends with ``(utility under attack: all scored attacked chains)``. The ``pairs:`` line starts with ``paired drop: valid pairs only``, then gives the valid and invalid pairs, the two rates and the drop, and the invalid reasons.
+``python -m garak.analyze.analyze_log`` prints the same two labels, and its ``paired drop`` line gives the invalid pairs beside the valid ones.
+A report or digest that holds a ``pairs`` member whose counts cannot be, such as more completed tasks than valid pairs, is refused as an incompatible report.
 
 Confidence Intervals (Optional)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

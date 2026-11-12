@@ -113,15 +113,21 @@ def analyze_log(report_path: str) -> None:
                     )
                 )
             elif record["entry_type"] == "utility_eval":
+                pairs = _read_pairs(record) if "pairs" in record else None
+                scope = (
+                    f" (utility under attack: {garak.resources.metrics.PLAIN_COVERS})"
+                    if pairs
+                    else ""
+                )
                 print(
                     f"## utility, not an attack: {record['probe']} {record['detector']} "
-                    f"completed {record['completed']}/{record['total_evaluated']}"
+                    f"completed {record['completed']}/{record['total_evaluated']}{scope}"
                 )
-                pairs = _read_pairs(record) if "pairs" in record else None
                 if pairs and pairs["valid"]:
                     print(
-                        f"## utility drop under attack: {pairs['drop']:.4f} "
-                        f"over {pairs['valid']}/{pairs['pairs']} valid pairs"
+                        f"## paired drop: {garak.resources.metrics.PAIRS_COVERS}: "
+                        f"{pairs['drop']:.4f} over {pairs['valid']}/{pairs['pairs']} "
+                        f"valid pairs, {pairs['invalid']} invalid"
                     )
 
     if not started_attempt_uuids:

@@ -308,7 +308,7 @@ class Evaluator:
                     completed += 1
 
         evaluated = completed + not_completed
-        self.print_utility(detector_name, completed, evaluated)
+        self.print_utility(detector_name, completed, evaluated, pairs is not None)
         if nones:
             self.print_unscored(nones, not_applicable, unscored_reasons)
         if pairs is not None:
@@ -330,6 +330,7 @@ class Evaluator:
             utility_record["unscored_reasons"] = dict(sorted(unscored_reasons.items()))
         if pairs is not None:
             utility_record["pairs"] = pairs
+            utility_record["covers"] = metrics.covers()
         _config.transient.reportfile.write(
             json.dumps(utility_record, ensure_ascii=False) + "\n"
         )
@@ -438,6 +439,7 @@ class Evaluator:
                     utility_counts["pairs"] = garak.resources.metrics.pool_pairs(
                         utility_counts.get("pairs"), utility_summary["pairs"]
                     )
+                    utility_counts["covers"] = garak.resources.metrics.covers()
                 continue
             eval_summary = self._evaluate_one_detector(attempt_subset, detector_to_eval)
             detection_counts["detectors"].add(detector_to_eval)
@@ -508,7 +510,10 @@ class Evaluator:
     @staticmethod
     def print_pairs(pairs: dict) -> None:
         """Print the utility of a utility detector's pairs, and its drop"""
-        text = f"{pairs['valid']}/{pairs['pairs']} valid"
+        text = (
+            f"paired drop: {garak.resources.metrics.PAIRS_COVERS}; "
+            f"{pairs['valid']}/{pairs['pairs']} valid, {pairs['invalid']} invalid"
+        )
         if pairs["valid"]:
             text += (
                 f"; benign {pairs['benign_utility']:.2%}"
@@ -521,22 +526,33 @@ class Evaluator:
             )
         print(f"    {Fore.LIGHTCYAN_EX}pairs:{Style.RESET_ALL} {text}")
 
-    def print_utility(self, detector_name: str, completed: int, evals: int) -> None:
-        """Print how many tasks a utility detector found completed"""
+    def print_utility(
+        self, detector_name: str, completed: int, evals: int, paired: bool = False
+    ) -> None:
+        """Print how many tasks a utility detector found completed
+
+        :param paired: if true, name the count as the utility under attack over
+            every attacked chain that scored, which a pair rate can differ from
+        """
         outcome = f"{Style.BRIGHT}{Fore.LIGHTCYAN_EX}UTILITY{Style.RESET_ALL}"
+        scope = (
+            f"  (utility under attack: {garak.resources.metrics.PLAIN_COVERS})"
+            if paired
+            else ""
+        )
         if _config.system.narrow_output:
             if self.probename != self._last_probe_printed:
                 print(f"{self.probename}")
             self._last_probe_printed = self.probename
             short_detector_name = detector_name.split(".")[-1]
             print(
-                f"  {outcome} completed {completed:>4}/{evals:>4} -- {short_detector_name:<20}"
+                f"  {outcome} completed {completed:>4}/{evals:>4} -- {short_detector_name:<20}{scope}"
             )
             return
         rate = f"   ({100 * completed / evals:6.2f}%)" if evals else ""
         print(
             f"{self.probename:<50}{detector_name:>50}: {outcome}",
-            f" completed {completed:>4}/{evals:>4}{rate}",
+            f" completed {completed:>4}/{evals:>4}{rate}{scope}",
         )
 
     def print_results_wide(

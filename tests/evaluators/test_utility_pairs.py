@@ -101,10 +101,14 @@ def test_the_counts_cover_the_attempts_under_test_not_the_baselines(report):
     assert record["total_evaluated"] == 2
 
 
-def test_a_scored_attacked_chain_of_an_invalid_pair_stays_in_the_plain_counts(report):
+def test_the_two_utilities_under_attack_differ_with_an_invalid_pair_and_are_named(
+    report, capsys
+):
     errored = attempt(None, metrics.BASELINE, "b", "errored")
 
-    evaluate([*pair(1.0, 1.0, "a"), attempt(0.0, metrics.ATTACKED, "b"), errored])
+    summary = evaluate(
+        [*pair(1.0, 1.0, "a"), attempt(0.0, metrics.ATTACKED, "b"), errored]
+    )
 
     (record,) = read(report, "utility_eval")
     assert (record["completed"], record["total_evaluated"]) == (
@@ -113,14 +117,25 @@ def test_a_scored_attacked_chain_of_an_invalid_pair_stays_in_the_plain_counts(re
     ), "every scored chain under test is counted, so the counts reconcile"
     assert record["pairs"]["invalid_reasons"] == {"baseline:errored": 1}
     assert record["pairs"]["utility_under_attack"] == 1.0, "the pair rate is not"
+    want = {"counts": "all scored attacked chains", "pairs": "valid pairs only"}
+    assert record["covers"] == want, "the entry says what each figure covers"
+    assert summary["utility_counts"]["covers"] == want, "so does the probe summary"
+    out = capsys.readouterr().out
+    assert "completed    1/   2" in out, "the console shows the plain figure"
+    assert "(utility under attack: all scored attacked chains)" in out
+    assert "paired drop: valid pairs only; 1/2 valid, 1 invalid" in out
+    assert "under attack 100.00%" in out, "and the pair figure beside its label"
 
 
-def test_a_run_without_a_pair_has_no_pairs_member(report):
+def test_a_run_without_a_pair_has_no_pairs_member(report, capsys):
     summary = evaluate([attempt(1.0), attempt(0.0)])
 
     (record,) = read(report, "utility_eval")
     assert "pairs" not in record, "reports without pairs are unchanged"
     assert "pairs" not in summary["utility_counts"]
+    assert "covers" not in record and "covers" not in summary["utility_counts"]
+    out = capsys.readouterr().out
+    assert "utility under attack" not in out, "the console is unchanged too"
 
 
 def test_an_unscored_side_makes_the_pair_invalid_and_is_declared(report):
@@ -179,7 +194,8 @@ def test_console_reports_the_drop(report, capsys):
 
     out = capsys.readouterr().out
 
-    assert "pairs:" in out and "2/3 valid" in out, "the line counts valid pairs"
+    assert "pairs:" in out and "2/3 valid, 1 invalid" in out, "the line counts pairs"
+    assert "paired drop: valid pairs only" in out, "and names what the drop covers"
     assert "benign 100.00%, under attack 50.00%, drop 50.00%" in out
     assert "invalid attacked:errored: 1" in out, "the invalid pair is declared"
 
@@ -189,4 +205,5 @@ def test_console_says_so_when_no_pair_is_valid(report, capsys):
 
     out = capsys.readouterr().out
 
-    assert "0/1 valid" in out and "drop" not in out, "no rate is shown for no pair"
+    assert "0/1 valid, 1 invalid" in out, "the pairs are counted"
+    assert "benign" not in out, "no rate is shown for no pair"

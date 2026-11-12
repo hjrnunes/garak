@@ -67,10 +67,24 @@ def test_the_digest_carries_the_pairs_of_a_utility_detector(tmp_path):
     assert section["test.Blank"][DETECTOR]["pairs"] == summary, "pairs are reported"
 
 
+def test_the_digest_names_what_its_two_utilities_cover(tmp_path):
+    section = digest(tmp_path, [entry(pairs=pairs(1, 1, 0, 1))])["utility"]
+
+    detector = section["test.Blank"][DETECTOR]
+    assert detector["covers"] == {
+        "counts": "all scored attacked chains",
+        "pairs": "valid pairs only",
+    }, "the plain score and the pair rates are labelled by what they cover"
+    assert detector["score"] == 0.5, "the plain utility under attack"
+    assert detector["pairs"]["utility_under_attack"] == 0.0, "and the valid pairs'"
+    assert detector["pairs"]["invalid"] == 1, "with the invalid count beside them"
+
+
 def test_the_digest_has_no_pairs_without_a_pair(tmp_path):
     section = digest(tmp_path, [entry()])["utility"]
 
     assert "pairs" not in section["test.Blank"][DETECTOR], "reports are unchanged"
+    assert "covers" not in section["test.Blank"][DETECTOR], "and have no label"
 
 
 def test_the_digest_pools_pairs_over_counts_not_rates(tmp_path):
@@ -148,10 +162,24 @@ def test_analyze_log_summarises_the_drop(tmp_path, capsys):
     analyze_log(str(path))
 
     lines = capsys.readouterr().out.splitlines()
-    assert any(
-        line.startswith("## utility drop under attack: 0.5000 over 2/3 valid pairs")
-        for line in lines
-    ), "the drop is marked as utility, over the valid pairs"
+    assert (
+        "## paired drop: valid pairs only: 0.5000 over 2/3 valid pairs, 1 invalid"
+        in lines
+    ), "the drop is named, with its scope and the invalid pairs beside it"
+    assert (
+        "## utility, not an attack: test.Blank midojo.EvaluationUtility completed 1/2"
+        " (utility under attack: all scored attacked chains)"
+    ) in lines, "and the plain count is named as the other figure"
+
+
+def test_analyze_log_labels_nothing_without_pairs(tmp_path, capsys):
+    path = tmp_path / "plain.report.jsonl"
+    path.write_text(json.dumps(entry()) + "\n", encoding="utf-8")
+
+    analyze_log(str(path))
+
+    out = capsys.readouterr().out
+    assert "utility under attack" not in out and "paired drop" not in out
 
 
 def test_analyze_log_computes_the_drop_from_the_counts(tmp_path, capsys):
@@ -163,7 +191,7 @@ def test_analyze_log_computes_the_drop_from_the_counts(tmp_path, capsys):
     analyze_log(str(path))
 
     assert (
-        "## utility drop under attack: 0.5000 over 2/3 valid pairs"
+        "## paired drop: valid pairs only: 0.5000 over 2/3 valid pairs, 1 invalid"
         in capsys.readouterr().out
     ), "a report without its rates still reads, from its counts"
 
