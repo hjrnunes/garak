@@ -44,6 +44,7 @@ def test_saved_seal_keeps_every_call_error_on_the_final_attempt(name):
     assert len(expected) == MANIFEST[name]["error_count"], "all errors are represented"
 
     probe = object.__new__(InjectionSpecProbe)
+    probe._chain_secrets = {}
     probe._midojo = _midojo()
     verdict = SimpleNamespace(
         grade=SimpleNamespace(injection_delivered=True),

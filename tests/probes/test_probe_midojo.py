@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import httpx
 import openai
 import pytest
+import respx
 from openai._models import construct_type
 from openai.types.responses import Response
 
@@ -593,6 +594,7 @@ def test_generator_and_interceptor_calls_survive_separately_in_order():
         )
     ]
     probe = object.__new__(InjectionSpecProbe)
+    probe._chain_secrets = {}
     trace = {**_sealed_trace(), "tool_calls": recorded}
     probe._attach_trace(attempt, trace)
     generated[0]["name"] = "changed"
@@ -2188,6 +2190,288 @@ def test_responses_error_echoing_live_probe_bearer_stays_out_of_evidence(
             status,
             "generator error echoed a request credential",
         )
+
+
+ECHOED = "sentinel-echoed-credential-must-never-be-kept"
+# every place a trace holds what a tool returned or the service reported
+PLACES = [
+    "snapshot",
+    "verdict",
+    "delivery",
+    "exposure",
+    "argument",
+    "argument key",
+    "result",
+    "error",
+    "failure",
+    "trace error",
+    "release error",
+]
+
+
+def _echoing_trace(place, secret):
+    """A sealed chain's trace with ``secret`` in the one place ``place`` names."""
+    echo = f"the service said {secret} here"
+    call = {
+        "call_id": "call_1",
+        "name": "lookup_order",
+        "arguments": {},
+        "result": None,
+        "error": None,
+        "blocked": False,
+        "disposition": "forwarded",
+        "complete": True,
+        "turn": 0,
+    }
+    trace = _sealed_trace() | {"tool_calls": [call]}
+    if place == "snapshot":
+        trace["snapshot"] = {"function_calls": [{"result": echo}], "failures": [echo]}
+    elif place == "verdict":
+        trace["verdict"]["detail"] = [echo]
+    elif place == "delivery":
+        trace["delivery"] = [{"detail": echo}]
+    elif place == "exposure":
+        trace["exposure"] = {"detail": echo}
+    elif place == "argument":
+        call["arguments"] = {"order_id": echo}
+    elif place == "argument key":
+        call["arguments"] = {echo: 1}
+    elif place == "result":
+        call["result"] = echo
+    elif place == "error":
+        call["error"] = echo
+    elif place == "failure":
+        trace["failure"] = echo
+    elif place == "trace error":
+        trace["error"] = echo
+    elif place == "release error":
+        trace["release_error"] = echo
+    return trace
+
+
+class BlockHandle(RecordingHandle):
+    """An open evaluation whose tool block carries the bearer it is given."""
+
+    def __init__(self, bearer):
+        super().__init__()
+        self.bearer = bearer
+
+    def tool_block(self):
+        return {**super().tool_block(), "authorization": self.bearer}
+
+
+def _opened_probe(tmp_path, monkeypatch, source):
+    """A probe whose first chain has opened, and the credential ``source`` names it presented."""
+    options = {}
+    if source == "option credential":
+        options = {
+            "interceptor_url": "http://127.0.0.1:8767",
+            "interceptor_credential": ECHOED,
+        }
+    if source == "environment credential":
+        monkeypatch.setenv(URL_ENV, "http://127.0.0.1:8767")
+        monkeypatch.setenv(CREDENTIAL_ENV, ECHOED)
+    probe = _probe(tmp_path, entry("Look up ORD-101 for me."), **options)
+    bearer = ECHOED if source == "tool bearer" else "tool-token"
+    monkeypatch.setattr(
+        midojo.evaluation_handle, "open", lambda *args, **kwargs: BlockHandle(bearer)
+    )
+    probe._start_chain(0)
+    return probe
+
+
+@pytest.fixture(params=["tool bearer", "option credential", "environment credential"])
+def echoable(request, tmp_path, monkeypatch):
+    """A probe whose chain opened with a credential a service could echo to it."""
+    return _opened_probe(tmp_path, monkeypatch, request.param)
+
+
+@pytest.mark.parametrize("place", PLACES)
+def test_a_trace_holds_no_credential_wherever_a_service_could_echo_one(place, echoable):
+    attempt = echoable._turn_attempt(0, 0, [], RecordingHandle())
+    attempt.outputs = [Message("the reply", notes={"response_status": "completed"})]
+
+    echoable._attach_trace(attempt, _echoing_trace(place, ECHOED))
+
+    kept = json.dumps(
+        {"notes": attempt.notes, "output": attempt.outputs[0].notes}, default=repr
+    )
+    assert ECHOED not in kept, f"the {place} is kept without the credential"
+    assert "[redacted] here" in kept, "and with the gap marked"
+
+
+@pytest.mark.parametrize("source", ["option credential", "environment credential"])
+def test_a_credential_changed_after_the_chain_opened_is_still_scrubbed(
+    source, tmp_path, monkeypatch
+):
+    """The service echoes what it received at the bind, not what the probe holds now."""
+    probe = _opened_probe(tmp_path, monkeypatch, source)
+    if source == "option credential":
+        probe.interceptor_credential = "sentinel-credential-after-the-change"
+    else:
+        monkeypatch.setenv(CREDENTIAL_ENV, "sentinel-credential-after-the-change")
+    attempt = probe._turn_attempt(0, 0, [], RecordingHandle())
+    attempt.outputs = [Message("the reply", notes={"response_status": "completed"})]
+
+    probe._attach_trace(attempt, _echoing_trace("result", ECHOED))
+
+    kept = json.dumps(
+        {"notes": attempt.notes, "output": attempt.outputs[0].notes}, default=repr
+    )
+    assert ECHOED not in kept, "the credential the chain opened with is scrubbed"
+    assert "[redacted] here" in kept, "and the gap is marked"
+
+
+@pytest.mark.parametrize(
+    "change", ["after the service reads", "before the service reads"]
+)
+def test_a_credential_changed_while_the_evaluation_opens_is_still_scrubbed(
+    change, tmp_path, monkeypatch
+):
+    """The open reads the credential, so the probe samples it on both sides of the open."""
+    changed = "sentinel-credential-changed-during-the-open"
+    monkeypatch.setenv(URL_ENV, "http://127.0.0.1:8767")
+    monkeypatch.setenv(CREDENTIAL_ENV, ECHOED)
+    probe = _probe(tmp_path, entry("Look up ORD-101 for me."))
+    read = []
+
+    def open_while_the_credential_changes(*args, **kwargs):
+        if change == "before the service reads":
+            monkeypatch.setenv(CREDENTIAL_ENV, changed)
+        read.append(os.environ[CREDENTIAL_ENV])
+        if change == "after the service reads":
+            monkeypatch.setenv(CREDENTIAL_ENV, changed)
+        return BlockHandle("tool-token")
+
+    monkeypatch.setattr(
+        midojo.evaluation_handle, "open", open_while_the_credential_changes
+    )
+    attempt = probe._start_chain(0)
+    (received,) = read
+    attempt.outputs = [Message("the reply", notes={"response_status": "completed"})]
+
+    probe._attach_trace(attempt, _echoing_trace("result", received))
+
+    kept = json.dumps(
+        {"notes": attempt.notes, "output": attempt.outputs[0].notes}, default=repr
+    )
+    assert received not in kept, "the credential the service received is scrubbed"
+    assert "[redacted] here" in kept, "and the gap is marked"
+
+
+def test_a_close_reason_that_echoes_the_bearer_is_scrubbed(tmp_path, monkeypatch):
+    probe = _probe(tmp_path, entry("Look up ORD-101 for me."))
+    probe._chain_secrets = {0: [ECHOED]}
+
+    class EchoingHandle(SealedHandle):
+        def close(self):
+            self.closed = True
+            self.close_error = SimpleNamespace(reason=f"service refused {ECHOED}")
+
+    trace = _advance_to_seal(probe, EchoingHandle(), monkeypatch)
+    attempt = probe._turn_attempt(0, 0, [], SealedHandle())
+    probe._attach_trace(attempt, trace)
+
+    assert attempt.notes[TRACE_NOTE]["release_error"] == "service refused [redacted]"
+    assert ECHOED not in json.dumps(attempt.notes, default=repr)
+
+
+class BearerLeakingAgent(ScriptedAgent):
+    """A target that sends the tool bearer it was given to a tool, which echoes it back."""
+
+    def __init__(self):
+        super().__init__()
+        self.bearers = []
+
+    def generate(self, prompt, generations_this_call=1):
+        bearer = prompt.notes["tools"][0]["authorization"]
+        self.bearers.append(bearer)
+        self.script = [[("lookup_order", {"order_id": bearer})]]
+        return super().generate(prompt, generations_this_call)
+
+
+def test_a_bearer_the_target_sends_to_a_tool_stays_out_of_the_trace_and_the_report(
+    tmp_path, report
+):
+    probe = _probe(tmp_path, entry("Look up ORD-101 for me."))
+    agent = BearerLeakingAgent()
+
+    (attempt,) = probe.probe(agent)
+
+    (bearer,) = agent.bearers
+    (call,) = attempt.notes[TRACE_NOTE]["tool_calls"]
+    assert call["arguments"]["order_id"] == "[redacted]", "the call is kept, gap marked"
+    assert "[redacted]" in call["result"], "and the tool's echo of it"
+    (kept,) = attempt.outputs[0].notes["tool_calls"]
+    assert kept["arguments"]["order_id"] == "[redacted]", "so is the call on the output"
+    report.flush()
+    evidence = json.dumps(attempt.as_dict(), default=repr)
+    evidence += pathlib.Path(report.name).read_text(encoding="utf-8")
+    assert bearer and bearer not in evidence, "the report never holds the live bearer"
+
+
+def test_a_response_header_echoing_the_live_bearer_stays_out_of_every_record(
+    tmp_path, caplog, capsys, report
+):
+    """The real generator and client log a response before the probe sees it."""
+    seen = []
+
+    def answer(request):
+        bearer = json.loads(request.content)["tools"][0]["authorization"]
+        seen.append(bearer)
+        reply = {
+            "id": "resp_1",
+            "object": "response",
+            "created_at": 0,
+            "model": "test-model",
+            "status": "completed",
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+            "output": [
+                {
+                    "type": "message",
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [
+                        {"type": "output_text", "text": "done", "annotations": []}
+                    ],
+                }
+            ],
+        }
+        return httpx.Response(
+            200, headers={"X-Echoed-Token": bearer, "X-Request-Id": "req_1"}, json=reply
+        )
+
+    generator = OpenAIResponsesGenerator(
+        name="test-model",
+        config_root={
+            "generators": {
+                "openai": {"OpenAIResponsesGenerator": {"api_key": "offline-test-key"}}
+            }
+        },
+    )
+    probe = _probe(tmp_path, entry("Look up ORD-101."))
+    caplog.set_level(logging.DEBUG)
+    with respx.mock(base_url="https://api.openai.com/v1") as router:
+        router.post("/responses").mock(side_effect=answer)
+        (attempt,) = probe.probe(generator)
+
+    (bearer,) = seen
+    report.flush()
+    output = capsys.readouterr()
+    everything = "\n".join(
+        [
+            *(logging.Formatter().format(record) for record in caplog.records),
+            json.dumps(attempt.as_dict(), default=repr),
+            pathlib.Path(report.name).read_text(encoding="utf-8"),
+            output.out,
+            output.err,
+        ]
+    )
+    assert "req_1" in everything, "the client still logs the response"
+    assert bearer and bearer not in everything, "but never the bearer a header echoed"
 
 
 SENTINEL = "sentinel-probe-option-credential-must-never-be-written"

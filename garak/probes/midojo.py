@@ -27,7 +27,7 @@ from urllib.parse import urlsplit
 import garak.attempt
 import garak.probes
 from garak import _config
-from garak.cli import redact_credentials
+from garak.cli import credential_values, redact_credentials, scrub_secrets
 from garak.exception import ConfigFailure, GarakException
 from garak.probes._injection_shared import resolve_source, turn_failure
 
@@ -223,6 +223,7 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
         )
         self._refuse_unreset_repeats()
         self._handles = {}
+        self._chain_secrets = {}
         self._last_processed = {}
         self._next_attempts = {}
         self._pending_starts = list(range(self._chains))
@@ -439,6 +440,7 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
         repeat = chain % self.repeats
         self._validate_upstream()
         handle = None
+        presented = self._presented_credential()
         try:
             handle = self._midojo.evaluation_handle.open(
                 entry.injection_spec,
@@ -457,6 +459,14 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
                 f"{self.__class__.__name__}: evaluation could not open"
             ) from None
         self._handles[chain] = handle
+        # what the chain presented is fixed here: the environment can change
+        # before the trace comes back, and the service echoes what it received.
+        # The credential is sampled on both sides of the open, which reads it.
+        self._chain_secrets[chain] = [
+            *credential_values(handle.tool_block()),
+            presented,
+            self._presented_credential(),
+        ]
         handle.start_turn(entry.injection_spec.turns[0])
         return self._turn_attempt(chain, 0, [], handle)
 
@@ -628,7 +638,27 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
         }
         return _capture_problem({"capture_complete": True}, evidence) is None
 
+    def _trace_secrets(self, attempt):
+        """Return the credentials a tool or the service could echo into a trace.
+
+        A trace holds what the tools returned and what the service reported, and
+        either can repeat a credential it received: the chain's tool bearer, or
+        the credential the probe presents to the service.
+        """
+        chain = (attempt.notes.get(CHAIN_NOTE) or {}).get("chain")
+        return [s for s in self._chain_secrets.get(chain, ()) if isinstance(s, str)]
+
+    def _presented_credential(self):
+        """Return the credential the probe presents to the interception service, if any."""
+        if self.interceptor_url is not None:
+            return self.interceptor_credential
+        from midojo_spec.link import CREDENTIAL_ENV
+
+        return os.environ.get(CREDENTIAL_ENV)
+
     def _attach_trace(self, attempt, trace):
+        """Keep ``trace`` on the attempt, scrubbed once here of every credential it could hold."""
+        trace = scrub_secrets(trace, self._trace_secrets(attempt))
         attempt.notes[TRACE_NOTE] = trace
         output = self._stored_output(attempt)
         if output is None:
@@ -689,6 +719,7 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
     def probe(self, generator):
         """Run every chain and close all handles even when a turn raises."""
         self._handles = {}
+        self._chain_secrets = {}
         self._last_processed = {}
         self._next_attempts = {}
         self._pending_starts = list(range(self._chains))

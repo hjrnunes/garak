@@ -37,12 +37,57 @@ original records remain in ``generator_tool_calls``. The trace is graded by
 ``midojo.EvaluationEffect``.
 
 The probe gives the generator the live per-binding tool token so it can make
-tool calls. The Responses generator scrubs that token from the errors it
-records. Other generators are outside the probe's control: anything a
-generator emits is its own output, which the probe does not scrub.
+tool calls. A credential garak holds, which is the tool block's bearer,
+``interceptor_credential`` or the generator's API key, does not appear in a
+report, conversation notes, the console or ``garak.log`` through the 26 paths
+in the table below when an API server or a tool server echoes it back. The
+echo can come in a body, an error, a header, a reason phrase, a redirect URL, a
+call ID or the trace. The Responses generator and the probe scrub every such
+value. The guarantee is best effort against a server that misbehaves on
+purpose, and it does not extend to code garak does not control. Four limits
+follow:
 
-The tool block's bearer credential and ``interceptor_credential`` must never
-appear in serialisable conversation notes, the trace, a report or DEBUG logs.
+* The model's own text is its own output and is not scrubbed. Other generators
+  are outside the probe's control for the same reason.
+* A scrub matches a credential as written or as a JSON string escapes it. A
+  server that re-encodes a credential before it echoes it is out of reach.
+* A log handler you add while a request runs is not covered, because it sees
+  that request's records as the client wrote them. A handler that exists when
+  the request starts is covered, whichever logger it sits on.
+* The probe reads the environment credential before and after a chain opens. A
+  credential that another thread changes between the two reads is out of reach.
+
+.. csv-table:: Server-origin values on the Responses route
+   :header: "Value", "Lands in", "Treatment"
+   :widths: 34, 36, 30
+
+   "Response headers and request ID", "client and HTTP library DEBUG records", "scrubbed by the log filter"
+   "Response reason phrase", "client and HTTP library records", "scrubbed by the log filter"
+   "Status code and retry-control headers", "retry decisions, error note", "non-secret by construction"
+   "Request options and earlier output items", "DEBUG log", "scrubbed by the client filter"
+   "Authentication or permission error text", "exception, logs", "scrubbed"
+   "Bad-request or non-retryable error text and body", "logs, error note, report", "scrubbed"
+   "Exception type and status code", "error note, trace error", "non-secret by construction"
+   "Retryable error body and its cause", "the exception's cause, in memory", "in memory only: the retry loop has no try limit, so no handler logs it"
+   "JSON decode failure", "exception log", "non-secret by construction"
+   "Response ID and model", "output notes, report", "scrubbed"
+   "Response usage, including unknown fields and keys", "output notes, report", "scrubbed"
+   "Response error and incomplete details", "output notes, report", "scrubbed"
+   "Response status string", "output notes, report", "scrubbed"
+   "Tool-call fields, including ID and call ID", "output notes, report", "scrubbed"
+   "Whole tool-call item, with unknown fields and keys", "output notes, report, later requests", "scrubbed"
+   "Model output text", "output text, report, hit log, later turns", "model-authored"
+   "Reasoning summary", "output notes, report", "scrubbed"
+   "Tool-block authorization", "the live request, and the chain's record of it in memory", "scrubbed copy on the report; the record is never written"
+   "Snapshot, tool-call arguments, results and errors", "trace, output notes, report, hit log", "scrubbed in the trace"
+   "Verdict, delivery, exposure and capture details", "trace, detector records, report", "scrubbed in the trace"
+   "Evaluation and snapshot IDs", "trace, report", "non-secret by construction"
+   "Close-error reason", "trace release error", "scrubbed in the trace"
+   "Failure and capture status names", "trace, output notes", "non-secret by construction"
+   "Detector outcomes, indices, grades and reasons", "detector records, console, summary", "built from the scrubbed trace and fixed codes"
+   "Serialised output in the report and hit log", "report, hit log", "scrubbed upstream of the writers, except the model's own text"
+   "Request URL after a redirect", "post-request warning log", "scrubbed"
+
 A remote interceptor needs both ``interceptor_url`` and
 ``interceptor_credential``. The credential must be a non-empty string with
 non-whitespace content and no control characters. The URL must be an HTTP(S)
