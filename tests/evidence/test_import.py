@@ -16,6 +16,8 @@ import garak.evidence.facts
 import garak.evidence.links
 import garak.evidence.collector
 import garak.evidence.delivery
+import garak.evidence.injection_spec
+import garak.evidence.trace
 import garak.detectors.grading
 from garak.exception import GarakException
 try:
@@ -24,6 +26,14 @@ except GarakException as error:
     assert 'pip install garak[midojo]' in str(error)
 else:
     raise AssertionError('missing extra was not reported')
+try:
+    garak.evidence.injection_spec.InjectionSpec.from_document(
+        {'schema_version': 'midojo-injection-spec-v1'}
+    )
+except GarakException as error:
+    assert 'pip install garak[midojo]' in str(error)
+else:
+    raise AssertionError('missing extra was not reported when reading a document')
 """
     done = subprocess.run(
         [sys.executable, "-c", script], capture_output=True, text=True, check=False

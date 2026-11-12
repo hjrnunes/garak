@@ -104,6 +104,39 @@ an absence: only a complete capture whose every call to the tool ran to its end
 shows a payload was not emitted. Delivery and exposure are report only and never
 change a grade.
 
+The injection spec document and the trace
+-----------------------------------------
+
+An injection spec document says what to run: the turns, the plan that places
+payloads, the security and utility checks, the environment, the runtime, the
+interception settings and the tool policy.
+:class:`garak.evidence.injection_spec.InjectionSpec` reads a
+``midojo-injection-spec-v1`` document the way the MiDojo runtime does, with the
+runtime's refusals in the same order, and holds it as one read-only value. It
+checks every member, including the ones a grade never reads, so a driver never
+runs a half-checked document. A version other than v1 raises
+``UnsupportedDocumentVersion``; a check that needs an OpenShell observation on
+an ``unmanaged`` runtime carries the gap
+``check:openshell-predicate-on-unmanaged-runtime``; and a document that declares
+the ``openshell`` runtime is refused last, as ``UnsupportedRuntime``, after every
+other member passed.
+
+The reader holds no environment model, so it differs from the runtime in five
+ways. It reads an environment the runtime's model inference refuses (a key such
+as ``model_config``). It refuses a value outside JSON (bytes, a date) that the
+runtime keeps. It checks only the ``type`` of an ``openshell`` runtime. It reads
+checks with the strict reader the grade uses, which refuses a few malformed
+checks the runtime accepts (``output_contains: 1``). And a ``reply_judge`` check
+is refused until the reply judge is read. Where both refuse, the class and the
+``gap`` agree and the wording of a check's refusal may not.
+
+:mod:`garak.evidence.trace` states the two values a consumer reads from a trace:
+the sealed snapshot as the runtime serves it, and the verdict. Serialised with
+sorted keys they are the runtime's bytes. A snapshot sealed with a null
+``pre_environment`` or ``environment`` digests differently from one sealed with
+``{}``, and the runtime never serves it, so the trace refuses it: seal an
+``unmanaged`` runtime's evaluation with ``pre_environment={}``.
+
 Per-call cost
 -------------
 
@@ -145,6 +178,8 @@ work from them, which review has to catch.
    evidence/intake
    evidence/seal
    evidence/delivery
+   evidence/injection_spec
+   evidence/trace
    evidence/sealing
    evidence/world
    evidence/collector

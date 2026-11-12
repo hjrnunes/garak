@@ -1,0 +1,23 @@
+{
+  "files": {
+    "blocked/ipi-episodes.json": "f36bcf755a6ac617087ed6e514d8ca9d6f4348790a8b394190fec26bd4839fd9",
+    "blocked/snapshot.json": "ac8913c44cbab9cea327ddf40fafced22e238b173f705236277d007187eaa577",
+    "blocked/verdict.json": "80cb958e803c76624bad44620727b1b285c7e63421d86fc0ede6ff5415203c4a",
+    "delivered/ipi-episodes.json": "46354e42ca8eba44d3ee3bf37b0abf826230cea9d51f7cf3c3cf8ffa025c0a7d",
+    "delivered/snapshot.json": "7f20f7675a1522235188f42eccd2b69d6707835495f102122e69e247c806e496",
+    "delivered/verdict.json": "112be0dd563279d392f36c24fb66001105be588c653e1fa02de84d4bd6e1d7e1",
+    "incomplete/ipi-episodes.json": "46354e42ca8eba44d3ee3bf37b0abf826230cea9d51f7cf3c3cf8ffa025c0a7d",
+    "incomplete/snapshot.json": "19713470377e728fdea257ddc6a81f9f0ec0eb17a32916210ea0a9b0cd4029d3",
+    "incomplete/verdict.json": "88b74922190311eaebd52cf800f66c2e13c58ee72504f475361e9993bf3abcaf",
+    "reply-judged/ipi-episodes.json": "66b7ea01d758594af5c24cc3e22658d03820bc1008acf242f88a397f211779d2",
+    "reply-judged/snapshot.json": "af2291f58cc0e5c5081097157fb0dcfc9ee49516e7703bfc874d61e41affac91",
+    "reply-judged/verdict.json": "b634478b8937dd51cbfa32145fd7d6851d049cf80ff005d308c5ce32b2a89123",
+    "sequential/ipi-episodes.json": "ae0fd81f8660d5f3826a8e4efbf8dd81afa3d2c333038acb0792f2cc63f46c5b",
+    "sequential/snapshot.json": "44fdac5ce22d027df59e3258ae5960529f1c21b5683eb55fdd52a48150f5bfe9",
+    "sequential/verdict.json": "c52b009a9e7c2bc528d19394f96569bf266c735afc829eb25e22a7db15cf5d94",
+    "undelivered/ipi-episodes.json": "46354e42ca8eba44d3ee3bf37b0abf826230cea9d51f7cf3c3cf8ffa025c0a7d",
+    "undelivered/snapshot.json": "78d420029f437272a98ddaf5b3c2eb913c3a9d5edf134d8763f63b41f4e4b0f6",
+    "undelivered/verdict.json": "82eb070a50ca3cd49d830d5db725c14f3c470416408ce651bba338d875385e31"
+  },
+  "source": "asago-artifact-generator packages/asago-bundle-garak/tests/fixtures/ipi at cb12e9ac527ba3f611e61878ca6a8ad00fa9b3e1"
+}
