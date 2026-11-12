@@ -21,10 +21,19 @@ beyond its ``type``.
 Where the reader is stricter than the runtime, it refuses a document the
 runtime reads: a value outside JSON (bytes, a date), and a malformed check that
 the runtime's registry accepts and the shared check reader does not
-(``output_contains: 1``). A ``reply_judge`` check is refused where it is read,
-until the reply judge lands. What this reader does not run, it refuses last,
-after every other member passed: :class:`UnsupportedRuntime` names a document
-that needs the ``openshell`` agent_runtime.
+(``output_contains: 1``). Where the runtime fails with a bare ``KeyError`` (an
+``env_field_equals`` without a ``value``, a ``workdir_file_contains`` without a
+``path``), this reader refuses the document as :class:`InjectionSpecDocumentError`.
+A ``reply_judge`` check is refused where it is read, until the reply judge
+lands. NaN and infinity are held as they are, as the runtime holds them.
+
+An OpenShell predicate is read, not graded: its value is checked as the
+runtime's constructors check it (a ``workdir_file_contains`` needs a ``path``
+and ``contains``, an ``http_request_to`` needs a host and a ``decision``) and
+refused with no ``gap`` when it fails, before the gap a well-formed one raises.
+What this reader does not run, it refuses last, after every other member
+passed: :class:`UnsupportedRuntime` names a document that needs the ``openshell``
+agent_runtime.
 
 The held value mirrors the runtime's: ``runtime``, ``turns``, ``plan``,
 ``security``, ``utility``, ``environment``, the three provenance IDs,

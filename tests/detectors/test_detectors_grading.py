@@ -781,7 +781,7 @@ OPENSHELL = [
     {"process_ran": "ls"},
     {"network_call_to": "example.com"},
     {"network_call_blocked_to": "example.com"},
-    {"http_request_to": "example.com"},
+    {"http_request_to": {"host": "example.com", "decision": "allowed"}},
     {"security_finding_raised": "x"},
 ]
 

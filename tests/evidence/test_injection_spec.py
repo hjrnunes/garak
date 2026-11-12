@@ -477,6 +477,60 @@ def test_an_openshell_predicate_on_an_openshell_runtime_is_an_unsupported_runtim
     assert caught.value.gap is None
 
 
+@pytest.mark.parametrize(
+    "check",
+    [
+        {"workdir_file_contains": None},
+        {"workdir_file_contains": {"path": "x"}},
+        {"commands_match_pattern": {"exit_code": 0}},
+        {"http_request_to": "example.com"},
+        {"http_request_to": {"host": "example.com"}},
+        {"http_request_to": {"host": "[.]", "decision": "any"}},
+        {"all_of": [{"output_contains": "a"}, {"workdir_file_contains": None}]},
+    ],
+    ids=lambda check: json.dumps(check),
+)
+def test_a_malformed_openshell_check_is_refused_without_the_runtime_gap(check):
+    for member in ("security", "utility"):
+        document = full()
+        document[member] = check
+        with pytest.raises(InjectionSpecDocumentError) as caught:
+            InjectionSpec.from_document(document)
+        assert (
+            caught.value.gap is None
+        ), "the check is malformed before it needs a runtime"
+
+
+@pytest.mark.parametrize("kind", ["workdir_file_contains", "http_request_to"])
+@pytest.mark.parametrize("value", [None, 1, "x", ["x"], []], ids=repr)
+def test_an_openshell_value_that_is_not_an_object_is_a_check_error(kind, value):
+    with pytest.raises(_checks.CheckError):
+        _checks.parse({kind: value})
+
+
+def test_an_http_request_names_what_it_lacks():
+    with pytest.raises(_checks.CheckError, match="decision is required"):
+        _checks.parse({"http_request_to": {"host": "a"}})
+    with pytest.raises(_checks.CheckError, match="host is required"):
+        _checks.parse({"http_request_to": {"decision": "any"}})
+
+
+def test_an_http_request_host_is_exactly_text():
+    class Host(str):
+        pass
+
+    with pytest.raises(_checks.CheckError, match="host"):
+        _checks.parse({"http_request_to": {"host": Host("a"), "decision": "any"}})
+
+
+def test_a_well_formed_openshell_check_carries_the_runtime_gap():
+    document = full()
+    document["security"] = {"http_request_to": {"host": "a", "decision": "any"}}
+    with pytest.raises(InjectionSpecDocumentError) as caught:
+        InjectionSpec.from_document(document)
+    assert caught.value.gap == injection_spec.OPENSHELL_PREDICATE_GAP
+
+
 def test_a_reply_judge_check_is_refused_until_the_reply_judge_is_read():
     document = full()
     document["security"] = copy.deepcopy(generate.REPLY_JUDGE)
@@ -552,7 +606,20 @@ def test_an_openshell_check_is_read_by_name_and_never_graded():
         ({"process_ran": "x"}, True),
         ({"not": {"network_call_to": "x"}}, True),
         ({"all_of": [{"output_contains": "a"}, {"workdir_file_exists": "x"}]}, True),
-        ({"any_of": [{"not": {"all_of": [{"http_request_to": "x"}]}}]}, True),
+        (
+            {
+                "any_of": [
+                    {
+                        "not": {
+                            "all_of": [
+                                {"http_request_to": {"host": "x", "decision": "any"}}
+                            ]
+                        }
+                    }
+                ]
+            },
+            True,
+        ),
         ({"any_of": [{"not": {"all_of": [{"output_contains": "a"}]}}]}, False),
     ],
 )

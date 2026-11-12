@@ -420,6 +420,63 @@ def _parts(value: Any, kind: str) -> tuple[Any, ...]:
     return tuple(parse(part) for part in value)
 
 
+_HTTP_REQUEST_MEMBERS = ("host", "path_prefix", "method", "decision")
+_HTTP_DECISIONS = ("allowed", "denied", "any")
+# IDNA reads these as a full stop, as the runtime's host comparison does.
+_IDEOGRAPHIC_STOPS = str.maketrans({"\u3002": ".", "\uff0e": ".", "\uff61": "."})
+
+
+def _no_host(host: str) -> bool:
+    """Whether ``host`` is empty once the runtime strips brackets, ideographic stops and one trailing dot."""
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    return host.translate(_IDEOGRAPHIC_STOPS).removesuffix(".") == ""
+
+
+def _http_request_to(value: Any) -> None:
+    kind = "http_request_to"
+    if type(value) is not dict:
+        raise CheckError(
+            f"{kind} must be an object with a host and a decision, not {value!r}"
+        )
+    if unknown := [key for key in value if key not in _HTTP_REQUEST_MEMBERS]:
+        raise CheckError(f"{kind}: unknown member {unknown[0]!r}")
+    if "host" not in value:
+        raise CheckError(f"{kind}: host is required")
+    host = value["host"]
+    if type(host) is not str or _no_host(host):
+        raise CheckError(f"{kind}: host must be a non-empty host name or address")
+    for member in ("path_prefix", "method"):
+        if value.get(member) is not None and type(value[member]) is not str:
+            raise CheckError(f"{kind}: {member} must be text, not {value[member]!r}")
+    decision = value.get("decision")
+    if decision is None:
+        raise CheckError(f"{kind}: decision is required")
+    if decision not in _HTTP_DECISIONS:
+        raise CheckError(
+            f"{kind}: decision must be one of {_HTTP_DECISIONS}, not {decision!r}"
+        )
+
+
+def _openshell_value(kind: str, value: Any) -> None:
+    """Refuse the value of an OpenShell predicate the way the runtime does when it reads one.
+
+    The runtime's predicates read only the members their constructors name, so
+    most values pass whatever they hold; a value they cannot build one from is
+    refused here, before the runtime gap an OpenShell predicate raises.
+    """
+    if kind == "commands_match_pattern" and type(value) is dict:
+        if "pattern" not in value:
+            raise CheckError(f"{kind} needs a pattern")
+    elif kind == "workdir_file_contains":
+        if type(value) is not dict or not {"path", "contains"} <= value.keys():
+            raise CheckError(
+                f"{kind} must be an object with a path and contains, not {value!r}"
+            )
+    elif kind == "http_request_to":
+        _http_request_to(value)
+
+
 def parse(raw: Any) -> Any:
     """Read one check from the object a document holds.
 
@@ -431,6 +488,7 @@ def parse(raw: Any) -> Any:
         raise CheckError(f"a check must be an object with exactly one key, not {raw!r}")
     ((kind, value),) = raw.items()
     if kind in OPENSHELL:
+        _openshell_value(kind, value)
         return OpenShellCheck(kind)
     if kind == REPLY_JUDGE:
         raise CheckError(

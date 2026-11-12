@@ -684,6 +684,155 @@ OPENSHELL_KINDS = {
     },
     "security-finding-raised": {"security_finding_raised": {"severity": "high"}},
 }
+# Values the runtime's OpenShell predicates take as they are: its constructors read nothing of them.
+OPENSHELL_ODD = {
+    "process-ran-null": {"process_ran": None},
+    "process-ran-int": {"process_ran": 1},
+    "process-ran-list": {"process_ran": ["curl"]},
+    "workdir-file-exists-object": {"workdir_file_exists": {"path": "x"}},
+    "network-call-to-list": {"network_call_to": ["a"]},
+    "security-finding-raised-null": {"security_finding_raised": None},
+    "commands-match-pattern-int": {"commands_match_pattern": 1},
+    "commands-match-pattern-exit-code-text": {
+        "commands_match_pattern": {"pattern": "x", "exit_code": "0"}
+    },
+    "commands-match-pattern-extra-key": {
+        "commands_match_pattern": {"pattern": "x", "other": 1}
+    },
+    "workdir-file-contains-extra-key": {
+        "workdir_file_contains": {"path": "x", "contains": "y", "other": 1}
+    },
+    "workdir-file-contains-non-text": {
+        "workdir_file_contains": {"path": 1, "contains": None}
+    },
+    "http-request-to-all-members": {
+        "http_request_to": {
+            "host": "example.com",
+            "path_prefix": "/a",
+            "method": "POST",
+            "decision": "allowed",
+        }
+    },
+    "http-request-to-null-members": {
+        "http_request_to": {
+            "host": "a",
+            "path_prefix": None,
+            "method": None,
+            "decision": "denied",
+        }
+    },
+    "http-request-to-host-dots": {"http_request_to": {"host": "..", "decision": "any"}},
+    "http-request-to-host-ipv6": {
+        "http_request_to": {"host": "[::1]", "decision": "denied"}
+    },
+    "http-request-to-host-nested-brackets": {
+        "http_request_to": {"host": "[[]]", "decision": "any"}
+    },
+    "http-request-to-host-unicode": {
+        "http_request_to": {"host": "b\u00fccher.test", "decision": "any"}
+    },
+    "http-request-to-host-open-bracket": {
+        "http_request_to": {"host": "[", "decision": "any"}
+    },
+    "http-request-to-host-close-bracket": {
+        "http_request_to": {"host": "]", "decision": "any"}
+    },
+    "http-request-to-host-trailing-ideographic-dot": {
+        "http_request_to": {"host": "a\u3002", "decision": "any"}
+    },
+}
+# Values the runtime's OpenShell predicates refuse when they are read, and how the refusal differs.
+OPENSHELL_BAD = {
+    "workdir-file-contains-null": ({"workdir_file_contains": None}, "message"),
+    "workdir-file-contains-text": ({"workdir_file_contains": "x"}, "message"),
+    "workdir-file-contains-list": ({"workdir_file_contains": []}, "message"),
+    "workdir-file-contains-no-contains": (
+        {"workdir_file_contains": {"path": "x"}},
+        "runtime-crash",
+    ),
+    "workdir-file-contains-no-path": (
+        {"workdir_file_contains": {"contains": "x"}},
+        "runtime-crash",
+    ),
+    "workdir-file-contains-empty-object": (
+        {"workdir_file_contains": {}},
+        "runtime-crash",
+    ),
+    "commands-match-pattern-no-pattern": (
+        {"commands_match_pattern": {"exit_code": 0}},
+        "runtime-crash",
+    ),
+    "commands-match-pattern-empty-object": (
+        {"commands_match_pattern": {}},
+        "runtime-crash",
+    ),
+    "http-request-to-text": ({"http_request_to": "example.com"}, "message"),
+    "http-request-to-null": ({"http_request_to": None}, "message"),
+    "http-request-to-list": ({"http_request_to": ["a"]}, "message"),
+    "http-request-to-empty-object": ({"http_request_to": {}}, "message"),
+    "http-request-to-no-host": ({"http_request_to": {"decision": "any"}}, "message"),
+    "http-request-to-unknown-member": (
+        {"http_request_to": {"host": "a", "decision": "any", "other": 1}},
+        "message",
+    ),
+    "http-request-to-no-decision": ({"http_request_to": {"host": "a"}}, "message"),
+    "http-request-to-null-decision": (
+        {"http_request_to": {"host": "a", "decision": None}},
+        "message",
+    ),
+    "http-request-to-bad-decision": (
+        {"http_request_to": {"host": "a", "decision": "maybe"}},
+        "message",
+    ),
+    "http-request-to-int-decision": (
+        {"http_request_to": {"host": "a", "decision": 1}},
+        "message",
+    ),
+    "http-request-to-int-host": (
+        {"http_request_to": {"host": 1, "decision": "any"}},
+        "message",
+    ),
+    "http-request-to-empty-host": (
+        {"http_request_to": {"host": "", "decision": "any"}},
+        "message",
+    ),
+    "http-request-to-dot-host": (
+        {"http_request_to": {"host": ".", "decision": "any"}},
+        "message",
+    ),
+    "http-request-to-brackets-host": (
+        {"http_request_to": {"host": "[]", "decision": "any"}},
+        "message",
+    ),
+    "http-request-to-bracketed-dot-host": (
+        {"http_request_to": {"host": "[.]", "decision": "any"}},
+        "message",
+    ),
+    "http-request-to-ideographic-dot-host": (
+        {"http_request_to": {"host": "\u3002", "decision": "any"}},
+        "message",
+    ),
+    "http-request-to-fullwidth-dot-host": (
+        {"http_request_to": {"host": "\uff0e", "decision": "any"}},
+        "message",
+    ),
+    "http-request-to-halfwidth-ideographic-dot-host": (
+        {"http_request_to": {"host": "\uff61", "decision": "any"}},
+        "message",
+    ),
+    "http-request-to-int-path-prefix": (
+        {"http_request_to": {"host": "a", "path_prefix": 1, "decision": "any"}},
+        "message",
+    ),
+    "http-request-to-list-path-prefix": (
+        {"http_request_to": {"host": "a", "path_prefix": ["/"], "decision": "any"}},
+        "message",
+    ),
+    "http-request-to-int-method": (
+        {"http_request_to": {"host": "a", "method": 1, "decision": "any"}},
+        "message",
+    ),
+}
 # What the runtime reads but the Garak reader does not read the same way.
 LAX = {
     "output-contains-int": {"output_contains": 1},
@@ -755,6 +904,15 @@ def _check_cases() -> None:
             case(group, f"leaf-{label}", [put(member, value=value)])
         for label, value in OPENSHELL_KINDS.items():
             case(group, f"openshell-{label}", [put(member, value=value)])
+        for label, value in OPENSHELL_ODD.items():
+            case(group, f"openshell-odd-{label}", [put(member, value=value)])
+        for label, (value, differs) in OPENSHELL_BAD.items():
+            case(
+                group,
+                f"openshell-bad-{label}",
+                [put(member, value=value)],
+                differs=differs,
+            )
         case(
             group,
             "openshell-in-all-of",
