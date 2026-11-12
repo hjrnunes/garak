@@ -168,30 +168,26 @@ def test_results_are_immutable_and_detached():
     assert exposed.to_json()["instructions"][0]["exposure"]["emitted"] == "exposed"
 
 
-def _name_slot_key_twice(outcome):
-    outcome["probe_key"] = "stale"
+def refused_cases():
+    return [case for case in corpus()[2] if case["group"] == "outcome-refused"]
 
 
-def _drop_instruction_index(outcome):
-    del outcome["instruction_index"]
+def test_corpus_holds_the_refused_outcomes():
+    assert len(refused_cases()) >= 45, "every damage the runtime's record refuses"
+    assert all("error" in case["oracle"] for case in refused_cases())
 
 
-@pytest.mark.parametrize(
-    "damage",
-    [_drop_instruction_index, _name_slot_key_twice],
-    ids=["field-missing", "slot-key-twice"],
-)
-def test_malformed_outcome_is_refused(damage):
-    cases = {case["id"]: case for case in delivery_cases()}
+@pytest.mark.parametrize("case", refused_cases(), ids=lambda case: case["id"])
+def test_an_outcome_the_runtime_refuses_is_refused(case):
     documents, snapshots, _ = corpus()
-    case = cases["delivery.emitted"]
-    data = json.loads(json.dumps(snapshots[case["snapshot"]]))
-    damage(data["function_calls"][0]["injection_outcomes"][0])
     plan = injection.InjectionPlan.from_data(documents[case["document"]]["plan"])
-    sealed = rebuild_snapshot(data)
+    sealed = rebuild_snapshot(snapshots[case["snapshot"]])
     with pytest.raises(ValueError, match="malformed injection outcome"):
         delivery.delivery_facts(plan, sealed.function_calls)
     with pytest.raises(ValueError, match="malformed injection outcome"):
         delivery.exposure(
-            plan, sealed.function_calls, turns=2, evidence_status=sealed.evidence_status
+            plan,
+            sealed.function_calls,
+            turns=len(sealed.turns),
+            evidence_status=sealed.evidence_status,
         )

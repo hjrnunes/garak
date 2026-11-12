@@ -27,21 +27,42 @@ Delivery and exposure are report only: they never change a grade's security
 or utility. Both read a plan decoded by ``midojo_spec.injection.InjectionPlan``
 and the call records of a sealed snapshot, and ``to_json()`` writes the
 documents the MiDojo runtime writes for the same evaluation.
+
+Each call's outcomes are read as the runtime's record reads them: exact types
+(an index is an int, never a bool or a numeric string), a status from the
+runtime's set, a closed member list, and no placement on an outcome that placed
+nothing. A call holding an outcome the record refuses raises ``ValueError``,
+whether or not the plan reads that call, and no fact derives from it.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping, NamedTuple, Sequence
 
-from garak.evidence.codec import injection_codec
-from garak.evidence.records import CallRecord, freeze, thaw
+from garak.evidence.codec import encode, injection_codec
+from garak.evidence.records import (
+    FACT_FIELDS,
+    OUTCOME_FIELDS,
+    OUTCOME_STATUSES,
+    PLACED_STATUSES,
+    PLACEMENT_FIELDS,
+    CallRecord,
+    freeze,
+    thaw,
+)
 
 FUNCTION_CALLS = "function_calls"
 EXPOSURE_BOUNDARIES = ("emitted", "agent_tool_result", "model_input")
 
 _LEGACY_SLOT_KEY = "probe_key"
+_OUTCOME_MEMBERS = OUTCOME_FIELDS | FACT_FIELDS | PLACEMENT_FIELDS | {_LEGACY_SLOT_KEY}
+_REQUIRED_MEMBERS = (OUTCOME_FIELDS - {"slot_key"}) | FACT_FIELDS
+_TRANSFORMATIONS = frozenset({"identity", "json_string"})
+_RESULT_PARTS = frozenset({"content_block", "structured_content"})
+_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 _TOOL_OUTPUT = "tool_output"
 _USER_PROMPT = "user_prompt"
 _BOUNDARIES = {
@@ -72,39 +93,105 @@ def _malformed(call: CallRecord) -> ValueError:
     return ValueError(f"call {call.call_id} holds a malformed injection outcome")
 
 
+def _count(value: Any) -> bool:
+    return type(value) is int and value >= 0
+
+
+def _in(value: Any, allowed: frozenset[str]) -> bool:
+    return type(value) is str and value in allowed
+
+
+def _recorded_slot(slot: Any) -> Mapping[str, Any] | None:
+    """The slot as the plan codec writes it, when the record holds it in that form.
+
+    A slot the codec does not decode, or decodes into another form (an ID
+    left out or another place's, a member it does not know), is refused.
+    """
+    if slot is None:
+        return None
+    if not isinstance(slot, Mapping):
+        raise ValueError("a slot is an object")
+    raw = thaw(slot)
+    written = injection_codec().InjectionSlot.from_data(raw).to_data()
+    if encode(written) != encode(raw):
+        raise ValueError("a slot is held as the plan codec writes it")
+    return freeze(written)
+
+
+def _read_outcome(item: Any) -> _Outcome:
+    """One outcome in the form the runtime's record holds, or a ValueError.
+
+    The record is closed and its values are exact: an index or a count is an
+    int (a bool, a numeric string or a float is not), a status is one of the
+    runtime's, and an outcome that placed nothing carries no placement. The
+    slot key is named ``slot_key``, or ``probe_key`` in a record made before
+    the rename, never both. An outcome at occurrence 0 is an unmatched call
+    whose facts are empty. A member whose value is None says the interceptor
+    reported nothing for it; a member left out says the record is not one the
+    runtime wrote, except a placement member.
+    """
+    if not isinstance(item, Mapping) or not item.keys() <= _OUTCOME_MEMBERS:
+        raise ValueError("members the record does not hold")
+    named = (_LEGACY_SLOT_KEY in item) + ("slot_key" in item)
+    if named != 1 or not _REQUIRED_MEMBERS <= item.keys():
+        raise ValueError("members the record requires")
+    slot_key = item[_LEGACY_SLOT_KEY if _LEGACY_SLOT_KEY in item else "slot_key"]
+    index, occurrence = item["instruction_index"], item["occurrence"]
+    status, selected = item["status"], item["selected"]
+    transformation, emitted = item["transformation"], item["emitted"]
+    digests = item.get("payload_digest"), item.get("placed_digest")
+    if not (
+        _count(index)
+        and _count(occurrence)
+        and _in(status, OUTCOME_STATUSES)
+        and type(item["detail"]) is str
+        and (slot_key is None or type(slot_key) is str)
+        and (selected is None or type(selected) is bool)
+        and (transformation is None or _in(transformation, _TRANSFORMATIONS))
+        and (
+            emitted is None
+            or (type(emitted) is tuple and all(_in(p, _RESULT_PARTS) for p in emitted))
+        )
+        and all(d is None or (type(d) is str and _DIGEST.fullmatch(d)) for d in digests)
+    ):
+        raise ValueError("a value the record does not hold")
+    slot = _recorded_slot(item.get("slot"))
+    placed = (*digests, slot) != (None, None, None)
+    if occurrence == 0 and (
+        status != "unmatched"
+        or selected
+        or transformation is not None
+        or emitted
+        or placed
+    ):
+        raise ValueError("an uncounted outcome places nothing")
+    if placed and status not in PLACED_STATUSES:
+        raise ValueError("only a placement says what it placed")
+    return _Outcome(
+        index,
+        slot_key,
+        occurrence,
+        status,
+        selected,
+        transformation,
+        emitted,
+        *digests,
+        slot,
+    )
+
+
 def _outcomes(call: CallRecord) -> tuple[_Outcome, ...] | None:
     """The call's outcomes as its interceptor reported them, or None when it reported none.
 
-    A record made before the rename names the slot key ``probe_key``; it reads
-    as ``slot_key``. A record that names both is malformed, as it is to the
-    runtime.
+    Each is read as the runtime's record reads it (:func:`_read_outcome`);
+    one it refuses makes the call malformed.
     """
     if call.injection_outcomes is None:
         return None
-    read = []
-    for item in call.injection_outcomes:
-        try:
-            legacy = _LEGACY_SLOT_KEY in item
-            if legacy and "slot_key" in item:
-                raise _malformed(call)
-            emitted = item.get("emitted")
-            read.append(
-                _Outcome(
-                    item["instruction_index"],
-                    item[_LEGACY_SLOT_KEY] if legacy else item.get("slot_key"),
-                    item["occurrence"],
-                    item["status"],
-                    item.get("selected"),
-                    item.get("transformation"),
-                    None if emitted is None else tuple(emitted),
-                    item.get("payload_digest"),
-                    item.get("placed_digest"),
-                    item.get("slot"),
-                )
-            )
-        except (KeyError, TypeError, AttributeError) as exc:
-            raise _malformed(call) from exc
-    return tuple(read)
+    try:
+        return tuple(_read_outcome(item) for item in call.injection_outcomes)
+    except ValueError as exc:
+        raise _malformed(call) from exc
 
 
 @dataclass(frozen=True)
@@ -164,17 +251,6 @@ def _tool_output_indexes(plan: Any) -> list[int]:
     ]
 
 
-def _recorded_slot(slot: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
-    """A recorded slot as the plan codec writes it, so equal places read alike."""
-    if slot is None:
-        return None
-    try:
-        decoded = injection_codec().InjectionSlot.from_data(thaw(slot))
-    except ValueError as exc:
-        raise ValueError("a call holds a malformed injection slot") from exc
-    return freeze(decoded.to_data())
-
-
 def delivery_facts(
     plan: Any, function_calls: Iterable[CallRecord]
 ) -> list[DeliveryFact]:
@@ -220,7 +296,7 @@ def delivery_facts(
                     emitted=outcome.emitted,
                     payload_digest=outcome.payload_digest,
                     placed_digest=outcome.placed_digest,
-                    slot=_recorded_slot(outcome.slot),
+                    slot=outcome.slot,
                 )
             )
     return facts
@@ -314,12 +390,13 @@ def exposure(
     read carried it on, so every boundary is unknown.
     """
     tool_output = _tool_output_indexes(plan)
+    held = [(call, _outcomes(call)) for call in function_calls]
     instructions = []
     for index, instruction in enumerate(plan):
         channel = instruction.channel.value
         if channel == _TOOL_OUTPUT:
             emitted, reason = _tool_output_emitted(
-                tool_output.index(index), instruction, function_calls, evidence_status
+                tool_output.index(index), instruction, held, evidence_status
             )
         elif channel == _USER_PROMPT:
             emitted, reason = _prompt_emitted(instruction, turns, evidence_status)
@@ -384,14 +461,14 @@ def _combine(statuses: list[str]) -> str:
 def _tool_output_emitted(
     interceptor_index: int,
     instruction: Any,
-    function_calls: Sequence[CallRecord],
+    held: Sequence[tuple[CallRecord, tuple[_Outcome, ...] | None]],
     evidence_status: Mapping[str, str],
 ) -> tuple[str, str]:
     gaps: list[str] = []
     if evidence_status.get(FUNCTION_CALLS, "complete") != "complete":
         gaps.append("function call capture is incomplete")
     tool = instruction.target.tool
-    for call in function_calls:
+    for call, outcomes in held:
         if tool is not None and call.function != tool:
             continue
         if call.blocked:
@@ -399,7 +476,6 @@ def _tool_output_emitted(
         if not call.complete:
             gaps.append(f"call {call.call_id} is unfinished")
             continue
-        outcomes = _outcomes(call)
         if outcomes is None:
             gaps.append(f"call {call.call_id} reported no delivery facts")
             continue

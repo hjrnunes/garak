@@ -316,6 +316,20 @@ def outcome(
     return value
 
 
+PLACEMENT_MEMBERS = ("payload_digest", "placed_digest", "slot")
+FACT_MEMBERS = ("selected", "transformation", "emitted")
+
+
+def reshaped(
+    value: dict[str, Any], drop: tuple[str, ...] = (), **change: Any
+) -> dict[str, Any]:
+    """``value`` without the members in ``drop``, and with ``change`` laid over it."""
+    return {
+        **{name: item for name, item in value.items() if name not in drop},
+        **change,
+    }
+
+
 def call(
     function: str,
     args: dict[str, Any] | None = None,
@@ -1412,6 +1426,31 @@ def build(runtime: dict[str, Any]) -> Corpus:
             ),
         ),
     }
+    # The forms an outcome may take: members it leaves out or leaves empty, and the statuses that place nothing.
+    forms = {
+        "legacy-key-none": outcome(legacy_key=True, key=None),
+        "slot-key-none": outcome(key=None),
+        "placement-members-absent": reshaped(outcome(), PLACEMENT_MEMBERS),
+        "placed-without-slot": reshaped(outcome(placed=True), ("slot",)),
+        "placed-without-digests": reshaped(
+            outcome(placed=True), ("payload_digest", "placed_digest")
+        ),
+        "facts-not-reported": reshaped(
+            outcome(), selected=None, transformation=None, emitted=None
+        ),
+        "unmatched-facts-not-reported": reshaped(
+            outcome(status="unmatched"), selected=None, emitted=None
+        ),
+        "too-large": outcome(status="too_large", emitted=[]),
+        "no-result": outcome(status="no_result", emitted=[]),
+        "emitted-twice": outcome(emitted=["content_block", "content_block"]),
+        "selected-false-emitted": reshaped(outcome(), selected=False),
+    }
+    for case, value in forms.items():
+        deliveries[f"form-{case}"] = (
+            tool_plan,
+            snapshot([call("lookup_order", n=0, outcomes=[value])]),
+        )
     for case, (plan_, snap) in deliveries.items():
         corpus.add("delivery", case, document(None, None, plan_), snap, facts=True)
         corpus.add(
@@ -1431,6 +1470,96 @@ def build(runtime: dict[str, Any]) -> Corpus:
         ),
         refused=True,
     )
+
+    # An outcome the runtime's record refuses is a snapshot the runtime never loads: whichever call holds it,
+    # the plan reads it or not.
+    placed = outcome(placed=True)
+    slot = placed["slot"]
+    unmatched = outcome(status="unmatched")
+    damaged = {
+        "no-slot-key": reshaped(outcome(), ("slot_key",)),
+        "no-instruction-index": reshaped(outcome(), ("instruction_index",)),
+        "instruction-index-text": reshaped(outcome(), instruction_index="0"),
+        "instruction-index-bool": reshaped(outcome(), instruction_index=True),
+        "instruction-index-float": reshaped(outcome(), instruction_index=1.0),
+        "instruction-index-negative": reshaped(outcome(), instruction_index=-1),
+        "no-occurrence": reshaped(outcome(), ("occurrence",)),
+        "occurrence-text": reshaped(outcome(), occurrence="one"),
+        "occurrence-numeric-text": reshaped(outcome(), occurrence="1"),
+        "occurrence-negative": reshaped(outcome(), occurrence=-1),
+        "no-status": reshaped(outcome(), ("status",)),
+        "status-number": reshaped(outcome(), status=13),
+        "status-unknown": reshaped(outcome(), status="new_status"),
+        "no-detail": reshaped(outcome(), ("detail",)),
+        "detail-number": reshaped(outcome(), detail=5),
+        "detail-none": reshaped(outcome(), detail=None),
+        "slot-key-number": reshaped(outcome(), slot_key=123),
+        "no-selected": reshaped(outcome(), ("selected",)),
+        "selected-text": reshaped(outcome(), selected="yes"),
+        "selected-number": reshaped(outcome(), selected=1),
+        "no-transformation": reshaped(outcome(), ("transformation",)),
+        "transformation-number": reshaped(outcome(), transformation=7),
+        "transformation-unknown": reshaped(outcome(), transformation="rot13"),
+        "no-emitted": reshaped(outcome(), ("emitted",)),
+        "emitted-text": reshaped(outcome(), emitted="structured_content"),
+        "emitted-number": reshaped(outcome(), emitted=[5]),
+        "emitted-unknown-part": reshaped(outcome(), emitted=["elsewhere"]),
+        "emitted-mapping": reshaped(outcome(), emitted={"structured_content": 1}),
+        "unknown-member": reshaped(outcome(), extra=1),
+        "payload-digest-number": reshaped(placed, payload_digest=123),
+        "payload-digest-short": reshaped(placed, payload_digest="sha256:xyz"),
+        "placed-digest-upper": reshaped(placed, placed_digest="sha256:" + "A" * 64),
+        "slot-text": reshaped(placed, slot="slot"),
+        "slot-undecodable": reshaped(placed, slot={"target": "bad"}),
+        "slot-without-id": reshaped(placed, slot=reshaped(slot, ("id",))),
+        "slot-id-of-another-place": reshaped(
+            placed, slot=reshaped(slot, id="sha256:" + "1" * 64)
+        ),
+        "slot-extra-member": reshaped(placed, slot=reshaped(slot, extra=1)),
+        "slot-mode-unknown": reshaped(placed, slot=reshaped(slot, mode="insert")),
+        "occurrence-zero-applied": reshaped(outcome(), occurrence=0),
+        "occurrence-zero-selected": reshaped(unmatched, selected=True),
+        "occurrence-zero-transformed": reshaped(unmatched, transformation="identity"),
+        "occurrence-zero-emitted": reshaped(unmatched, emitted=["structured_content"]),
+        "occurrence-zero-placed": reshaped(unmatched, payload_digest=slot["id"]),
+        "placement-of-unmatched": reshaped(placed, status="unmatched", occurrence=1),
+        "placement-of-no-result": reshaped(placed, status="no_result"),
+        "placement-of-too-large": reshaped(placed, status="too_large"),
+        "placement-of-skipped": reshaped(placed, status="skipped_occurrence"),
+    }
+    for case, value in damaged.items():
+        corpus.add(
+            "outcome-refused",
+            case,
+            document(None, None, tool_plan),
+            snapshot([call("lookup_order", n=0, outcomes=[value])]),
+            refused=True,
+        )
+    bad = reshaped(outcome(), status="new_status")
+    for case, calls in {
+        "after-a-sound-call": [lookup, call("lookup_order", n=1, outcomes=[bad])],
+        "on-another-tools-call": [
+            lookup,
+            call("get_account_details", n=1, outcomes=[bad]),
+        ],
+        "on-a-blocked-call": [
+            lookup,
+            call("lookup_order", n=1, blocked=True, outcomes=[bad]),
+        ],
+        "on-an-unfinished-call": [
+            lookup,
+            call("lookup_order", n=1, complete=False, outcomes=[bad]),
+        ],
+        "after-an-emitted-fact": [call("lookup_order", n=0, outcomes=[outcome(), bad])],
+        "not-an-object": [call("lookup_order", n=0, outcomes=["outcome"])],
+    }.items():
+        corpus.add(
+            "outcome-refused",
+            case,
+            document(None, None, tool_plan),
+            snapshot(calls),
+            refused=True,
+        )
 
     # Evidence status: what the snapshot marks, and what observations report.
     evidences = {

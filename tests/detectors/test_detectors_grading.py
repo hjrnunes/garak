@@ -208,10 +208,11 @@ def test_corpus_has_every_group():
         "leaf-refused",
         "leaf-utility",
         "openshell",
+        "outcome-refused",
         "reply-judge",
         "truth-table",
     }, "the corpus covers every part of the grade"
-    assert len(corpus()[2]) >= 640, "the corpus is whole"
+    assert len(corpus()[2]) >= 760, "the corpus is whole"
 
 
 @pytest.mark.parametrize("name", sorted(corpus()[1]))
@@ -230,7 +231,12 @@ def test_verdict_matches_the_runtime(case):
     data = snapshots[case["snapshot"]]
     snapshot = rebuild_snapshot(data)
     if "error" in case["oracle"]:
-        with pytest.raises(grading.GradingRefused):
+        stage = case["oracle"]["error"].split(":")[0]
+        refusal = {
+            "document": grading.DocumentRefused,
+            "snapshot": grading.EvidenceRefused,
+        }.get(stage, grading.GradingRefused)
+        with pytest.raises(refusal):
             grading.grade_sealed(documents[case["document"]], snapshot)
         return
     written = grading.grade_sealed(documents[case["document"]], snapshot).to_document()
