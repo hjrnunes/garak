@@ -15,6 +15,8 @@ import garak.evidence.ledger
 import garak.evidence.facts
 import garak.evidence.links
 import garak.evidence.collector
+import garak.evidence.delivery
+import garak.detectors.grading
 from garak.exception import GarakException
 try:
     garak.evidence.codec.encode({})
