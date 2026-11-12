@@ -51,6 +51,7 @@ DOES_NOT_RELAY_NONE = [
     "detectors.always.Pass",
     "detectors.always.Random",
     "detectors.midojo.EvaluationEffect",
+    "detectors.midojo.EvaluationUtility",
     "detectors.midojo.EvaluationVerdict",
 ]
 # score only attempts that carry per-attempt evaluation data, else return None
