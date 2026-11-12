@@ -101,9 +101,9 @@ Each chain after the first meets a target that an earlier chain used, so the
 environment must declare isolation: the probe refuses to start otherwise and
 never falls back to an unpaired run. The ``disposable`` environment
 (:doc:`../environments/disposable`) declares it on your behalf, and the
-declaration is only true if you replace the target before each chain. A false
-declaration makes every comparison from the run invalid, and garak cannot
-detect it. An environment that can reset the target is asked to reset before
+declaration is only true if you replace the target before each chain or the
+target keeps nothing from one chain to the next. A false declaration makes every
+comparison from the run invalid, and garak cannot detect it. An environment that can reset the target is asked to reset before
 each chain after the first.
 
 The pair is a note on the attempt and a line in the report. The sealed

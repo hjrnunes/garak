@@ -10,7 +10,10 @@ Select it with ``plugins.environment_type: disposable``.
 The component declares isolation, and the declaration is yours. Garak never
 verifies it: it cannot see your target. You make the declaration true by
 replacing the target before each chain, outside garak, for example with a new
-container or a freshly seeded service. If you declare isolation and do not
+container or a freshly seeded service. A target that keeps nothing from one
+chain to the next needs no replacement, because every chain already meets a
+target that no earlier chain has touched: reusing a stateless target is
+disposable. If you declare isolation and do not
 provide it, a repeated chain or a baseline meets the state that an earlier
 chain left. A comparison that you draw from such chains is then not valid, and
 garak cannot tell you so.
