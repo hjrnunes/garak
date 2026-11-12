@@ -90,7 +90,9 @@ each chain is an attempt, so no intermediate turn is graded twice.
 evaluator reports the utility drop over the valid pairs, which are the pairs
 whose two sides each scored. A pair with a side that was cut short, never
 delivered its payload, or has no utility check is invalid, is counted with its
-reason, and takes no part in the rates. See :doc:`../reporting` for the report.
+reason, and takes no part in the pair rates. The plain completed count of the
+attacked chains is not a pair rate: it covers every attacked chain that
+scored, in a valid pair or not. See :doc:`../reporting` for the report.
 
 Each chain after the first meets a target that an earlier chain used, so the
 environment must declare isolation: the probe refuses to start otherwise and
@@ -115,7 +117,9 @@ a fake tornado alert to the city's weather report.
 ``tests/weather_demo.py`` runs the file with ``paired_baseline`` and the
 ``disposable`` environment. It serves real weather tools and a real interception
 service from a child process, and a scripted stand-in for a model follows the
-planted request on the first task only. From an environment with garak, the
+planted request on the first task only. The declaration holds because nothing
+survives a chain: the tools read a fixed table and the stand-in never changes.
+From an environment with garak, the
 ``midojo`` and ``midojo-mim`` extras, ``fastmcp`` and ``uvicorn``, run
 ``python tests/weather_demo.py``. The demo reports that both baselines complete
 their task, that one of two attacked runs does, a utility drop of 0.50 and an

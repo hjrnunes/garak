@@ -101,6 +101,20 @@ def test_the_counts_cover_the_attempts_under_test_not_the_baselines(report):
     assert record["total_evaluated"] == 2
 
 
+def test_a_scored_attacked_chain_of_an_invalid_pair_stays_in_the_plain_counts(report):
+    errored = attempt(None, metrics.BASELINE, "b", "errored")
+
+    evaluate([*pair(1.0, 1.0, "a"), attempt(0.0, metrics.ATTACKED, "b"), errored])
+
+    (record,) = read(report, "utility_eval")
+    assert (record["completed"], record["total_evaluated"]) == (
+        1,
+        2,
+    ), "every scored chain under test is counted, so the counts reconcile"
+    assert record["pairs"]["invalid_reasons"] == {"baseline:errored": 1}
+    assert record["pairs"]["utility_under_attack"] == 1.0, "the pair rate is not"
+
+
 def test_a_run_without_a_pair_has_no_pairs_member(report):
     summary = evaluate([attempt(1.0), attempt(0.0)])
 

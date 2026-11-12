@@ -91,7 +91,7 @@ Each attempt of such a pair carries ``attempt.notes["utility_pair"]`` with an ``
 
 A baseline is not an attack.
 The harness leaves every security detector unscored on it, with the reason ``baseline_security``, counted as not applicable, so a baseline is in no attack success denominator and in no ``invalid`` or ``not_delivered`` count.
-The counts of a ``utility_eval`` entry cover the attempts under test and leave out the baselines, so ``completed`` over ``total_evaluated`` is the utility under attack.
+The counts of a ``utility_eval`` entry cover the attempts under test and leave out the baselines, so ``completed`` over ``total_evaluated`` is the utility under attack over every attacked chain that scored, whether or not its pair is valid.
 
 A ``utility_eval`` entry gains a ``pairs`` member only if an attempt is in a pair:
 
@@ -100,7 +100,8 @@ A ``utility_eval`` entry gains a ``pairs`` member only if an attempt is in a pai
    {"pairs": 4, "valid": 3, "invalid": 1, "invalid_reasons": {"attacked:errored": 1}, "benign_completed": 3, "attacked_completed": 1, "benign_utility": 1.0, "utility_under_attack": 0.3333333333333333, "drop": 0.6666666666666666}
 
 A pair is valid when each side is one attempt with one scored output.
-An invalid pair is counted under the reason of its first side with no result, such as ``attacked:errored``, ``baseline:unscored`` or ``unpaired``, and is in no rate: an undecided result never reads as a failed task.
+An invalid pair is counted under the reason of its first side with no result, such as ``attacked:errored``, ``baseline:unscored`` or ``unpaired``, and is in no pair rate: an undecided result never reads as a failed task.
+The attacked side of an invalid pair, if it scored, stays in ``completed`` and ``total_evaluated``, so ``utility_under_attack`` can differ from that plain rate; it is the rate over the valid pairs alone.
 ``drop`` is ``benign_utility`` less ``utility_under_attack`` over the valid pairs, and is negative if the attack helped.
 A rate is ``null`` when no pair is valid.
 The ``utility_counts`` of the ``probe_summary`` entry and each detector of the digest's ``utility`` section carry the same ``pairs`` member, pooled over counts, and the console prints a ``pairs:`` line.

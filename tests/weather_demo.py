@@ -13,6 +13,11 @@ Everything is real except the model: the weather tools are an MCP server, the
 interception service binds a real WebSocket and places a real payload in a real
 tool result, and the probe, harness, detectors and evaluator are garak's own.
 
+The ``disposable`` declaration is true here because nothing survives a chain:
+the weather tools read a fixed table and record nothing, and the scripted target
+is set once, when it is made, and never changes. A target that kept state would
+make the baselines invalid.
+
 Run it from an environment that has garak, the ``midojo`` and ``midojo-mim``
 extras, ``fastmcp`` and ``uvicorn``::
 

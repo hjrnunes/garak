@@ -107,6 +107,24 @@ def test_each_pair_shares_an_id_and_each_chain_seals_on_its_own(demo):
     assert all(g["utility"] is True for g in graded), "and the task is done"
 
 
+def test_the_demo_target_keeps_nothing_from_one_chain_to_the_next(
+    tmp_path, monkeypatch
+):
+    stored = []
+
+    def record(self, name, value):
+        stored.append(name)
+        object.__setattr__(self, name, value)
+
+    monkeypatch.setattr(weather_demo.WeatherTarget, "__setattr__", record)
+
+    with weather_demo.weather_service(CREDENTIAL) as service:
+        entries = weather_demo.run(tmp_path, service, CREDENTIAL)
+
+    assert stored == ["obeys"], "the target is set when made and never changes"
+    assert weather_demo.summarise(entries)["pairs"]["valid"] == 2, "all four chains ran"
+
+
 def test_the_report_never_holds_the_bind_credential(demo):
     assert CREDENTIAL not in json.dumps(demo), "no entry holds the credential"
 
