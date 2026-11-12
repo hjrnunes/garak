@@ -266,6 +266,36 @@ def test_finish_must_name_the_function_and_args_it_started(function, args):
     assert finished.record.complete, "a refused finish blocked the matching finish"
 
 
+@pytest.mark.parametrize(
+    "outcome",
+    [{"error": "boom"}, {"blocked": True}, {"error": "refused", "blocked": True}],
+)
+def test_finish_fills_error_and_blocked(outcome):
+    """A finish completes the started record with the error and blocked it names."""
+    unit, _ = collector()
+    channel = unit.channel("agent")
+    started = channel.start_call("one", function="tool", args={"n": 1})
+    assert (started.record.error, started.record.blocked) == (
+        None,
+        False,
+    ), "a start carried an outcome"
+    finished = channel.finish_call(
+        "one", function="tool", args={"n": 1}, result="", **outcome
+    )
+    record = finished.record
+    assert _records(unit) == [record], "the finish did not complete the start in place"
+    assert record.complete and record.result == "", "the finish was not complete"
+    assert (record.error, record.blocked) == (
+        outcome.get("error"),
+        outcome.get("blocked", False),
+    ), "the finish lost its error or blocked"
+    unit.close(0.0)
+    sealed = unit.seal("done").to_json()["function_calls"]
+    assert [(call["error"], call["blocked"]) for call in sealed] == [
+        (outcome.get("error"), outcome.get("blocked", False))
+    ], "the sealed call lost its error or blocked"
+
+
 def test_whole_record_path_is_unchanged():
     """A finish without an ID records whole, with a fresh ID, as before."""
     unit, _ = collector()
