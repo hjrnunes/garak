@@ -474,7 +474,7 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
             plan=spec.plan,
             policy=spec.tools,
             repeated=repeat > 0,
-            reset=repeat > 0,
+            reset=repeat > 0 and self._can_reset(),
         )
         stack = contextlib.ExitStack()
         self._opening[evaluation_id] = spec
@@ -847,8 +847,13 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
                 garak.attempt.Turn("assistant", output)
             )
 
+    def _can_reset(self):
+        """Whether the environment resets a target; one that isolates attempts need not."""
+        environment = self._coordinator.environment
+        return "reset" in getattr(environment, "capabilities", frozenset())
+
     def _refuse_repeats(self, environment):
-        """Refuse repeated chains against an environment that cannot isolate attempts."""
+        """Refuse repeated chains against an environment that does not declare isolation."""
         refusal = None
         try:
             environment.check_attempt(repeated=True)
@@ -856,7 +861,9 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
             refusal = str(exc)
         if refusal is not None:
             raise ConfigFailure(
-                f"{self.__class__.__name__}: repeats refused: {refusal}"
+                f"{self.__class__.__name__}: repeats refused: {refusal}; "
+                "repeats above 1 need an environment that declares isolation, "
+                "selected with plugins.environment_type"
             )
 
     def probe(self, generator):

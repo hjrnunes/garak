@@ -10,4 +10,5 @@ Use ``check_attempt(repeated=True)`` before a repeated attempt.
    :maxdepth: 1
 
    environments/base
+   environments/disposable
    environments/unmanaged

@@ -55,7 +55,7 @@ Options
 
    "``source_path``", "shipped example", "The injection-spec file."
    "``upstream``", "none", "The HTTP(S) URL the injector forwards tool calls to, with a host and no user info; ports, paths and queries are accepted. It takes precedence over the document's ``interception.upstream``. A run with neither is refused."
-   "``repeats``", "1", "Chains per entry. A value above 1 needs an environment that isolates attempts and resets between them. The shipped ``unmanaged`` environment does neither, so the run is refused when it starts."
+   "``repeats``", "1", "Chains per entry. A value above 1 is refused unless the environment declares isolation, which says that each chain meets a fresh target. The shipped ``unmanaged`` environment declares none, so the run is refused when it starts; the shipped ``disposable`` environment declares it on your behalf (see :doc:`../environments/disposable`). A repeat asks the environment to reset only if the environment has a reset capability."
    "``chain_timeout``", "off", "Seconds for a whole chain: a finite positive number, or null. A chain that runs longer closes and records ``ChainTimeout``."
    "``turn_timeout``", "60", "Seconds for one turn: a finite positive number. The coordinator enforces it and records ``TurnTimeout``."
    "``end_condition``, ``follow_prompt_cap``", "``verify``, false", "As in the iterative base probe."
@@ -79,7 +79,7 @@ has the full message.
 
    "``probes.midojo.InjectionSpecProbe.source_path``", "same", "None."
    "``probes.midojo.InjectionSpecProbe.upstream``", "same", "None for an HTTP(S) string. A non-string transport object is refused, because a chain takes a URL."
-   "``probes.midojo.InjectionSpecProbe.repeats``", "same", "A value above 1 needs an isolating environment, selected with ``plugins.environment_type``."
+   "``probes.midojo.InjectionSpecProbe.repeats``", "same", "A value above 1 is refused unless the selected environment, chosen with ``plugins.environment_type``, declares isolation."
    "``probes.midojo.InjectionSpecProbe.end_condition``, ``follow_prompt_cap``", "same", "None."
    "``probes.midojo.InjectionSpecProbe.interceptor_url``", "``plugins.injectors.mim.service_url``", "Moved. It accepts ``http`` or ``https`` only: write ``http`` for ``ws`` and ``https`` for ``wss``. It accepts a base URL or one that ends in ``/v1/bindings``, with an optional proxy path prefix. User info, a query and a fragment are refused."
    "``probes.midojo.InjectionSpecProbe.interceptor_credential``", "``plugins.injectors.mim.bind_credential``", "Moved. The scrubbing that covered the old key covers the new one."
