@@ -9,6 +9,7 @@ generator capture shapes, the detector end to end on ``Attempt`` objects, and
 how a ``None`` score passes through the evaluator.
 """
 
+import itertools
 import json
 from types import MappingProxyType
 
@@ -20,6 +21,9 @@ from garak.detectors.toolcall import (
     CONDITION_NOTE,
     RESULTS_NOTE,
     ToolCallCondition,
+    _all,
+    _any,
+    evaluate_condition,
     evaluate_output,
     normalise_tool_call,
     read_tool_calls,
@@ -346,6 +350,72 @@ def test_one_call_must_satisfy_every_comparison_on_its_operation(detector):
     joint = output(call("update_listing", {"occupancy": 5, "config_flags": ["x"]}))
     assert outcome(detector, cond, split) == "not_detected", "split across calls"
     assert outcome(detector, cond, joint) == "detected", "one call satisfies both"
+
+
+_RANK = {False: 0, None: 1, True: 2}
+
+
+@pytest.mark.parametrize("size", [1, 2, 3, 4])
+def test_kleene_folds_ignore_operand_order(size):
+    """All and any decide from every operand: false below unknown below true."""
+    for operands in itertools.combinations_with_replacement([True, False, None], size):
+        folds = {
+            (_all(ordering), _any(ordering))
+            for ordering in itertools.permutations(operands)
+        }
+        assert folds == {
+            (min(operands, key=_RANK.get), max(operands, key=_RANK.get))
+        }, f"{operands} did not fold the three-valued way in every order"
+
+
+_FOLD_CALLS = [
+    call("lookup", {"id": "A"}),
+    call("refund", {"amount": 50}),
+    call("escalate", {}),
+]
+_TRUE = value(arg("refund", "amount"), "gt", literal(10))
+_FALSE = value(arg("refund", "amount"), "lt", literal(10))
+_UNKNOWN = value(arg("lookup", "missing"), "eq", literal(1))
+_NOT_CALLED_TRUE = not_called("absent")
+_NOT_CALLED_FALSE = not_called("escalate")
+_NOT_CALLED_UNKNOWN = not_called("lookup", [{"argument": "missing", "value": 1}])
+
+
+@pytest.mark.parametrize(
+    ("comparisons", "expected"),
+    [
+        ([_TRUE, _UNKNOWN], "inconclusive"),
+        ([_FALSE, _UNKNOWN], "not_detected"),
+        ([_TRUE, _FALSE, _UNKNOWN], "not_detected"),
+        ([_TRUE, _NOT_CALLED_TRUE], "detected"),
+        ([_UNKNOWN, _NOT_CALLED_FALSE], "not_detected"),
+        ([_TRUE, _NOT_CALLED_UNKNOWN], "inconclusive"),
+        ([_TRUE, order("refund", "verify"), _NOT_CALLED_TRUE], "detected"),
+        ([_TRUE, order("refund", "lookup"), _NOT_CALLED_TRUE], "not_detected"),
+        ([_UNKNOWN, order("refund", "verify"), _NOT_CALLED_UNKNOWN], "inconclusive"),
+    ],
+    ids=[
+        "true-unknown",
+        "false-unknown",
+        "true-false-unknown",
+        "true-not-called",
+        "unknown-not-called-refuted",
+        "true-not-called-unknown",
+        "true-order-not-called",
+        "order-refuted",
+        "unknown-order-not-called-unknown",
+    ],
+)
+def test_condition_outcome_ignores_comparison_order(comparisons, expected):
+    """Permuting a condition's comparisons changes neither its outcome nor its match."""
+    calls, complete = read_tool_calls(output(*_FOLD_CALLS))
+    seen = set()
+    for ordering in itertools.permutations(comparisons):
+        result, _, matched = evaluate_condition(condition(*ordering), calls, complete)
+        seen.add((result, tuple(sorted(matched))))
+    assert len({result for result, _ in seen}) == 1, "the order changed the outcome"
+    assert len(seen) == 1, "the order changed the matched calls"
+    assert seen.pop()[0] == expected, "the outcome is not the three-valued one"
 
 
 def test_chat_completions_shape_is_judged(detector):
