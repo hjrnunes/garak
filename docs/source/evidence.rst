@@ -84,6 +84,11 @@ changes neither the digest nor a later read. A snapshot may be pickled and copie
 because it is a pure frozen value; an unfinished call seals with ``complete`` false and
 ``result`` null, and no result is ever invented for it.
 
+Each sealed call record has ``pre_environment`` and ``post_environment`` fields, and
+both are null: nothing in v1 produces an environment for a single call. The
+snapshot's own ``pre_environment`` and ``environment`` are the only observation of the
+world.
+
 Per-call cost
 -------------
 
