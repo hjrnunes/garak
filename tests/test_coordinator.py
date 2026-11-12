@@ -270,6 +270,22 @@ def test_chain_refuses_second_enter_without_replacing_resources():
     assert fake.events.count("run_close") == 1, "run closed once"
 
 
+def test_chain_refuses_a_second_active_turn_and_keeps_the_first():
+    require_shared_codec()
+    fake = Fakes()
+    with coordinator(fake) as run:
+        with run.chain("c", upstream_url="http://unused", plan=object()) as chain:
+            with chain.turn("first") as turn:
+                with pytest.raises(RuntimeError, match="active turn"):
+                    with chain.turn("second"):
+                        pass
+                turn.reply("one")
+            result = chain.seal()
+    assert [(t.index, t.reply) for t in result.turns] == [
+        (0, "one")
+    ], "the refused turn started or the first lost its reply"
+
+
 def test_body_failure_and_keyboard_interrupt_close():
     for error in (Surprise, KeyboardInterrupt):
         fake = Fakes()
