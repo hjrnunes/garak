@@ -132,6 +132,9 @@ ANSWERS = {
     "/supported": _valid("supported"),
     "/contradicted": _valid("contradicted"),
     "/unresolved": _valid("unresolved"),
+    # The request target of a URL with no path, and of one with a space in its path.
+    "/": _valid("supported"),
+    "/supp%20orted": _valid("supported"),
     "/minimal": lambda request, headers: (
         200,
         {"schema": SCHEMA, "verdict": "contradicted"},

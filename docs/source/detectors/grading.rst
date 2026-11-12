@@ -71,7 +71,19 @@ a request id, printed in the reason of a grade, does not stand for.
 
 The grader's checks are held to byte-identical verdicts on a corpus the
 runtime graded, kept under ``tests/_assets/detectors/grading`` with the
-script that regenerates it.
+script that regenerates it. The ``reply_judge`` check is held to the runtime's
+verdicts and requests on a corpus of scripted judge services, kept under
+``tests/_assets/detectors/reply_judge`` with its script and the fake service it
+runs against. On that corpus the two differ only where the standard library's
+HTTP client differs from the runtime's: the name of the exception a failure reports, a URL
+the standard library cannot form a request to (nothing is sent), and the user
+and password of a URL (dropped, not sent as Basic credentials). They differ in
+one more case: an answer in a content coding the grader does not decode is
+unknown, where the runtime's client reads a coding it does not know as it is
+(and decodes ``br`` and ``zstd`` when their packages are installed, so it can
+grade an answer the grader never reads). The judge service of the pipeline
+(``judge-serve``) does not compress its answers, so the difference does not
+arise with it. The 8 MiB bound on an answer is the grader's alone.
 
 .. automodule:: garak.detectors.grading
    :members:
