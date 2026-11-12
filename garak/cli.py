@@ -65,6 +65,37 @@ def credential_values(value):
     return found
 
 
+def scrub_secrets(value, secrets):
+    """Return ``value`` with each of ``secrets`` replaced by ``[redacted]`` in every string it holds.
+
+    A server can answer a request by echoing it, so what comes back can hold a
+    credential the request carried. Strings are scrubbed wherever they sit: as
+    values, as dict keys, and inside lists, tuples and models (a class that
+    defines ``model_dump``), which come back as the dicts they dump to.
+    No field name decides whether a string is scrubbed. A secret is matched as
+    written and as a JSON string escapes it. Numbers, booleans and None come back
+    as they are.
+    """
+    import json
+
+    if isinstance(value, str):
+        known = {s for s in secrets if isinstance(s, str) and s}
+        for secret in sorted(known, key=len, reverse=True):
+            for spelling in (secret, json.dumps(secret)[1:-1]):
+                value = value.replace(spelling, REDACTED)
+        return value
+    if callable(getattr(type(value), "model_dump", None)):
+        return scrub_secrets(value.model_dump(mode="json", by_alias=True), secrets)
+    if isinstance(value, dict):
+        return {
+            scrub_secrets(key, secrets): scrub_secrets(item, secrets)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [scrub_secrets(item, secrets) for item in value]
+    return value
+
+
 def _redact_json(text):
     """Return ``text`` with the JSON object or array it spells redacted.
 

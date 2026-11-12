@@ -9,6 +9,8 @@ import logging
 import httpx
 import pytest
 import respx
+from openai._models import construct_type
+from openai.types.responses import ResponseError
 
 import garak.exception
 from garak import cli
@@ -128,6 +130,160 @@ def test_a_rejected_credential_does_not_repeat_the_api_key(status, caplog):
     assert "Incorrect API key provided" in str(raised.value), "the reason is kept"
     assert API_KEY not in str(raised.value), "the exception holds no key"
     assert API_KEY not in caplog.text, "nor does the log"
+
+
+def _call(**fields):
+    return {
+        "type": "mcp_call",
+        "id": "mc_1",
+        "name": "lookup",
+        "arguments": "{}",
+        "server_label": "bank",
+        "status": "failed",
+        "output": None,
+        "error": None,
+    } | fields
+
+
+def _holds_no_secret(outputs, caplog):
+    attempt = Attempt(prompt=Message("hello"))
+    attempt.outputs = outputs
+    records = {
+        "garak.log": caplog.text,
+        "notes": json.dumps(outputs[0].notes),
+        "serialised attempt": json.dumps(attempt.as_dict()),
+    }
+    for name, text in records.items():
+        assert not any(secret in text for secret in SECRETS), f"{name} holds no secret"
+
+
+@pytest.mark.parametrize("secret", SECRETS)
+def test_a_failed_response_that_echoes_a_credential_is_scrubbed(secret, caplog):
+    """A response can fail with a message that sends the request back."""
+    failed = OK | {
+        "status": "failed",
+        "error": {"code": "server_error", "message": f"rejected {secret} for bank"},
+    }
+
+    with caplog.at_level(logging.DEBUG):
+        outputs = _generate(httpx.Response(200, json=failed), notes={"tools": TOOLS})
+
+    message = outputs[0].notes["response"]["error"]["message"]
+    assert message == f"rejected {cli.REDACTED} for bank", "the reason keeps its shape"
+    assert outputs[0].notes["response"]["error"]["code"] == "server_error"
+    _holds_no_secret(outputs, caplog)
+
+
+def test_an_incomplete_response_that_echoes_a_credential_is_scrubbed(caplog):
+    incomplete = OK | {
+        "status": "incomplete",
+        "incomplete_details": {"reason": f"stopped after {BEARER_TOKEN}"},
+    }
+
+    with caplog.at_level(logging.DEBUG):
+        outputs = _generate(
+            httpx.Response(200, json=incomplete), notes={"tools": TOOLS}
+        )
+
+    reason = outputs[0].notes["response"]["incomplete_details"]["reason"]
+    assert reason == f"stopped after {cli.REDACTED}", "the gap is marked"
+    _holds_no_secret(outputs, caplog)
+
+
+# every field a tool call carries, and two the SDK does not know: no field name
+# decides whether the API's echo is scrubbed
+CALL_FIELDS = [
+    "id",
+    "name",
+    "arguments",
+    "server_label",
+    "status",
+    "error",
+    "output",
+    "call_id",
+    "approval_request_id",
+    "future_field",
+]
+
+
+@pytest.mark.parametrize("field", CALL_FIELDS)
+def test_whatever_field_of_a_tool_call_echoes_a_credential_is_scrubbed(field, caplog):
+    echoed = OK | {"output": [_call(**{field: f"x {AUTHORIZATION} and {QUOTED} y"})]}
+
+    with caplog.at_level(logging.DEBUG):
+        outputs = _generate(httpx.Response(200, json=echoed), notes={"tools": TOOLS})
+
+    expected = f"x {cli.REDACTED} and {cli.REDACTED} y"
+    (call,) = outputs[0].notes["tool_calls"]
+    assert (
+        call.get(field, expected) == expected
+    ), "the call keeps the field with the gap marked"
+    (item,) = outputs[0].notes["output_items"]
+    assert item[field] == expected, "so does the item a later request carries"
+    _holds_no_secret(outputs, caplog)
+
+
+def test_a_credential_nested_in_an_unknown_structure_is_scrubbed(caplog):
+    nested = {"outer": [{"inner": f"a {QUOTED} b"}], f"key {AUTHORIZATION}": 1}
+    echoed = OK | {"output": [_call(future_field=nested)]}
+
+    with caplog.at_level(logging.DEBUG):
+        outputs = _generate(httpx.Response(200, json=echoed), notes={"tools": TOOLS})
+
+    (item,) = outputs[0].notes["output_items"]
+    assert item["future_field"] == {
+        "outer": [{"inner": f"a {cli.REDACTED} b"}],
+        f"key {cli.REDACTED}": 1,
+    }, "values, keys and list members are all scrubbed"
+    _holds_no_secret(outputs, caplog)
+
+
+@pytest.mark.parametrize("part", ["error", "incomplete_details", "usage"])
+def test_an_unknown_field_of_the_response_record_is_scrubbed(part, caplog):
+    echoed = OK | {"status": "failed", part: {"future_field": f"x {AUTHORIZATION} y"}}
+
+    with caplog.at_level(logging.DEBUG):
+        outputs = _generate(httpx.Response(200, json=echoed), notes={"tools": TOOLS})
+
+    record = outputs[0].notes["response"][part]
+    assert record["future_field"] == f"x {cli.REDACTED} y"
+    _holds_no_secret(outputs, caplog)
+
+
+def test_a_model_is_dumped_and_scrubbed():
+    model = construct_type(
+        type_=ResponseError,
+        value={"code": "server_error", "message": f"x {AUTHORIZATION} y"},
+    )
+
+    assert cli.scrub_secrets(model, [AUTHORIZATION]) == {
+        "code": "server_error",
+        "message": f"x {cli.REDACTED} y",
+    }, "an SDK model comes back as the dict it dumps to, scrubbed"
+
+
+def test_scrubbing_leaves_what_is_not_text_alone():
+    value = {"count": 3, "ratio": 1.5, "flag": True, "none": None, "items": (1, "a")}
+
+    assert cli.scrub_secrets(value, [AUTHORIZATION]) == value | {
+        "items": [1, "a"]
+    }, "numbers, booleans and None stay, and a tuple becomes a list"
+
+
+def test_a_failed_response_without_credentials_is_kept_as_received():
+    failed = OK | {
+        "status": "failed",
+        "error": {"code": "server_error", "message": "boom"},
+        "output": [_call(error="tool execution failed")],
+    }
+
+    outputs = _generate(httpx.Response(200, json=failed), notes={"tools": TOOLS})
+
+    assert outputs[0].notes["response"]["error"] == {
+        "code": "server_error",
+        "message": "boom",
+    }, "nothing to scrub"
+    assert outputs[0].notes["tool_calls"][0]["error"] == "tool execution failed"
 
 
 def test_a_rejection_without_credentials_is_kept_as_received():

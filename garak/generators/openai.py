@@ -24,7 +24,7 @@ import backoff
 
 from garak import _config
 from garak.attempt import Message, Conversation
-from garak.cli import REDACTED, credential_values, redact_credentials
+from garak.cli import credential_values, redact_credentials, scrub_secrets
 import garak.exception
 from garak.generators.base import Generator
 
@@ -153,20 +153,6 @@ class _RedactRequestOptions(logging.Filter):
 logging.getLogger("openai._base_client").addFilter(_RedactRequestOptions())
 
 
-def _scrub(text: str, secrets) -> str:
-    """Return ``text`` with each of ``secrets`` replaced by the redaction marker.
-
-    A server can answer a rejected request by echoing it, so text that came back
-    from one can hold a credential the request carried. A secret is matched as
-    written and as a JSON string escapes it.
-    """
-
-    for secret in sorted(set(secrets), key=len, reverse=True):
-        for spelling in (secret, json.dumps(secret)[1:-1]):
-            text = text.replace(spelling, REDACTED)
-    return text
-
-
 def _failed_generation(error: openai.APIStatusError, secrets=()) -> Message:
     """Return the output for a generation the API rejected.
 
@@ -181,7 +167,7 @@ def _failed_generation(error: openai.APIStatusError, secrets=()) -> Message:
         note["status_code"] = response.status_code
         body = getattr(response, "text", None)
         if isinstance(body, str):
-            note["body"] = _scrub(body, secrets)
+            note["body"] = scrub_secrets(body, secrets)
     return Message(None, notes={"error": note})
 
 
@@ -723,12 +709,12 @@ class OpenAIResponsesGenerator(OpenAICompatible):
             msg = (
                 f"OpenAI API authentication failed (HTTP {e.status_code}); "
                 f"verify {self.key_env_var} is valid. "
-                f"Original error: {_scrub(str(e), secrets)}"
+                f"Original error: {scrub_secrets(str(e), secrets)}"
             )
             logging.error(msg)
             raise garak.exception.GarakException(msg) from None
         except openai.BadRequestError as e:
-            logging.error("Bad request: %s", _scrub(str(e), secrets))
+            logging.error("Bad request: %s", scrub_secrets(str(e), secrets))
             return [_failed_generation(e, secrets)]
         except openai.APIStatusError as e:
             if (
@@ -740,7 +726,7 @@ class OpenAIResponsesGenerator(OpenAICompatible):
                 "HTTP %s from %s: %s",
                 e.status_code,
                 e.request.url,
-                _scrub(str(e), secrets),
+                scrub_secrets(str(e), secrets),
             )
             return [_failed_generation(e, secrets)]
         except json.decoder.JSONDecodeError as e:
@@ -801,7 +787,9 @@ class OpenAIResponsesGenerator(OpenAICompatible):
         if record:
             notes["response"] = record
 
-        return [Message(text, notes=notes)]
+        # the API sent every note, so any of them can echo the request, a tool call
+        # in its id as much as in its error; what the model wrote as text is its own
+        return [Message(text, notes=scrub_secrets(notes, secrets))]
 
     @staticmethod
     def _response_record(response) -> dict:
