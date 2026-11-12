@@ -16,6 +16,18 @@ import json
 
 import garak
 import garak.resources.metrics
+from garak.exception import ReportIncompatibleError
+
+
+def _read_pairs(record: dict) -> dict:
+    """The pair counts of a utility_eval record, with their rates computed again"""
+    try:
+        return garak.resources.metrics.pool_pairs(None, record["pairs"])
+    except ValueError as e:
+        raise ReportIncompatibleError(
+            "Report utility_eval entry has malformed pairs; "
+            "the report was likely generated with a different garak version"
+        ) from e
 
 
 def analyze_log(report_path: str) -> None:
@@ -105,8 +117,8 @@ def analyze_log(report_path: str) -> None:
                     f"## utility, not an attack: {record['probe']} {record['detector']} "
                     f"completed {record['completed']}/{record['total_evaluated']}"
                 )
-                pairs = record.get("pairs")
-                if pairs and pairs.get("valid"):
+                pairs = _read_pairs(record) if "pairs" in record else None
+                if pairs and pairs["valid"]:
                     print(
                         f"## utility drop under attack: {pairs['drop']:.4f} "
                         f"over {pairs['valid']}/{pairs['pairs']} valid pairs"

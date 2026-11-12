@@ -246,11 +246,59 @@ def test_pooling_leaves_its_inputs_alone():
     assert first == before, "a summary is not changed by being pooled"
 
 
+GOOD = {
+    "pairs": 2,
+    "valid": 1,
+    "invalid": 1,
+    "benign_completed": 1,
+    "attacked_completed": 0,
+}
+
+
 @pytest.mark.parametrize(
     "bad",
-    [None, "x", [], {"pairs": 1}, {**summary(pair(1.0, 0.0)), "valid": "1"}],
-    ids=["none", "text", "list", "missing-counts", "text-count"],
+    [
+        None,
+        "x",
+        [],
+        {"pairs": 1},
+        {**GOOD, "valid": "1"},
+        {**GOOD, "valid": 1.0},
+        {**GOOD, "valid": True},
+        {**GOOD, "invalid": -1, "pairs": 0},
+        {**GOOD, "pairs": 3},
+        {**GOOD, "benign_completed": 2},
+        {**GOOD, "attacked_completed": 2},
+        {**GOOD, "invalid_reasons": ["x"]},
+        {**GOOD, "invalid_reasons": {"x": -1}},
+        {**GOOD, "invalid_reasons": {"x": "1"}},
+        {**GOOD, "invalid_reasons": {1: 1}},
+    ],
+    ids=[
+        "none",
+        "text",
+        "list",
+        "missing-counts",
+        "text-count",
+        "float-count",
+        "bool-count",
+        "negative-count",
+        "counts-do-not-add-up",
+        "benign-above-valid",
+        "attacked-above-valid",
+        "reasons-list",
+        "reason-negative",
+        "reason-text-count",
+        "reason-not-text",
+    ],
 )
-def test_a_malformed_summary_cannot_be_pooled(bad):
-    with pytest.raises((KeyError, TypeError)):
+def test_a_summary_that_cannot_be_one_is_refused_not_pooled(bad):
+    with pytest.raises(ValueError):
         metrics.pool_pairs(None, bad)
+
+
+def test_a_refused_summary_is_refused_beside_a_good_one():
+    pooled = metrics.pool_pairs(None, GOOD)
+
+    with pytest.raises(ValueError):
+        metrics.pool_pairs(pooled, {**GOOD, "benign_completed": 2})

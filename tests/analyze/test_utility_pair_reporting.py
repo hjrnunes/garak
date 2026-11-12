@@ -104,14 +104,41 @@ def test_pairs_leave_the_digest_attack_success_alone(tmp_path):
         assert paired[key] == plain[key], f"{key} is the same with pairs"
 
 
-@pytest.mark.parametrize(
-    "bad",
-    [None, "x", [], {"pairs": 1}, {**pairs(1, 1, 0), "valid": "1"}],
-    ids=["none", "text", "list", "missing-counts", "text-count"],
-)
+BAD_PAIRS = [
+    None,
+    "x",
+    [],
+    {"pairs": 1},
+    {**pairs(1, 1, 0), "valid": "1"},
+    {**pairs(1, 2, 1)},
+    {**pairs(1, 1, 2)},
+    {**pairs(1, 1, 0), "pairs": 3},
+]
+BAD_PAIR_IDS = [
+    "none",
+    "text",
+    "list",
+    "missing-counts",
+    "text-count",
+    "benign-above-valid",
+    "attacked-above-valid",
+    "counts-do-not-add-up",
+]
+
+
+@pytest.mark.parametrize("bad", BAD_PAIRS, ids=BAD_PAIR_IDS)
 def test_a_malformed_pairs_member_is_an_incompatible_report(tmp_path, bad):
     with pytest.raises(ReportIncompatibleError):
         digest(tmp_path, [entry(pairs=bad)])
+
+
+@pytest.mark.parametrize("bad", BAD_PAIRS, ids=BAD_PAIR_IDS)
+def test_analyze_log_refuses_a_malformed_pairs_member_alike(tmp_path, bad):
+    path = tmp_path / "pairs.report.jsonl"
+    path.write_text(json.dumps(entry(pairs=bad)) + "\n", encoding="utf-8")
+
+    with pytest.raises(ReportIncompatibleError):
+        analyze_log(str(path))
 
 
 def test_analyze_log_summarises_the_drop(tmp_path, capsys):
@@ -125,6 +152,20 @@ def test_analyze_log_summarises_the_drop(tmp_path, capsys):
         line.startswith("## utility drop under attack: 0.5000 over 2/3 valid pairs")
         for line in lines
     ), "the drop is marked as utility, over the valid pairs"
+
+
+def test_analyze_log_computes_the_drop_from_the_counts(tmp_path, capsys):
+    rates = ("benign_utility", "utility_under_attack", "drop")
+    counts = {k: v for k, v in pairs(2, 2, 1, 1).items() if k not in rates}
+    path = tmp_path / "pairs.report.jsonl"
+    path.write_text(json.dumps(entry(pairs=counts)) + "\n", encoding="utf-8")
+
+    analyze_log(str(path))
+
+    assert (
+        "## utility drop under attack: 0.5000 over 2/3 valid pairs"
+        in capsys.readouterr().out
+    ), "a report without its rates still reads, from its counts"
 
 
 def test_analyze_log_says_nothing_of_a_drop_without_a_valid_pair(tmp_path, capsys):

@@ -261,6 +261,36 @@ def _with_rates(counts: dict) -> dict:
     return counts
 
 
+def _checked_counts(summary) -> Tuple[dict, dict]:
+    """The counts and invalid reasons of a pair summary that can be one
+
+    :raises ValueError: if a count is missing or is not a non-negative integer,
+        if the valid and invalid pairs do not make up the pairs, if a side
+        completed more tasks than there are valid pairs, or if the reasons are
+        not a mapping of text to such counts
+    """
+    if not isinstance(summary, dict):
+        raise ValueError("a pair summary must be a mapping")
+    counts = {}
+    for key in _PAIR_COUNTS:
+        count = summary.get(key)
+        if type(count) is not int or count < 0:
+            raise ValueError(f"pair summary {key!r} must be a non-negative integer")
+        counts[key] = count
+    if counts["valid"] + counts["invalid"] != counts["pairs"]:
+        raise ValueError("pair summary valid and invalid pairs do not make up pairs")
+    for key in ("benign_completed", "attacked_completed"):
+        if counts[key] > counts["valid"]:
+            raise ValueError(f"pair summary {key!r} is more than its valid pairs")
+    reasons = summary.get("invalid_reasons", {})
+    if not isinstance(reasons, dict) or any(
+        type(reason) is not str or type(count) is not int or count < 0
+        for reason, count in reasons.items()
+    ):
+        raise ValueError("pair summary invalid_reasons must map text to counts")
+    return counts, reasons
+
+
 def pool_pairs(pooled: Optional[dict], summary: dict) -> dict:
     """Add the counts of a :func:`pair_summary` to pooled counts
 
@@ -269,15 +299,16 @@ def pool_pairs(pooled: Optional[dict], summary: dict) -> dict:
     :param pooled: what this function returned before, or None to begin
     :param summary: a summary, such as one read from a report
     :returns: the pooled counts, a new mapping
-    :raises KeyError: if the summary lacks a count
-    :raises TypeError: if the summary is not a mapping of numbers
+    :raises ValueError: if the summary cannot be one, so that a report that
+        holds an impossible count is refused and not pooled into a rate
     """
     total = {key: 0 for key in _PAIR_COUNTS}
     reasons: dict = {}
     for source in (summary,) if pooled is None else (pooled, summary):
+        counts, source_reasons = _checked_counts(source)
         for key in _PAIR_COUNTS:
-            total[key] += source[key]
-        for reason, count in source.get("invalid_reasons", {}).items():
+            total[key] += counts[key]
+        for reason, count in source_reasons.items():
             reasons[reason] = reasons.get(reason, 0) + count
     if reasons:
         total["invalid_reasons"] = dict(sorted(reasons.items()))

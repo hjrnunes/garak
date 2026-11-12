@@ -627,7 +627,7 @@ def _summarise_utility(utility_evals: list) -> dict:
                 entry["pairs"] = garak.resources.metrics.pool_pairs(
                     entry.get("pairs"), record["pairs"]
                 )
-        except (KeyError, TypeError, AttributeError) as e:
+        except (KeyError, TypeError, AttributeError, ValueError) as e:
             raise ReportIncompatibleError(
                 "Report utility_eval entry is malformed; "
                 "the report was likely generated with a different garak version"
