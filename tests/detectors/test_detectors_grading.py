@@ -884,6 +884,17 @@ def test_document_version_is_named_in_the_refusal():
         )
 
 
+def test_document_version_must_be_exactly_a_string():
+    class Version(str):
+        pass
+
+    with pytest.raises(grading.DocumentRefused, match="schema_version"):
+        grading.grade_sealed(
+            document(TRUE, schema_version=Version("midojo-injection-spec-v1")),
+            sealed(),
+        )
+
+
 @pytest.mark.parametrize("value", [None, [], "document", 5])
 def test_document_must_be_an_object(value):
     with pytest.raises(grading.DocumentRefused):

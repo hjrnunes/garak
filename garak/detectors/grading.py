@@ -257,8 +257,6 @@ def _observed_status(observations: Mapping[str, Any]) -> dict[str, str]:
     """The evidence status each observation reports, keyed by ``<source>.<part>``."""
     statuses: dict[str, str] = {}
     for source, observed in observations.items():
-        if not isinstance(observed, Mapping):
-            raise EvidenceRefused(f"observation {source!r} is not an object")
         if "evidence_status" in observed:
             reported = _statuses(
                 observed["evidence_status"], f"observation {source!r} evidence_status"

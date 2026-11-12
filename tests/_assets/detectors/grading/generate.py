@@ -1490,24 +1490,35 @@ def build(runtime: dict[str, Any]) -> Corpus:
         "no-status": reshaped(outcome(), ("status",)),
         "status-number": reshaped(outcome(), status=13),
         "status-unknown": reshaped(outcome(), status="new_status"),
+        "status-object": reshaped(outcome(), status={"applied": True}),
         "no-detail": reshaped(outcome(), ("detail",)),
         "detail-number": reshaped(outcome(), detail=5),
         "detail-none": reshaped(outcome(), detail=None),
         "slot-key-number": reshaped(outcome(), slot_key=123),
+        "slot-key-object": reshaped(outcome(), slot_key={"key": 1}),
         "no-selected": reshaped(outcome(), ("selected",)),
         "selected-text": reshaped(outcome(), selected="yes"),
         "selected-number": reshaped(outcome(), selected=1),
         "no-transformation": reshaped(outcome(), ("transformation",)),
         "transformation-number": reshaped(outcome(), transformation=7),
         "transformation-unknown": reshaped(outcome(), transformation="rot13"),
+        "transformation-object": reshaped(outcome(), transformation={"identity": 1}),
         "no-emitted": reshaped(outcome(), ("emitted",)),
         "emitted-text": reshaped(outcome(), emitted="structured_content"),
+        "emitted-count": reshaped(outcome(), emitted=5),
         "emitted-number": reshaped(outcome(), emitted=[5]),
         "emitted-unknown-part": reshaped(outcome(), emitted=["elsewhere"]),
+        "emitted-part-object": reshaped(outcome(), emitted=[{"content_block": 1}]),
         "emitted-mapping": reshaped(outcome(), emitted={"structured_content": 1}),
         "unknown-member": reshaped(outcome(), extra=1),
         "payload-digest-number": reshaped(placed, payload_digest=123),
         "payload-digest-short": reshaped(placed, payload_digest="sha256:xyz"),
+        "payload-digest-long": reshaped(
+            placed, payload_digest=placed["payload_digest"] + "0"
+        ),
+        "payload-digest-newline": reshaped(
+            placed, payload_digest=placed["payload_digest"] + "\n"
+        ),
         "placed-digest-upper": reshaped(placed, placed_digest="sha256:" + "A" * 64),
         "slot-text": reshaped(placed, slot="slot"),
         "slot-undecodable": reshaped(placed, slot={"target": "bad"}),
@@ -1590,6 +1601,7 @@ def build(runtime: dict[str, Any]) -> Corpus:
         "none": {"function_calls": None},
         "number": {"turns": 5},
         "list": {"agent_output": ["complete"]},
+        "object": {"turns": {"complete": True}},
     }.items():
         corpus.add(
             "evidence-refused",
@@ -1638,6 +1650,22 @@ def build(runtime: dict[str, Any]) -> Corpus:
                 case,
                 document(called("ghost")),
                 snapshot(observations={"openshell": reported}),
+                refused=True,
+            )
+        for case, reported in {
+            "observation-statuses-text": "complete",
+            "observation-statuses-list": ["complete"],
+            "observation-statuses-none": None,
+        }.items():
+            corpus.add(
+                "evidence-refused",
+                case,
+                document(called("ghost")),
+                snapshot(
+                    observations={
+                        "openshell": {**observed, "evidence_status": reported}
+                    }
+                ),
                 refused=True,
             )
     except ImportError:
