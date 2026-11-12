@@ -14,19 +14,30 @@ behaviour the detector looks for occurred. For a ``security`` detector that
 behaviour is a successful attack; for a ``utility`` detector it is a completed
 legitimate task. The evaluator reports the two kinds apart so that a utility
 result cannot change an attack success rate.
+
+A probe can run each attacked chain beside a benign baseline of the same task.
+The two attempts of such a pair share an id, and each says which role it has.
+A baseline is never an attack, so a security detector leaves it unscored. The
+drop in utility is counted over the pairs whose two sides both have a result.
 """
 
 import json
-from typing import Optional, Tuple
+from typing import Callable, Iterable, Optional, Tuple
 
 SECURITY = "security"
 UTILITY = "utility"
 METRIC_KINDS = (SECURITY, UTILITY)
 
+ATTACKED = "attacked"
+BASELINE = "baseline"
+PAIR_ROLES = (ATTACKED, BASELINE)
+BASELINE_SECURITY = "baseline_security"  # why a security detector skips a baseline
+
 # keys in ``attempt.notes``, each mapping a detector name, as it appears in
 # ``attempt.detector_results``, to what is known about that detector's results
 UNSCORED_NOTE = "unscored"  # {"reason": str, "not_applicable": bool}
 KIND_NOTE = "metric_kind"  # a metric kind; written only for a non-security kind
+PAIR_NOTE = "utility_pair"  # {"id": str, "role": str}, one per attempt
 _EVALUATION_ENTRIES = (
     "eval",
     "utility_eval",
@@ -128,6 +139,118 @@ def kind_in_notes(notes, detector_name: str) -> str:
 def metric_kind(attempt, detector_name: str) -> str:
     """Read what :func:`mark_kind` recorded; anything else reads as security"""
     return kind_in_notes(attempt.notes, detector_name)
+
+
+def mark_pair(attempt, pair_id: str, role: str) -> None:
+    """Record that an attempt is one side of a pair
+
+    :param attempt: the attempt, which keeps the record in its notes
+    :type attempt: garak.attempt.Attempt
+    :param pair_id: names the pair; both sides of a pair carry the same id
+    :type pair_id: str
+    :param role: one of ``PAIR_ROLES``
+    :type role: str
+    :raises ValueError: if the id is not non-empty text or the role is unknown
+    """
+    if type(pair_id) is not str or not pair_id:
+        raise ValueError("a pair id must be non-empty text")
+    if role not in PAIR_ROLES:
+        raise ValueError(f"unknown pair role {role!r}, expected one of {PAIR_ROLES}")
+    if not isinstance(attempt.notes, dict):
+        attempt.notes = {}
+    attempt.notes[PAIR_NOTE] = {"id": pair_id, "role": role}
+
+
+def pair_of(attempt) -> Optional[Tuple[str, str]]:
+    """Read what :func:`mark_pair` recorded; unreadable notes read as no pair
+
+    :returns: the pair id and the role, or None if the attempt is in no pair
+    """
+    notes = attempt.notes if isinstance(attempt.notes, dict) else {}
+    mark = notes.get(PAIR_NOTE)
+    if not isinstance(mark, dict):
+        return None
+    pair_id, role = mark.get("id"), mark.get("role")
+    if type(pair_id) is not str or not pair_id or role not in PAIR_ROLES:
+        return None
+    return pair_id, role
+
+
+def is_baseline(attempt) -> bool:
+    """True if :func:`mark_pair` made the attempt the benign side of a pair"""
+    pair = pair_of(attempt)
+    return pair is not None and pair[1] == BASELINE
+
+
+def _side(
+    held: list, role: str, detector_name: str, completed: Callable[[float], bool]
+) -> Tuple[Optional[bool], Optional[str]]:
+    """Whether the one attempt on a side completed its task, or why it does not count"""
+    if len(held) != 1:
+        return None, "unpaired"
+    attempt = held[0]
+    scores = attempt.detector_results.get(detector_name)
+    if not isinstance(scores, list) or len(scores) != 1:
+        return None, f"{role}:outputs"
+    if scores[0] is None:
+        reason, _ = unscored_mark(attempt, detector_name)
+        return None, f"{role}:{reason or 'unscored'}"
+    return completed(float(scores[0])), None
+
+
+def pair_summary(
+    attempts: Iterable, detector_name: str, completed: Callable[[float], bool]
+) -> Optional[dict]:
+    """Count a utility detector's results over the pairs the attempts hold
+
+    A pair is valid when each side is one attempt with one scored output. Any
+    other pair is invalid, counted under the reason of its first side that has
+    no result, and takes no part in the rates, so a result that could not be
+    decided never reads as a task that failed.
+
+    :param attempts: the attempts a utility detector scored
+    :param detector_name: the detector's key in ``attempt.detector_results``
+    :type detector_name: str
+    :param completed: tells whether a score is a completed task
+    :returns: the counts and rates over valid pairs (a rate is None when no
+        pair is valid; ``drop`` is the benign rate less the rate under attack),
+        or None if no attempt is in a pair
+    """
+    pairs: dict = {}
+    for attempt in attempts:
+        pair = pair_of(attempt)
+        if pair is not None:
+            sides = pairs.setdefault(pair[0], {role: [] for role in PAIR_ROLES})
+            sides[pair[1]].append(attempt)
+    if not pairs:
+        return None
+    valid = benign = attacked = 0
+    invalid_reasons: dict = {}
+    for sides in pairs.values():
+        results = {}
+        reason = None
+        for role in PAIR_ROLES:
+            results[role], why = _side(sides[role], role, detector_name, completed)
+            reason = reason or why
+        if reason is not None:
+            invalid_reasons[reason] = invalid_reasons.get(reason, 0) + 1
+            continue
+        valid += 1
+        benign += results[BASELINE]
+        attacked += results[ATTACKED]
+    summary = {
+        "pairs": len(pairs),
+        "valid": valid,
+        "invalid": len(pairs) - valid,
+        "benign_completed": benign,
+        "attacked_completed": attacked,
+        "benign_utility": benign / valid if valid else None,
+        "utility_under_attack": attacked / valid if valid else None,
+        "drop": (benign - attacked) / valid if valid else None,
+    }
+    if invalid_reasons:
+        summary["invalid_reasons"] = dict(sorted(invalid_reasons.items()))
+    return summary
 
 
 class _EvaluationCounter:
