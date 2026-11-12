@@ -3,6 +3,8 @@
 
 """A server that echoes a tool credential in its response leaves it out of every log record."""
 
+import asyncio
+import gc
 import http.server
 import io
 import json
@@ -43,6 +45,18 @@ CHANNELS = {
     "rejection reason phrase": {"status": 400, "reason": f"Bad Request {BEARER}"},
     "rejection header": {"status": 404, "headers": {"X-Echoed-Token": BEARER}},
 }
+
+
+@pytest.fixture(autouse=True)
+def empty_registry():
+    """A test that fails halfway leaves no secret for the tests after it.
+
+    The reset takes no lock: a failed test can leave the lock it swapped in held
+    by a thread that never finishes.
+    """
+    yield
+    openai_generator._ACTIVE_SECRETS.clear()
+    openai_generator._ACTIVE_SNAPSHOT = ()
 
 
 @pytest.fixture
@@ -194,6 +208,107 @@ def test_a_secret_stays_registered_until_every_call_using_it_ends():
 
 def _record(msg, args=None, exc_info=None):
     return logging.LogRecord("x", logging.DEBUG, __file__, 1, msg, args, exc_info)
+
+
+def test_the_filter_takes_no_lock_when_a_finalizer_logs_while_one_is_held(monkeypatch):
+    """Garbage collection runs between any two bytecodes, a lock block's too.
+
+    The lock is swapped for a throwaway that cannot be re-entered, so a filter
+    that takes it hangs this test and not the module's own lock.
+    """
+    lock = threading.Lock()
+    monkeypatch.setattr(openai_generator, "_ACTIVE_SECRETS_LOCK", lock)
+    sink = io.StringIO()
+    handler = logging.StreamHandler(sink)
+    handler.addFilter(openai_generator._SCRUB_ACTIVE_SECRETS)
+    root = logging.getLogger()
+    finished = threading.Event()
+
+    def collect_while_locked():
+        with lock:
+            loop = asyncio.new_event_loop()
+            future = loop.create_future()
+            future.set_exception(RuntimeError("never retrieved"))
+            loop.close()
+            cycle = [future]
+            cycle.append(cycle)
+            del future, cycle
+            gc.collect()
+        finished.set()
+
+    root.addHandler(handler)
+    try:
+        threading.Thread(target=collect_while_locked, daemon=True).start()
+        assert finished.wait(5), "the filter waits for a lock its own thread holds"
+    finally:
+        root.removeHandler(handler)
+
+    assert "never retrieved" in sink.getvalue(), "the finalizer logged through it"
+
+
+def test_the_registry_lock_can_be_taken_again_by_its_holder():
+    lock = openai_generator._ACTIVE_SECRETS_LOCK
+    with lock:
+        taken = lock.acquire(blocking=False)
+        if taken:
+            lock.release()
+
+    assert taken, "a holder that logs from a finalizer cannot wait on itself"
+
+
+def test_the_filter_follows_the_calls_in_flight():
+    record = _record("%s", (BEARER,))
+    other = "second-call-bearer"
+
+    with openai_generator._logs_scrubbed_of([BEARER]):
+        with openai_generator._logs_scrubbed_of([other]):
+            openai_generator._ScrubActiveSecrets().filter(record)
+            assert BEARER not in record.getMessage(), "the first call is covered"
+        later = _record("%s %s", (BEARER, other))
+        openai_generator._ScrubActiveSecrets().filter(later)
+        assert BEARER not in later.getMessage(), "still in flight after the second ends"
+        assert other in later.getMessage(), "the second is forgotten when it ends"
+
+    after = _record("%s", (BEARER,))
+    openai_generator._ScrubActiveSecrets().filter(after)
+    assert after.getMessage() == BEARER, "the last call to end leaves none"
+
+
+def _string_whose_hash_fails_after(hashes_allowed, text):
+    class Hostile(str):
+        calls = 0
+
+        def __hash__(self):
+            Hostile.calls += 1
+            if Hostile.calls > hashes_allowed:
+                raise ValueError("hash failed")
+            return str.__hash__(self)
+
+    return Hostile(text)
+
+
+@pytest.mark.parametrize("hashes_allowed", [0, 1])
+def test_a_secret_with_a_failing_hash_registers_as_a_plain_string(hashes_allowed):
+    """A failure halfway through registration would leave a secret behind."""
+    other = "second-call-bearer"
+    hostile = _string_whose_hash_fails_after(hashes_allowed, other)
+
+    with openai_generator._logs_scrubbed_of([BEARER, hostile]):
+        assert {type(s) for s in openai_generator._ACTIVE_SECRETS} == {str}, "plain"
+        record = _record("%s %s", (BEARER, other))
+        openai_generator._ScrubActiveSecrets().filter(record)
+        assert BEARER not in record.getMessage(), "the first secret is scrubbed"
+        assert other not in record.getMessage(), "so is the one with the bad hash"
+
+    assert not openai_generator._ACTIVE_SECRETS, "the call forgets both"
+    after = _record("%s %s", (BEARER, other))
+    openai_generator._ScrubActiveSecrets().filter(after)
+    assert after.getMessage() == f"{BEARER} {other}", "no later record is scrubbed"
+
+
+def test_only_non_empty_strings_are_registered():
+    with openai_generator._logs_scrubbed_of(["", None, 7, BEARER]):
+        assert list(openai_generator._ACTIVE_SECRETS) == [BEARER], "as scrub_secrets"
 
 
 def test_the_filter_leaves_a_record_alone_when_no_call_is_in_flight():

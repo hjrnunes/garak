@@ -155,8 +155,13 @@ class _RedactRequestOptions(logging.Filter):
 
 logging.getLogger("openai._base_client").addFilter(_RedactRequestOptions())
 
+# The filter reads _ACTIVE_SNAPSHOT and takes no lock. The garbage collector can
+# run a finalizer that logs between any two bytecodes, so a record can reach the
+# filter on a thread that holds the lock, and a filter that waited on it would
+# wait on itself. The lock is reentrant so that no later log-time reader can.
 _ACTIVE_SECRETS = collections.Counter()
-_ACTIVE_SECRETS_LOCK = threading.Lock()
+_ACTIVE_SECRETS_LOCK = threading.RLock()
+_ACTIVE_SNAPSHOT = ()
 
 
 class _ScrubActiveSecrets(logging.Filter):
@@ -169,8 +174,7 @@ class _ScrubActiveSecrets(logging.Filter):
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
-        with _ACTIVE_SECRETS_LOCK:
-            secrets = list(_ACTIVE_SECRETS)
+        secrets = _ACTIVE_SNAPSHOT
         if not secrets:
             return True
         try:
@@ -190,6 +194,12 @@ class _ScrubActiveSecrets(logging.Filter):
 _SCRUB_ACTIVE_SECRETS = _ScrubActiveSecrets()
 
 
+def _publish_active_secrets():
+    """Make the filter see the registry as it is now; call with the lock held."""
+    global _ACTIVE_SNAPSHOT
+    _ACTIVE_SNAPSHOT = tuple(_ACTIVE_SECRETS)
+
+
 def _handlers():
     """Return every handler of every logger that exists now, the root's included."""
     loggers = [logging.getLogger(), *logging.Logger.manager.loggerDict.values()]
@@ -207,21 +217,27 @@ def _logs_scrubbed_of(secrets):
 
     A record reaches the handlers of its own logger before the root's, so the
     filter goes on every existing handler. A handler added while the block runs
-    is not covered.
+    is not covered. Only non-empty strings count, as for ``scrub_secrets``, and
+    each is kept as a plain string, so no code of the caller's runs while the
+    registry changes.
     """
-    secrets = list(secrets)
+    own = collections.Counter(
+        str.__str__(s) for s in secrets if isinstance(s, str) and s
+    )
     for handler in _handlers():
         if _SCRUB_ACTIVE_SECRETS not in handler.filters:
             handler.addFilter(_SCRUB_ACTIVE_SECRETS)
     with _ACTIVE_SECRETS_LOCK:
-        _ACTIVE_SECRETS.update(secrets)
+        _ACTIVE_SECRETS.update(own)
+        _publish_active_secrets()
     try:
         yield
     finally:
         with _ACTIVE_SECRETS_LOCK:
-            _ACTIVE_SECRETS.subtract(secrets)
+            _ACTIVE_SECRETS.subtract(own)
             for secret in [s for s, n in _ACTIVE_SECRETS.items() if n <= 0]:
                 del _ACTIVE_SECRETS[secret]
+            _publish_active_secrets()
 
 
 def _failed_generation(error: openai.APIStatusError, secrets=()) -> Message:
