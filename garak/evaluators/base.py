@@ -19,6 +19,7 @@ import garak.analyze.calibration
 import garak.analyze.detector_metrics
 import garak.analyze.hit_at_k
 from garak.analyze.bootstrap_ci import calculate_bootstrap_ci
+import garak.resources.metrics
 import garak.resources.theme
 
 # Minimum CI width (in percentage points) to display in output
@@ -66,6 +67,8 @@ class Evaluator:
         passes = 0
         fails = 0
         nones = 0
+        not_applicable = 0
+        unscored_reasons: dict[str, int] = defaultdict(int)
         messages = []
 
         from dataclasses import asdict
@@ -79,9 +82,15 @@ class Evaluator:
             intent = attempt.intent
             attempt_scoreable = 0
             attempt_hits = 0
+            reason, attempt_not_applicable = garak.resources.metrics.unscored_mark(
+                attempt, detector_name
+            )
             for idx, score in enumerate(attempt.detector_results[detector_name]):
                 if score is None:
                     nones += 1
+                    not_applicable += attempt_not_applicable
+                    if reason is not None:
+                        unscored_reasons[reason] += 1
                     if intent is not None:
                         intent_counts[intent]["nones"] += 1
                 elif self.test(float(score)):
@@ -208,6 +217,8 @@ class Evaluator:
             ci_upper,
             hit_at_k_scores,
         )
+        if nones:
+            self.print_unscored(nones, not_applicable, unscored_reasons)
 
         # Build eval record
         eval_record = {
@@ -220,6 +231,12 @@ class Evaluator:
             "total_evaluated": outputs_evaluated,
             "total_processed": outputs_processed,
         }
+        # nones that did not apply, and why outputs were not scored; unknown is
+        # nones less not_applicable
+        if not_applicable:
+            eval_record["not_applicable"] = not_applicable
+        if unscored_reasons:
+            eval_record["unscored_reasons"] = dict(sorted(unscored_reasons.items()))
         # per-intent pass/total counts, feeds the digest technique_intent_matrix
         if intent_counts:
             eval_record["intents"] = {
@@ -316,9 +333,16 @@ class Evaluator:
             ]
             eval_summary = self._evaluate_one_detector(attempt_subset, detector_to_eval)
             detection_counts["detectors"].add(detector_to_eval)
-            for k, v in eval_summary.items():
-                if k in detection_counts:
-                    detection_counts[k] += v
+            for k in ("passed", "fails", "nones"):
+                detection_counts[k] += eval_summary[k]
+            if "not_applicable" in eval_summary:
+                detection_counts["not_applicable"] = (
+                    detection_counts.get("not_applicable", 0)
+                    + eval_summary["not_applicable"]
+                )
+            for reason, count in eval_summary.get("unscored_reasons", {}).items():
+                pooled = detection_counts.setdefault("unscored_reasons", {})
+                pooled[reason] = pooled.get(reason, 0) + count
 
         detection_counts["detectors"] = list(
             detection_counts["detectors"]
@@ -368,6 +392,14 @@ class Evaluator:
             for k, scores in hit_at_k_scores.items()
         ]
         return "  " + "  ".join(parts)
+
+    @staticmethod
+    def print_unscored(nones: int, not_applicable: int, reasons: dict) -> None:
+        """Print how many outputs a detector left without a score, and why"""
+        text = f"{nones - not_applicable} unknown, {not_applicable} not applicable"
+        if reasons:
+            text += "; " + ", ".join(f"{k}: {v}" for k, v in sorted(reasons.items()))
+        print(f"    {Fore.LIGHTYELLOW_EX}unscored:{Style.RESET_ALL} {nones} ({text})")
 
     def print_results_wide(
         self,

@@ -17,8 +17,11 @@ import pytest
 pytest.importorskip("midojo_spec")
 from midojo_spec.snapshot import snapshot_digest, verified  # noqa: E402
 
+from garak import _config  # noqa: E402
 from garak.attempt import Attempt, Conversation, Message, Turn  # noqa: E402
 from garak.detectors import midojo  # noqa: E402
+from garak.evaluators.base import ThresholdEvaluator  # noqa: E402
+from garak.resources.metrics import UNSCORED_NOTE  # noqa: E402
 
 VECTORS = Path(__file__).parents[1] / "_assets" / "detectors" / "inconclusive_vectors"
 CASES = json.loads((VECTORS / "MANIFEST.json").read_text())["cases"]
@@ -470,3 +473,101 @@ def test_missing_optional_dependency_raises_at_construction(detector, monkeypatc
     monkeypatch.setitem(sys.modules, "midojo_spec", None)
     with pytest.raises(ModuleNotFoundError, match="midojo_spec"):
         detector[0]()
+
+
+def _marks(detector, document, chain=None):
+    cls, _ = detector
+    built = attempt(document, chain=chain)
+    scores = cls().detect(built)
+    return scores, built.notes.get(UNSCORED_NOTE, {}).get(f"midojo.{cls.__name__}")
+
+
+@pytest.mark.parametrize("detector", DETECTORS)
+@pytest.mark.parametrize(
+    "case,reason",
+    [
+        ("security-unknown", midojo.INVALID),
+        ("interrupted-seal", midojo.INTERRUPTED),
+        ("capture-incomplete", midojo.INCOMPLETE),
+        ("not-delivered", midojo.NOT_DELIVERED),
+        ("unknown-delivery", midojo.UNRECORDED_DELIVERY),
+    ],
+)
+def test_refusals_are_marked_unknown(detector, case, reason):
+    scores, mark = _marks(detector, trace(case))
+    assert scores == [None], "the vector decides nothing"
+    assert mark == {
+        "reason": reason,
+        "not_applicable": False,
+    }, "an undecided evaluation is an unknown with its reason"
+
+
+@pytest.mark.parametrize("detector", DETECTORS)
+def test_intermediate_turn_is_marked_not_applicable(detector):
+    scores, mark = _marks(detector, trace(), chain={"final": False})
+    assert scores == [None], "an intermediate turn has no final grade"
+    assert mark == {
+        "reason": midojo.INTERMEDIATE_TURN,
+        "not_applicable": True,
+    }, "an intermediate turn is not an evaluation"
+
+
+@pytest.mark.parametrize("detector", DETECTORS)
+@pytest.mark.parametrize("case", ["control-resisted", "blocked-call"])
+def test_decided_results_are_not_marked(detector, case):
+    scores, mark = _marks(detector, trace(case))
+    assert scores[0] is not None, "the vector is decided"
+    assert mark is None, "a score needs no explanation"
+
+
+def test_evaluator_declares_what_leaves_the_attack_success_rate(tmp_path):
+    cases = [
+        ("control-resisted", None),
+        ("blocked-call", None),
+        ("not-delivered", None),
+        ("not-delivered", None),
+        ("unknown-delivery", None),
+        ("security-unknown", None),
+        ("control-resisted", {"final": False}),
+    ]
+    detector = midojo.EvaluationVerdict()
+    attempts = []
+    for case, chain in cases:
+        built = attempt(trace(case), chain=chain)
+        built.probe_classname = "test.Blank"
+        built.detector_results["midojo.EvaluationVerdict"] = detector.detect(built)
+        attempts.append(built)
+
+    _config.load_base_config()
+    _config.reporting.confidence_interval_method = "none"
+    path = tmp_path / "declared.report.jsonl"
+    _config.transient.report_filename = str(path)
+    _config.transient.reportfile = path.open("w", buffering=1, encoding="utf-8")
+    _config.transient.run_id = "declared"
+    _config.transient.hitlogfile = None
+    _config.system.show_z = False
+    _config.system.verbose = 0
+    _config.system.narrow_output = False
+
+    summary = ThresholdEvaluator(0.5).evaluate(attempts)
+
+    record = json.loads(
+        next(
+            line
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if '"entry_type": "eval"' in line
+        )
+    )
+    assert (record["passed"], record["fails"]) == (1, 1), "decided rows are scored"
+    assert record["total_evaluated"] == 2, "undelivered rows stay out of the rate"
+    assert record["total_processed"] == 7, "every evaluation is in the population"
+    assert record["unscored_reasons"] == {
+        midojo.INTERMEDIATE_TURN: 1,
+        midojo.INVALID: 1,
+        midojo.NOT_DELIVERED: 2,
+        midojo.UNRECORDED_DELIVERY: 1,
+    }, "each excluded evaluation is declared with its reason"
+    assert record["not_applicable"] == 1, "an intermediate turn is not an unknown"
+    assert (
+        summary["detection_counts"]["unscored_reasons"] == record["unscored_reasons"]
+    ), "the probe summary declares the same exclusions"

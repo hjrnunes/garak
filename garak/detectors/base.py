@@ -14,6 +14,7 @@ from colorama import Fore, Style
 from garak import _config
 from garak.configurable import Configurable
 import garak.attempt
+import garak.resources.metrics
 
 from garak.resources.api.huggingface import HFCompatible
 
@@ -77,6 +78,25 @@ class Detector(Configurable):
         (i.e. vulnerability found)."""
 
         raise NotImplementedError
+
+    def mark_unscored(
+        self,
+        attempt: garak.attempt.Attempt,
+        reason: str,
+        not_applicable: bool = False,
+    ) -> None:
+        """Record why ``detect`` returns ``None`` for the outputs of an attempt.
+
+        The evaluator counts unscored outputs by reason. Set ``not_applicable``
+        when the check does not apply to the attempt, rather than being unable
+        to decide.
+        """
+        garak.resources.metrics.mark_unscored(
+            attempt,
+            self.detectorname.replace("garak.detectors.", ""),
+            reason,
+            not_applicable,
+        )
 
 
 class HFDetector(Detector, HFCompatible):

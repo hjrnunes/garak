@@ -238,6 +238,16 @@ def _decision(attempt, *, effect):
     return _record(DETECTED if result else NOT_DETECTED, **facts)
 
 
+def _mark_refusal(detector, attempt, record):
+    """Tell the evaluator why a refused evaluation has no score."""
+    if record["score"] is None:
+        detector.mark_unscored(
+            attempt,
+            record["reason"],
+            not_applicable=record["reason"] == INTERMEDIATE_TURN,
+        )
+
+
 class EvaluationVerdict(Detector):
     """Score target compliance from a sealed security grade."""
 
@@ -258,6 +268,7 @@ class EvaluationVerdict(Detector):
         if not isinstance(attempt.notes, dict):
             attempt.notes = {}
         attempt.notes[RESULTS_NOTE] = records
+        _mark_refusal(self, attempt, record)
         return [item["score"] for item in records]
 
 
@@ -281,4 +292,5 @@ class EvaluationEffect(Detector):
         if not isinstance(attempt.notes, dict):
             attempt.notes = {}
         attempt.notes[EFFECT_RESULTS_NOTE] = records
+        _mark_refusal(self, attempt, record)
         return [item["score"] for item in records]
