@@ -12,6 +12,11 @@ Comparison is type for type: ``True``, ``1`` and ``1.0`` differ, as do ``0.0`` a
 ``-0.0``. Object key order does not matter. Values must be JSON-only: exact strings,
 integers, booleans, finite floats, null, lists and objects with string keys.
 
+Recording is at most once, not exactly once. A call ID makes a retry safe, because a
+repeat never adds a second record. It does not recover a record that never reached the
+collector. The sections below describe how the evidence marks a loss it can see; a
+loss it cannot see leaves no trace.
+
 A disposition says what the interception layer did with a call. A replay may leave it
 out, because an omitted disposition says nothing and repeats the first record. A
 disposition the replay names must be the first record's, so a replay cannot add one to
