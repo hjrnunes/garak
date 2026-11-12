@@ -84,8 +84,9 @@ def unscored_mark(attempt, detector_name: str) -> Tuple[Optional[str], bool]:
 def mark_kind(attempt, detector_name: str, kind: str) -> None:
     """Record the metric kind of a detector that ran on an attempt
 
-    A security detector needs no record: security is what the evaluator
-    assumes.
+    A security detector needs no record, because security is what the evaluator
+    assumes, but its run replaces the record of an earlier run of the same
+    detector as utility.
 
     :param attempt: the attempt the detector ran on
     :type attempt: garak.attempt.Attempt
@@ -101,6 +102,12 @@ def mark_kind(attempt, detector_name: str, kind: str) -> None:
         )
     if kind != SECURITY:
         _marks(attempt, KIND_NOTE)[detector_name] = kind
+        return
+    marks = attempt.notes.get(KIND_NOTE) if isinstance(attempt.notes, dict) else None
+    if isinstance(marks, dict):
+        marks.pop(detector_name, None)
+        if not marks:
+            del attempt.notes[KIND_NOTE]
 
 
 def kind_in_notes(notes, detector_name: str) -> str:

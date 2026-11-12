@@ -156,10 +156,15 @@ class Harness(Configurable):
             attempt.detector_results[detector_probe_name] = list(
                 detector_instance.detect(attempt)
             )
-            if detector_instance.metric_kind == garak.resources.metrics.UTILITY:
-                garak.resources.metrics.mark_kind(
-                    attempt, detector_probe_name, detector_instance.metric_kind
-                )
+            garak.resources.metrics.mark_kind(
+                attempt,
+                detector_probe_name,
+                (
+                    garak.resources.metrics.UTILITY
+                    if detector_instance.metric_kind == garak.resources.metrics.UTILITY
+                    else garak.resources.metrics.SECURITY
+                ),
+            )
 
     def run(self, model, probes, detectors, evaluator, announce_probe=True) -> None:
         """Core harness method

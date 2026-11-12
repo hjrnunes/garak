@@ -104,6 +104,56 @@ def test_harness_records_only_a_declared_kind(detector_class, kind):
     ), "the harness carries a utility kind to the evaluator; security needs no mark"
 
 
+def test_security_run_clears_an_earlier_utility_mark():
+    built = Attempt(prompt=Message(text="prompt"))
+    built.outputs = ["a"]
+    detector = always.Pass()
+    harness = garak.harnesses.base.Harness()
+
+    detector.metric_kind = metrics.UTILITY
+    harness._run_detector([built], detector)
+    detector.metric_kind = metrics.SECURITY
+    harness._run_detector([built], detector)
+
+    (name,) = built.detector_results
+    assert (
+        metrics.metric_kind(built, name) == metrics.SECURITY
+    ), "the latest run decides the kind of a detector's results"
+    assert metrics.KIND_NOTE not in built.notes, "an empty kind note is not left behind"
+
+
+def test_security_mark_leaves_the_kinds_of_other_detectors():
+    built = attempt(
+        {SECURITY_DETECTOR: [0.0], UTILITY_DETECTOR: [1.0]},
+        kinds={SECURITY_DETECTOR: metrics.UTILITY, UTILITY_DETECTOR: metrics.UTILITY},
+    )
+
+    metrics.mark_kind(built, SECURITY_DETECTOR, metrics.SECURITY)
+
+    assert metrics.metric_kind(built, SECURITY_DETECTOR) == metrics.SECURITY
+    assert (
+        metrics.metric_kind(built, UTILITY_DETECTOR) == metrics.UTILITY
+    ), "another detector keeps its kind"
+
+
+def test_rerun_security_detector_is_an_attack_eval_again(report):
+    built = Attempt(prompt=Message(text="prompt"), probe_classname=PROBE)
+    built.outputs = ["a"]
+    detector = always.Fail()
+    harness = garak.harnesses.base.Harness()
+    detector.metric_kind = metrics.UTILITY
+    harness._run_detector([built], detector)
+    detector.metric_kind = metrics.SECURITY
+    harness._run_detector([built], detector)
+
+    evaluate([built])
+
+    assert read(report, "utility_eval") == [], "the stale mark no longer applies"
+    (record,) = read(report, "eval")
+    assert record["detector"] == "always.Fail"
+    assert record["total_evaluated"] == 1
+
+
 def test_detector_with_unknown_kind_is_refused_at_construction():
     class Misspelt(always.Pass):
         """A detector whose kind is a typo."""
