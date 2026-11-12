@@ -27,6 +27,15 @@ def injection_codec():
     return injection
 
 
+def policy_codec():
+    """Load the optional tool policy when a document's tools first need it."""
+    try:
+        from midojo_spec import policy
+    except ImportError as exc:
+        raise MissingSnapshotCodecError(INSTALL_HINT) from exc
+    return policy
+
+
 def recorder_codec():
     """Load the optional recorder vocabulary when a capture reason is cut."""
     try:

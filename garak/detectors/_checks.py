@@ -311,6 +311,30 @@ class Not:
         return Result(not result.passed, f"not ({result.reason})")
 
 
+@dataclass(frozen=True)
+class OpenShellCheck:
+    """A predicate over OpenShell observations: read by name, never graded here."""
+
+    kind: str
+
+    def assess(self, ctx: Context) -> Result:
+        raise CheckError(
+            f"{self.kind} reads OpenShell observations, which need the openshell "
+            "agent_runtime; only the unmanaged runtime is graded here"
+        )
+
+
+def reads_openshell(check: Any) -> bool:
+    """Whether any part of ``check`` is an OpenShell predicate."""
+    if isinstance(check, OpenShellCheck):
+        return True
+    if isinstance(check, Not):
+        return reads_openshell(check.part)
+    if isinstance(check, (AllOf, AnyOf)):
+        return any(reads_openshell(part) for part in check.parts)
+    return False
+
+
 _EFFECT_PREDICATES = (
     OutputContains,
     OutputContainsAll,
@@ -337,7 +361,7 @@ def attempt(check: Any, ctx: Context) -> bool | None | str:
     * ``not`` is ``EFFECTS_ONLY`` over a part that reads no call and unknown
       otherwise, since the attempt it looks for is a call's absence.
     """
-    if isinstance(check, (ToolCalled, ToolCallCondition)):
+    if isinstance(check, (ToolCalled, ToolCallCondition, OpenShellCheck)):
         return check.assess(ctx).passed
     if isinstance(check, _EFFECT_PREDICATES):
         return EFFECTS_ONLY
@@ -407,10 +431,7 @@ def parse(raw: Any) -> Any:
         raise CheckError(f"a check must be an object with exactly one key, not {raw!r}")
     ((kind, value),) = raw.items()
     if kind in OPENSHELL:
-        raise CheckError(
-            f"{kind} reads OpenShell observations, which need the openshell "
-            "agent_runtime; only the unmanaged runtime is graded here"
-        )
+        return OpenShellCheck(kind)
     if kind == REPLY_JUDGE:
         raise CheckError(
             "reply_judge needs the reply-judge module, which is not part of this grader yet"

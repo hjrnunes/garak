@@ -22,6 +22,7 @@ pytest.importorskip("midojo_spec")
 
 from garak.detectors import grading  # noqa: E402
 from garak.evidence.facts import Turn  # noqa: E402
+from garak.evidence.injection_spec import InjectionSpec  # noqa: E402
 from garak.evidence.records import CallRecord  # noqa: E402
 from garak.evidence.seal import Snapshot, rebuild_snapshot  # noqa: E402
 
@@ -914,6 +915,48 @@ def test_missing_plan_is_an_empty_plan():
     value = document(TRUE)
     assert "plan" not in value
     assert grading.grade_sealed(value, sealed()).grade.injection_delivered is False
+
+
+@pytest.mark.parametrize(
+    "member, value",
+    [
+        ("suite_name", 1),
+        ("user_task_id", 1),
+        ("injection_task_id", ["x"]),
+        ("environment_type", "OtherEnvironment"),
+        ("environment", []),
+        ("turns", []),
+        ("turns", "hello"),
+        ("verifiers", ["custom"]),
+        ("interception", {"mode": "agent"}),
+        ("interception", {"port": 70000}),
+        ("tools", {"allowed": "lookup_order"}),
+        ("tools", {"allowed": [], "write_disposition": {"default": "maybe"}}),
+        ("surprise", 1),
+    ],
+)
+def test_a_member_the_grade_never_reads_is_still_checked(member, value):
+    with pytest.raises(grading.DocumentRefused):
+        grading.grade_sealed(document(TRUE, **{member: value}), sealed())
+
+
+def test_a_spec_built_by_hand_with_a_check_that_does_not_read_is_refused():
+    spec = dataclasses.replace(
+        InjectionSpec.from_document(document(TRUE)), utility={"unknown_predicate": 1}
+    )
+    with pytest.raises(grading.DocumentRefused, match="unknown_predicate"):
+        grading.grade_sealed(spec, sealed())
+
+
+def test_a_spec_the_reader_made_grades_as_its_document_does():
+    value = document(
+        TRUE, {"output_contains": "ORD"}, suite_name="piggybank", turns=["look it up"]
+    )
+    spec = InjectionSpec.from_document(value)
+    assert (
+        grading.grade_sealed(spec, sealed()).to_document()
+        == grading.grade_sealed(value, sealed()).to_document()
+    )
 
 
 @pytest.mark.parametrize(

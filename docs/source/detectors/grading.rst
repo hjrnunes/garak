@@ -6,9 +6,11 @@ without the MiDojo runtime. Install the optional ``midojo`` extra to use it.
 
 ``grade_sealed(document, snapshot)`` returns a ``Verdict`` whose
 ``to_document()`` is the ``midojo-verdict-v1`` document the runtime writes for
-the same document and snapshot. The document is a plain mapping with its
-``security`` and ``utility`` checks, its ``plan`` and its ``runtime``; the
+the same document and snapshot. The document is a plain mapping, or the
+``garak.evidence.injection_spec.InjectionSpec`` that reader made of one; the
 snapshot is a ``garak.evidence.seal.Snapshot``, whose digest is verified first.
+The reader checks every member of the document, whether or not the grade reads
+it.
 
 A grade is True, False or None. None means the evidence could not decide the
 check: the grade's validity is then ``invalid`` and lists the unknown leaf
@@ -24,7 +26,8 @@ effect was observed on the calls that ran to their end, and whether the plan's
 payload was delivered. Each is True, False or None.
 
 The grader refuses, and writes no verdict, when it cannot grade what it is
-given. ``DocumentRefused`` covers a check it cannot read, an OpenShell
+given. ``DocumentRefused`` carries the reader's refusal: a member the document
+does not define or that is malformed, a check it cannot read, an OpenShell
 predicate, a runtime other than ``unmanaged``, a ``reply_judge`` check and a plan
 that does not decode. ``EvidenceRefused`` covers a snapshot whose digest no
 longer matches, an environment field a check reads that the snapshot lacks, and
