@@ -123,10 +123,15 @@ def analyze_log(report_path: str) -> None:
                     f"## utility, not an attack: {record['probe']} {record['detector']} "
                     f"completed {record['completed']}/{record['total_evaluated']}{scope}"
                 )
-                if pairs and pairs["valid"]:
+                if pairs:
+                    drop = (
+                        f"{pairs['drop']:.4f} over"
+                        if pairs["valid"]
+                        else "no rate with"
+                    )
                     print(
                         f"## paired drop: {garak.resources.metrics.PAIRS_COVERS}: "
-                        f"{pairs['drop']:.4f} over {pairs['valid']}/{pairs['pairs']} "
+                        f"{drop} {pairs['valid']}/{pairs['pairs']} "
                         f"valid pairs, {pairs['invalid']} invalid"
                     )
 

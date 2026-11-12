@@ -113,7 +113,7 @@ An entry with ``pairs`` also has a ``covers`` member that names what each of its
    {"covers": {"counts": "all scored attacked chains", "pairs": "valid pairs only"}}
 
 The console says the same. The completed line ends with ``(utility under attack: all scored attacked chains)``. The ``pairs:`` line starts with ``paired drop: valid pairs only``, then gives the valid and invalid pairs, the two rates and the drop, and the invalid reasons.
-``python -m garak.analyze.analyze_log`` prints the same two labels, and its ``paired drop`` line gives the invalid pairs beside the valid ones.
+``python -m garak.analyze.analyze_log`` prints the same two labels, and its ``paired drop`` line gives the invalid pairs beside the valid ones; with no valid pair it says there is no rate.
 A report or digest that holds a ``pairs`` member whose counts cannot be, such as more completed tasks than valid pairs, or invalid pairs that ``invalid_reasons`` does not name once each, is refused as an incompatible report.
 
 Confidence Intervals (Optional)

@@ -204,10 +204,20 @@ def test_analyze_log_computes_the_drop_from_the_counts(tmp_path, capsys):
     ), "a report without its rates still reads, from its counts"
 
 
-def test_analyze_log_says_nothing_of_a_drop_without_a_valid_pair(tmp_path, capsys):
+def test_analyze_log_gives_no_rate_but_still_labels_and_counts_without_a_valid_pair(
+    tmp_path, capsys
+):
     path = tmp_path / "pairs.report.jsonl"
     path.write_text(json.dumps(entry(pairs=pairs(0, 0, 0, 1))) + "\n", encoding="utf-8")
 
     analyze_log(str(path))
 
-    assert "drop" not in capsys.readouterr().out, "no rate for no valid pair"
+    lines = capsys.readouterr().out.splitlines()
+    assert (
+        "## paired drop: valid pairs only: no rate with 0/1 valid pairs, 1 invalid"
+        in lines
+    ), "no rate for no valid pair, with the pairs counted beside the label"
+    assert any(
+        line.endswith("(utility under attack: all scored attacked chains)")
+        for line in lines
+    ), "and the plain figure is still named"
