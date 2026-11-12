@@ -51,6 +51,7 @@ from garak.evidence.records import RejectedError
 from garak.evidence.trace import TraceRefused, snapshot_value
 from garak.exception import CapabilityError, ConfigFailure, GarakException
 from garak.probes._injection_shared import resolve_source, turn_failure
+from garak.resources import metrics
 
 CHAIN_NOTE = "injection_spec_chain"
 TRACE_NOTE = "evaluation_trace"
@@ -59,6 +60,7 @@ CONDITION_NOTE = "tool_call_condition"
 INJECTION_SPEC_KEY = "injection_spec"
 EMPTY_REPLY = "EmptyReply"
 MAX_PAYLOAD_BYTES = 8192
+UTILITY_DETECTOR = "midojo.EvaluationUtility"
 
 # What a chain cut short keeps unknown: the calls it did not see, the turns it
 # did not finish and the agent's last words.
@@ -117,11 +119,25 @@ def load_injection_spec_entries(source: Path, owner: str) -> list[dict]:
 
 @dataclass(frozen=True)
 class InjectionSpecEntry:
-    """One validated document, its metadata and its optional condition."""
+    """One validated document, its metadata and its optional condition.
+
+    ``baseline`` is the entry's benign twin, built only when the probe pairs
+    chains: the same turns, tool policy and utility check, with no plan, no
+    security check and no condition.
+    """
 
     injection_spec: Any
     metadata: Any
     condition: Any
+    baseline: Any = None
+
+
+class _Slot(NamedTuple):
+    """Where one chain sits in a run: what it runs, whether it repeats and which pair it is in."""
+
+    entry: InjectionSpecEntry
+    repeated: bool
+    pair: tuple[str, str] | None
 
 
 @dataclass
@@ -132,6 +148,7 @@ class _Chain:
     evaluation_id: str
     stack: contextlib.ExitStack
     scope: Any
+    pair: tuple[str, str] | None = None
     reply: str = ""
     failure: str | None = None
     timer: threading.Timer | None = None
@@ -165,6 +182,15 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
     (``plugins.environment_type``, default ``unmanaged``) from the plugin
     configuration. The target needs a Responses-style generator that accepts MCP
     tools from conversation notes and records response status and tool calls.
+
+    With ``paired_baseline`` every attacked chain is followed by a baseline
+    chain of the same entry: the same turns, tool policy and utility check, but
+    no planted payload and no security check. The two chains carry one pairing
+    ID, and a utility drop is read over the pairs whose two sides both scored.
+    Each chain after the first meets a target an earlier chain used, so the
+    environment must declare isolation (see the ``disposable`` environment);
+    the probe refuses to run otherwise. The ``midojo.EvaluationUtility``
+    detector scores the pairs and runs as an extended detector.
     """
 
     extra_dependency_names = ["midojo_spec"]
@@ -173,6 +199,7 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
     source_path: str | None
     upstream: str | None
     repeats: int
+    paired_baseline: bool
     chain_timeout: float | None
     turn_timeout: float
 
@@ -194,6 +221,7 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
         "source_path": "injection/example_injection_spec.json",
         "upstream": None,
         "repeats": 1,
+        "paired_baseline": False,
         "chain_timeout": None,
         "turn_timeout": 60,
         "end_condition": "verify",
@@ -234,9 +262,15 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
         self.parallel_attempts = 1
         self.max_calls_per_conv = (
             sum(len(entry.injection_spec.turns) for entry in self.entries)
-            * self.repeats
+            * self._chains_per_entry
         )
+        if self.paired_baseline:
+            self.extended_detectors = [*self.extended_detectors, UTILITY_DETECTOR]
         self._reset_state()
+
+    @property
+    def _chains_per_entry(self) -> int:
+        return self.repeats * (2 if self.paired_baseline else 1)
 
     def _reset_state(self):
         self._coordinator = None
@@ -246,7 +280,8 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
         self._chain_secrets = {}
         self._last_processed = {}
         self._next_attempts = {}
-        self._pending_starts = list(range(len(self.entries) * self.repeats))
+        self._pending_starts = list(range(len(self.entries) * self._chains_per_entry))
+        self._pair_ids = {}
         self._sealed = set()
         self._refusal = None
 
@@ -276,6 +311,8 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
         owner = self.__class__.__name__
         if type(self.repeats) is not int or self.repeats < 1:
             raise ConfigFailure(f"{owner}: repeats must be a positive integer")
+        if type(self.paired_baseline) is not bool:
+            raise ConfigFailure(f"{owner}: paired_baseline must be true or false")
         for name, optional in (("chain_timeout", True), ("turn_timeout", False)):
             value = getattr(self, name)
             if value is None and optional:
@@ -371,11 +408,29 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
         condition = entry.get(CONDITION_NOTE)
         if condition is None and isinstance(spec.security, Mapping):
             condition = spec.security.get(CONDITION_NOTE)
+        metadata = copy.deepcopy(entry.get("metadata"))
         return InjectionSpecEntry(
             spec,
-            copy.deepcopy(entry.get("metadata")),
+            metadata,
             None if condition is None else plain(condition),
+            self._baseline_entry(spec, metadata) if self.paired_baseline else None,
         )
+
+    def _baseline_entry(self, spec, metadata) -> InjectionSpecEntry:
+        """The benign twin of ``spec``: nothing is planted and no attack is graded."""
+        refusal = None
+        try:
+            twin = InjectionSpec.from_document(
+                {**spec.to_document(), "plan": None, "security": None}
+            )
+        except (InjectionSpecDocumentError, ValueError) as exc:
+            refusal = str(exc)
+        if refusal is not None:
+            raise ConfigFailure(
+                f"{self.__class__.__name__}: a baseline cannot be built from "
+                f"the document: {refusal}"
+            ) from None
+        return InjectionSpecEntry(twin, metadata, None)
 
     @staticmethod
     def _admit_payloads(document):
@@ -462,8 +517,8 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
             raise ConfigFailure(
                 f"{self.__class__.__name__}: end_condition must be detector or verify"
             )
-        entry = self.entries[chain // self.repeats]
-        repeat = chain % self.repeats
+        slot = self._slot(chain)
+        entry = slot.entry
         spec = entry.injection_spec
         upstream = self._upstream(spec)
         evaluation_id = self._new_evaluation_id()
@@ -473,8 +528,8 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
             upstream_url=upstream,
             plan=spec.plan,
             policy=spec.tools,
-            repeated=repeat > 0,
-            reset=repeat > 0 and self._can_reset(),
+            repeated=slot.repeated,
+            reset=slot.repeated and self._can_reset(),
         )
         stack = contextlib.ExitStack()
         self._opening[evaluation_id] = spec
@@ -505,10 +560,26 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
             *credential_values(self._tool_block(scope.tool_block)),
             *self._presented,
         ]
-        state = _Chain(entry, evaluation_id, stack, scope)
+        state = _Chain(entry, evaluation_id, stack, scope, slot.pair)
         self._live[chain] = state
         self._arm_deadline(state)
         return self._turn_attempt(chain, 0, [], state)
+
+    def _slot(self, chain: int) -> _Slot:
+        """What chain number ``chain`` runs.
+
+        Chains run in order: for each entry, each repeat, the attacked chain and
+        then, when pairing, its baseline. A paired run treats every chain after
+        the first as a repeat, since it meets a target an earlier chain used.
+        """
+        index, within = divmod(chain, self._chains_per_entry)
+        entry = self.entries[index]
+        if not self.paired_baseline:
+            return _Slot(entry, within > 0, None)
+        pair = self._pair_ids.setdefault(chain // 2, uuid.uuid4().hex)
+        if within % 2 == 0:
+            return _Slot(entry, chain > 0, (pair, metrics.ATTACKED))
+        return _Slot(entry.baseline, True, (pair, metrics.BASELINE))
 
     def _arm_deadline(self, state: _Chain):
         if self.chain_timeout is None:
@@ -561,6 +632,8 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
             "final": index == len(entry.injection_spec.turns) - 1,
         }
         attempt.notes[METADATA_NOTE] = copy.deepcopy(entry.metadata)
+        if state.pair is not None:
+            metrics.mark_pair(attempt, *state.pair)
         return attempt
 
     def _execute_attempt(self, this_attempt):
@@ -853,16 +926,21 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
         return "reset" in getattr(environment, "capabilities", frozenset())
 
     def _refuse_repeats(self, environment):
-        """Refuse repeated chains against an environment that does not declare isolation."""
+        """Refuse repeated or paired chains against an environment that does not declare isolation."""
         refusal = None
         try:
             environment.check_attempt(repeated=True)
         except CapabilityError as exc:
             refusal = str(exc)
         if refusal is not None:
+            option, need = (
+                ("paired_baseline", "a paired baseline needs")
+                if self.paired_baseline
+                else ("repeats", "repeats above 1 need")
+            )
             raise ConfigFailure(
-                f"{self.__class__.__name__}: repeats refused: {refusal}; "
-                "repeats above 1 need an environment that declares isolation, "
+                f"{self.__class__.__name__}: {option} refused: {refusal}; "
+                f"{need} an environment that declares isolation, "
                 "selected with plugins.environment_type"
             )
 
@@ -906,7 +984,7 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
                 self._coordinator = coordinator
                 self._sample_credential()
                 try:
-                    if self.repeats > 1:
+                    if self.repeats > 1 or self.paired_baseline:
                         self._refuse_repeats(environment)
                     attempts = super().probe(generator)
                 finally:
