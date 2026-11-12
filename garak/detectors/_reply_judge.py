@@ -9,23 +9,32 @@ request, and maps the service's verdict to the check's: ``supported`` is True,
 ``contradicted`` False and ``unresolved`` unknown (None). A request that gets no
 valid answer is unknown, never False.
 
-This module holds what needs no connection: reading the check, building the
-request, the :class:`JudgeRecord` a grading keeps of each request, and the
-offline replay (:class:`RecordedJudge`) that answers a re-grade from earlier
-records. The request id, the response rules and the replay identity check are
-those of ``midojo_spec`` (``judge`` and ``judge_replay``), loaded when first
-needed so that they have one source.
+This module reads the check, builds the request, keeps the
+:class:`JudgeRecord` a grading holds of each request, asks the service
+(:meth:`ReplyJudge.assess`, over ``_judge_http``) and answers a re-grade from
+earlier records (:class:`RecordedJudge`) without a connection. The request id,
+the response rules and the replay identity check are those of ``midojo_spec``
+(``judge`` and ``judge_replay``), loaded when first needed so that they have
+one source.
+
+Assessing never raises for what the service or the connection does: every
+failure is a record with its reason, and the check is unknown. The bearer token
+is read from the environment for the one request, sent in its header, and
+removed from every text the service sent back.
 """
 
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 import math
-from collections.abc import Iterable, Mapping
+import os
+from collections.abc import Iterable, MutableMapping, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from garak.detectors import _judge_http
 from garak.evidence.codec import INSTALL_HINT, MissingSnapshotCodecError
 from garak.evidence.records import thaw
 
@@ -66,6 +75,8 @@ _RECORD_FIELDS = (
     "failure",
 )
 _RECORD_REQUIRED = frozenset({"request_id", "endpoint", "request", "sent"})
+# The record's fields that hold what the service sent (or a failure quoting it): the ones redaction reads.
+_SERVICE_TEXT = ("rationale", "model", "details", "failure")
 
 
 def _judge_spec() -> Any:
@@ -364,6 +375,237 @@ class ReplyJudge:
             return None, f"the judge service left it unresolved ({request})"
         return PASSED[verdict], f"{verdict} ({request})"
 
+    def assess(
+        self,
+        ctx: Context,
+        judgements: MutableMapping[str, JudgeRecord],
+        replay: RecordedJudge | None = None,
+    ) -> tuple[bool | None, str]:
+        """Ask the service once per request, and give the check's value with the words for its reason: never an exception.
+
+        ``judgements`` holds the record of every request this grading has made
+        (the check asked again with the same request reads its record), and
+        ``replay``, when given, answers from earlier records instead of the
+        service. The known failures have their own reasons. Any other
+        exception on the way (resolving the settings, building, sending,
+        decoding, validating or recording) is caught here as a backstop:
+        unknown, with the exception's type only (its message may hold the
+        token or a header), and a record of how far the request got. Only a
+        missing ``midojo_spec`` is raised, as the installation's fault.
+        """
+        progress = _Progress()
+        try:
+            record = self._judgement(ctx, judgements, replay, progress)
+        except ReplayRefusal as unanswered:
+            return self._unanswered(judgements, unanswered, progress)
+        except MissingSnapshotCodecError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - the backstop, as the docstring says
+            record = progress.failed(self, exc)
+            key = progress.key or json.dumps(["failed", record.request_id])
+            judgements.setdefault(key, record)
+        return self.outcome(record)
+
+    def _unanswered(
+        self,
+        judgements: MutableMapping[str, JudgeRecord],
+        unanswered: ReplayRefusal,
+        progress: _Progress,
+    ) -> tuple[bool | None, str]:
+        """A replay with no record it can answer from: unknown, naming the id, never a verdict.
+
+        The refusal is kept as a failed record, as every unanswered request
+        is, so the grade shows which request had no answer. The reason is the
+        refusal's own: its code and the id's first eight hex digits.
+        """
+        why = str(unanswered)
+        request = progress.request or {
+            "schema": _judge_spec().SCHEMA,
+            "id": unanswered.request_id,
+        }
+        record = JudgeRecord(
+            request_id=unanswered.request_id,
+            endpoint=progress.endpoint,
+            request=request,
+            sent=False,
+            failure=why,
+        )
+        key = progress.key or json.dumps(["replay", unanswered.request_id])
+        judgements.setdefault(key, record)
+        return None, why
+
+    def _replay_endpoint(self) -> tuple[bool, str | None]:
+        """The endpoint this check would ask, when the check alone names it: ``(known, endpoint)``.
+
+        A literal ``url`` names the endpoint the live path would clean (None
+        when it is not a URL one could read); a check with no URL at all names
+        None. A ``url_env`` variable is read only when the check is assessed,
+        so a replay, which reads no environment, cannot know which endpoint it
+        held then: the endpoint is unknown.
+        """
+        if self.url is None:
+            return (False, None) if self.url_env is not None else (True, None)
+        endpoint = _judge_http.parse_url(self.url)
+        return True, None if endpoint is None else _text(endpoint.text)
+
+    def _judgement(
+        self,
+        ctx: Context,
+        judgements: MutableMapping[str, JudgeRecord],
+        replay: RecordedJudge | None,
+        progress: _Progress,
+    ) -> JudgeRecord:
+        try:
+            request = self.request(ctx)
+        except MissingSnapshotCodecError:
+            raise
+        except (
+            Exception
+        ) as exc:  # noqa: BLE001 - unknown, with the request as far as known
+            request = self.unbuilt_request()
+            why = str(exc) if isinstance(exc, UnbuildableError) else type(exc).__name__
+            unbuilt = JudgeRecord(
+                request_id=request["id"],
+                endpoint=None,
+                request=request,
+                sent=False,
+                failure=f"the judge request could not be built ({why})",
+            )
+            key = json.dumps(
+                ["unbuilt", request["id"], self.url, self.url_env, self.token_env]
+            )
+            return judgements.setdefault(key, unbuilt)
+        progress.request = request
+        progress.key = json.dumps(
+            [
+                request["id"],
+                self.url,
+                self.url_env,
+                self.token_env,
+                self.timeout_seconds,
+            ]
+        )
+        record = judgements.get(progress.key)
+        if record is None and replay is not None:
+            # A re-grade answers from its records, by request id and, when the check names one, endpoint.
+            endpoint_known, endpoint = self._replay_endpoint()
+            record = judgements[progress.key] = replay.ask(
+                request, endpoint=endpoint, endpoint_known=endpoint_known
+            )
+        if record is None:
+            record = judgements[progress.key] = self.ask(request, progress)
+        return record
+
+    def ask(
+        self, request: dict[str, Any], progress: _Progress | None = None
+    ) -> JudgeRecord:
+        """Send ``request`` to the service and keep what it answered, or why there is no answer.
+
+        A URL or token that cannot be used is a failure before anything is
+        sent: its reason names where it came from, never the token, and shows
+        no URL text. ``progress`` notes how far it got, for the backstop in
+        :meth:`assess`.
+        """
+        progress = progress or _Progress()
+        progress.request = request
+        fields: dict[str, Any] = {
+            "request_id": request["id"],
+            "request": request,
+            "endpoint": None,
+            "sent": False,
+        }
+        source = "the check's url" if self.url is not None else _text(str(self.url_env))
+        url = self.url if self.url is not None else os.environ.get(self.url_env or "")
+        if not url:
+            return JudgeRecord(
+                **fields, failure=f"no judge service URL: {source} is not set"
+            )
+        # An environment value that is not UTF-8 decodes to lone surrogates.
+        if _not_utf8(url):
+            return JudgeRecord(
+                **fields, failure=f"the judge service URL in {source} is not UTF-8 text"
+            )
+        endpoint = _judge_http.parse_url(url)
+        if endpoint is None:
+            return JudgeRecord(
+                **fields, failure="the judge service URL is not a valid URL"
+            )
+        progress.endpoint = fields["endpoint"] = _text(endpoint.text)
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        token = None
+        if self.token_env is not None:
+            name = _text(str(self.token_env))
+            token = os.environ.get(self.token_env)
+            if not token:
+                return JudgeRecord(
+                    **fields, failure=f"no judge service token: {name} is not set"
+                )
+            if not _header_safe(token):
+                failure = f"the judge service token in {name} can't be sent: it isn't printable ASCII"
+                return JudgeRecord(**fields, failure=failure)
+            headers["Authorization"] = f"Bearer {token}"
+        record = _redacted(self._exchange(endpoint, headers, fields, progress), token)
+        _dumped(record)  # the grade dumps it; one that cannot be is the backstop's
+        return record
+
+    def _exchange(
+        self,
+        endpoint: _judge_http.Endpoint,
+        headers: dict[str, str],
+        fields: dict[str, Any],
+        progress: _Progress,
+    ) -> JudgeRecord:
+        content = json.dumps(fields["request"], ensure_ascii=False).encode("utf-8")
+        fields = {**fields, "sent": True}
+        try:
+            progress.sent = True  # from here on, the request may have gone out
+            answer = _judge_http.post(
+                endpoint, content, headers, timeout=self.timeout_seconds
+            )
+        except TimeoutError as exc:
+            failure = f"the judge service timed out after {self.timeout_seconds:g}s ({type(exc).__name__})"
+            return JudgeRecord(**fields, failure=failure)
+        except _judge_http.AnswerTooLarge as exc:
+            failure = f"the judge service's answer is longer than {_judge_http.MAX_ANSWER_BYTES} bytes"
+            return JudgeRecord(**fields, http_status=exc.status, failure=failure)
+        except _judge_http.UnreadableCoding as exc:
+            # The coding is the service's text: the reason says only that there is one.
+            failure = "the judge service's answer is in a content coding this check does not decode"
+            return JudgeRecord(**fields, http_status=exc.status, failure=failure)
+        except _judge_http.TRANSPORT_ERRORS as exc:
+            # The exception's message may hold the URL; its type says enough.
+            failure = f"the judge service request failed ({type(exc).__name__})"
+            return JudgeRecord(**fields, failure=failure)
+        progress.http_status = answer.status
+        sent = {**fields, "http_status": answer.status}
+        if not 200 <= answer.status < 300:
+            return JudgeRecord(
+                **sent, failure=f"the judge service answered HTTP {answer.status}"
+            )
+        try:
+            body = json.loads(
+                answer.body, parse_constant=_refuse_constant, parse_float=_finite_float
+            )
+        except _NonFiniteError as exc:
+            return JudgeRecord(**sent, failure=f"the judge service's answer {exc}")
+        except (ValueError, RecursionError):  # a decoding error is a ValueError
+            return JudgeRecord(**sent, failure="the judge service's answer is not JSON")
+        spec = _judge_spec()
+        problem = spec.response_problem(body, fields["request_id"])
+        if problem is not None:
+            failure = (
+                f"the judge service's answer is not a {spec.SCHEMA} response: {problem}"
+            )
+            return JudgeRecord(**sent, failure=failure)
+        return JudgeRecord(
+            **sent,
+            verdict=body["verdict"],
+            # JSON's \ud800 escape decodes to a lone surrogate: escaped, as in a request, so the record dumps.
+            rationale=json_data(body.get("rationale")),
+            model=json_data(body.get("model")),
+            details=json_data(body.get("details")),
+        )
+
 
 def parse_reply_judge(value: Any) -> ReplyJudge:
     """A :class:`ReplyJudge` from its document form, or :class:`SettingsError` naming what is wrong with it."""
@@ -412,6 +654,107 @@ def parse_reply_judge(value: Any) -> ReplyJudge:
         prior_turns=value.get("prior_turns", False),
         tool_calls=value.get("tool_calls", False),
     )
+
+
+# --- asking ---------------------------------------------------------------------------
+
+
+def _dumped(record: JudgeRecord) -> None:
+    """Raise when ``record`` cannot be written as the grade writes it: strict UTF-8 and no NaN."""
+    json.dumps(record.to_json(), ensure_ascii=False, allow_nan=False).encode("utf-8")
+
+
+def _header_safe(token: str) -> bool:
+    """Whether ``token`` can go in an Authorization header as it is: printable ASCII, no control character."""
+    return all(" " <= character <= "~" for character in token)
+
+
+@dataclass
+class _Progress:
+    """How far one judge request got: what the backstop's record says when a step fails unexpectedly."""
+
+    request: dict[str, Any] | None = None
+    key: str | None = None
+    endpoint: str | None = None
+    sent: bool = False
+    http_status: int | None = None
+
+    def failed(self, check: ReplyJudge, exc: Exception) -> JudgeRecord:
+        """The record of a request stopped by ``exc``: its type only, nothing the service answered, no token."""
+        failure = f"the judge check failed ({type(exc).__name__})"
+        try:
+            request = (
+                self.request if self.request is not None else check.unbuilt_request()
+            )
+            record = JudgeRecord(
+                request_id=request["id"],
+                endpoint=self.endpoint,
+                request=request,
+                sent=self.sent,
+                http_status=self.http_status,
+                failure=failure,
+            )
+            _dumped(record)
+            return record
+        except Exception:  # noqa: BLE001 - nothing of the request can be told
+            return JudgeRecord(
+                request_id="",
+                endpoint=None,
+                request={},
+                sent=self.sent,
+                failure=failure,
+            )
+
+
+class _NonFiniteError(ValueError):
+    """The answer has ``NaN``, ``Infinity`` or ``-Infinity``, which JSON does not, or a number no float holds."""
+
+
+def _refuse_constant(name: str) -> Any:
+    # The parser only hands over these three; the reason names them in this module's own words all the same.
+    known = {"NaN": "NaN", "Infinity": "Infinity", "-Infinity": "-Infinity"}
+    raise _NonFiniteError(
+        f"is not JSON: it has {known.get(name, 'a constant JSON has no word for')}"
+    )
+
+
+def _finite_float(text: str) -> float:
+    number = float(text)
+    if not math.isfinite(number):
+        # Not the number itself: the service wrote it.
+        raise _NonFiniteError("has a number no float holds")
+    return number
+
+
+def _redacted(record: JudgeRecord, token: str | None) -> JudgeRecord:
+    """``record`` with ``token`` replaced wherever the service's text holds it (one it echoed back, say).
+
+    Only the values of the fields the service filled in are read (keys and
+    values of ``details`` included), never a field name or the verdict, so the
+    record keeps its schema whatever the token is. When it cannot be redacted,
+    the record keeps none of the service's text and says so.
+    """
+    if not token:
+        return record
+    try:
+        from garak.cli import scrub_secrets
+
+        return dataclasses.replace(
+            record,
+            **{
+                name: scrub_secrets(getattr(record, name), [token])
+                for name in _SERVICE_TEXT
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 - keep none of the service's text instead
+        return JudgeRecord(
+            request_id=record.request_id,
+            endpoint=record.endpoint,
+            request=record.request,
+            sent=record.sent,
+            http_status=record.http_status,
+            failure=f"the judge service's answer could not be redacted ({type(exc).__name__})",
+        )
 
 
 # --- replay --------------------------------------------------------------------------
