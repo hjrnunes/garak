@@ -6,6 +6,7 @@
 import json
 
 import httpx
+import pytest
 import respx
 
 from garak.attempt import Conversation, Message, Turn
@@ -23,9 +24,17 @@ MCP_CALL = {
     "output": '{"status": "delivered"}',
 }
 OTHER_CALL = {**MCP_CALL, "id": "mcp_2", "name": "retrieve_policy"}
+MCP_TOOLS = [
+    {
+        "type": "mcp",
+        "server_label": "qualification_target",
+        "server_url": "http://target.test/mcp",
+        "require_approval": "never",
+    }
+]
 
 
-def _generator():
+def _generator(**options):
     return OpenAIResponsesGenerator(
         name="m",
         config_root={
@@ -34,6 +43,7 @@ def _generator():
                     "OpenAIResponsesGenerator": {
                         "uri": URI,
                         "api_key": "sk-test-fake-key",
+                        **options,
                     }
                 }
             }
@@ -241,6 +251,36 @@ def test_second_request_carries_the_first_turns_tool_calls_in_order():
         second_body["input"][1]["output"] == '{"status": "delivered"}'
     ), "a resent call keeps its result"
     assert "previous_response_id" not in second_body, "no server-side state is needed"
+
+
+@pytest.mark.parametrize("source", ["conversation", "generator"])
+def test_every_request_of_a_conversation_carries_the_same_tool_block(source):
+    """The tool block is built per request, so each turn must send the first turn's."""
+    generator = _generator(tools=MCP_TOOLS) if source == "generator" else _generator()
+    notes = {"tools": MCP_TOOLS} if source == "conversation" else None
+    first = Conversation([Turn("user", Message("Where is ORD-104?"))], notes=notes)
+    answers = [
+        httpx.Response(200, json=_answer(MCP_CALL, _message("It was delivered."))),
+        httpx.Response(200, json=_answer(_message("Refunded."))),
+    ]
+
+    with respx.mock(base_url=URI) as router:
+        route = router.post("/responses").mock(side_effect=answers)
+        reply = generator._call_model(first)[0]
+        generator._call_model(
+            Conversation(
+                [
+                    *first.turns,
+                    Turn("assistant", Message(reply.text, notes=reply.notes)),
+                    Turn("user", Message("Refund it.")),
+                ],
+                notes=notes,
+            )
+        )
+
+    first_body, second_body = (json.loads(call.request.content) for call in route.calls)
+    assert first_body["tools"] == MCP_TOOLS, "the first request lost its tool block"
+    assert second_body["tools"] == first_body["tools"], "the tool block changed by turn"
 
 
 def test_second_request_after_a_tool_only_reply_holds_no_null_content():
