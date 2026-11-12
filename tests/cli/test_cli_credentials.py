@@ -123,7 +123,7 @@ def test_the_cli_log_never_records_a_plugin_option_credential(spelling, caplog):
     assert cli.REDACTED in caplog.text, "the log still shows the option was given"
 
 
-URL_KEYS = ("interceptor_url", "upstream")
+URL_KEYS = ("interceptor_url", "service_url", "upstream")
 HOST = "localhost:8767/proxy?keep=value"
 # a URL the probe will refuse, still logged first: its user info is the secret
 USERINFO_FORMS = [

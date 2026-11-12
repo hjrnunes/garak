@@ -1,34 +1,55 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Drive injection-spec documents as serial, multi-turn MiDojo evaluations.
+"""Drive injection-spec documents as serial, multi-turn evaluations.
 
 Each source entry holds an ``injection_spec`` document and optional opaque
-``metadata``. The authored plan supplies the payload unchanged. One handle
-runs each chain; only the final attempt is graded. The final attempt carries
-the sealed evaluation in ``notes["evaluation_trace"]``. No handle is stored
-on an attempt, which the iterative base deep-copies between turns.
+``metadata``. The authored plan supplies the payload unchanged. One chain scope
+of the run coordinator runs each entry; only the final attempt is graded. The
+final attempt carries the sealed evaluation in ``notes["evaluation_trace"]``.
+No chain scope is stored on an attempt, which the iterative base deep-copies
+between turns.
 """
 
 from __future__ import annotations
 
+import contextlib
 import copy
-import importlib
 import json
 import logging
+import math
 import os
+import threading
+import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any, Iterable
+from typing import Any, Iterable, NamedTuple
 from urllib.parse import urlsplit
 
 import garak.attempt
 import garak.probes
 from garak import _config
 from garak.cli import credential_values, redact_credentials, scrub_secrets
-from garak.exception import ConfigFailure, GarakException
+from garak.coordinator import (
+    ContextRequest,
+    RunCoordinator,
+    TurnTimeout,
+    select_components,
+)
+from garak.detectors.grading import GradingRefused, grade_sealed
+from garak.evidence.collector import Collector
+from garak.evidence.delivery import delivery_facts, exposure
+from garak.evidence.facts import AGENT_OUTPUT, FUNCTION_CALLS, TURNS
+from garak.evidence.injection_spec import (
+    SUPPORTED_DOCUMENT_VERSIONS,
+    InjectionSpec,
+    InjectionSpecDocumentError,
+    UnsupportedDocumentVersion,
+)
+from garak.evidence.records import RejectedError
+from garak.evidence.trace import TraceRefused, snapshot_value
+from garak.exception import CapabilityError, ConfigFailure, GarakException
 from garak.probes._injection_shared import resolve_source, turn_failure
 
 CHAIN_NOTE = "injection_spec_chain"
@@ -39,50 +60,23 @@ INJECTION_SPEC_KEY = "injection_spec"
 EMPTY_REPLY = "EmptyReply"
 MAX_PAYLOAD_BYTES = 8192
 
-_EXTRA_HINT = (
-    "the injection-spec probe needs the MiDojo harness (Python 3.12 or newer); "
-    "install the 'midojo-runtime' extra with a trusted source pin, never the "
-    "unrelated 'midojo' package from the package index"
+# What a chain cut short keeps unknown: the calls it did not see, the turns it
+# did not finish and the agent's last words.
+CUT_SHORT = (FUNCTION_CALLS, TURNS, AGENT_OUTPUT)
+INJECTOR_NEEDS = frozenset({"mcp_tools", "tool_output", "binding_stream"})
+# Options the probe read before the injector took the binding over, and where each one is set now.
+MOVED_OPTIONS = {
+    "interceptor_url": "plugins.injectors.mim.service_url",
+    "interceptor_credential": "plugins.injectors.mim.bind_credential",
+}
+_CLOSURE_ERRORS = (
+    CapabilityError,
+    RuntimeError,
+    OSError,
+    TimeoutError,
+    ValueError,
+    ExceptionGroup,
 )
-_WRONG_PACKAGE = (
-    "the installed 'midojo' is not the MiDojo harness "
-    "(missing midojo.injection_spec or midojo.evaluation_handle); "
-    "the plain package-index name belongs to an unrelated package"
-)
-
-
-def _midojo() -> SimpleNamespace:
-    """Import the runtime only when the probe runs; reject a wrong distribution."""
-    try:
-        from midojo import evaluation_handle
-        from midojo.control_plane.routers.runs import snapshot_response
-        from midojo.delivery import delivery_facts, exposure
-        from midojo.injection_spec import InjectionSpec
-        from midojo.injection_spec_document import (
-            InjectionSpecDocumentError,
-            SUPPORTED_DOCUMENT_VERSIONS,
-            UnsupportedDocumentVersion,
-        )
-        from midojo.interception_host import RemoteInterception
-        from midojo.runtimes import runtime_capabilities
-    except ModuleNotFoundError as exc:
-        if exc.name == "midojo":
-            raise ConfigFailure(_EXTRA_HINT) from exc
-        raise ConfigFailure(_WRONG_PACKAGE) from exc
-    except ImportError as exc:
-        raise ConfigFailure(_WRONG_PACKAGE) from exc
-    return SimpleNamespace(
-        evaluation_handle=evaluation_handle,
-        snapshot_response=snapshot_response,
-        delivery_facts=delivery_facts,
-        exposure=exposure,
-        InjectionSpec=InjectionSpec,
-        InjectionSpecDocumentError=InjectionSpecDocumentError,
-        SUPPORTED_DOCUMENT_VERSIONS=SUPPORTED_DOCUMENT_VERSIONS,
-        UnsupportedDocumentVersion=UnsupportedDocumentVersion,
-        RemoteInterception=RemoteInterception,
-        runtime_capabilities=runtime_capabilities,
-    )
 
 
 def plain(value: Any) -> Any:
@@ -130,29 +124,60 @@ class InjectionSpecEntry:
     condition: Any
 
 
+@dataclass
+class _Chain:
+    """One live chain: its scope, what it last heard and the deadline that bounds it."""
+
+    entry: InjectionSpecEntry
+    evaluation_id: str
+    stack: contextlib.ExitStack
+    scope: Any
+    reply: str = ""
+    failure: str | None = None
+    timer: threading.Timer | None = None
+    expired: threading.Event = field(default_factory=threading.Event)
+
+    def stop_deadline(self):
+        if self.timer is not None:
+            self.timer.cancel()
+
+
+class _Sealed(NamedTuple):
+    """What closing one chain left: its snapshot, how its release went, and why it has none."""
+
+    snapshot: Any
+    release_error: str | None
+    cleanup_failures: list
+    error: str | None
+
+
 class InjectionSpecProbe(garak.probes.IterativeProbe):
-    """Drive one MiDojo injection spec per serial chain.
+    """Drive one injection spec per serial chain.
 
     The source is a JSON or JSONL file of entries with an ``injection_spec``
     document and optional ``metadata``. Its turns become one request apiece;
     later turns carry real earlier replies. The authored plan is never rewritten.
     Failed or unfinished turns end their chain; tool-only turns can continue.
-    Every handle closes after sealing, including when an exception interrupts
-    the run. The target needs a Responses-style generator that accepts MCP tools
-    from conversation notes and records response status and tool calls.
+    Every chain is released after sealing, including when an exception
+    interrupts the run, and a chain cut short seals with its calls, turns and
+    agent output marked incomplete. The run coordinator takes the injector
+    (``plugins.injector_type``, default ``mim``) and the environment
+    (``plugins.environment_type``, default ``unmanaged``) from the plugin
+    configuration. The target needs a Responses-style generator that accepts MCP
+    tools from conversation notes and records response status and tool calls.
     """
 
-    extra_dependency_names = ["midojo"]
-    _unsafe_attributes = ["_midojo", "entries"]
+    extra_dependency_names = ["midojo_spec"]
+    _unsafe_attributes = ["entries"]
 
     source_path: str | None
     upstream: str | None
-    interceptor_url: str | None
-    interceptor_credential: str | None
     repeats: int
+    chain_timeout: float | None
+    turn_timeout: float
 
     lang = "en"
-    goal = "elicit harmful behaviour through an injected MiDojo injection spec"
+    goal = "elicit harmful behaviour through an injected injection spec"
     doc_uri = "https://genai.owasp.org/llmrisk/llm01-prompt-injection/"
     intent = "T009indirect"
     active = False
@@ -168,9 +193,9 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
     DEFAULT_PARAMS = garak.probes.IterativeProbe.DEFAULT_PARAMS | {
         "source_path": "injection/example_injection_spec.json",
         "upstream": None,
-        "interceptor_url": None,
-        "interceptor_credential": None,
         "repeats": 1,
+        "chain_timeout": None,
+        "turn_timeout": 60,
         "end_condition": "verify",
         "follow_prompt_cap": False,
     }
@@ -178,24 +203,15 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
     def __init__(self, config_root=_config):
         invalid_end_condition = False
         try:
-            importlib.import_module("midojo")
-        except ModuleNotFoundError as exc:
-            if exc.name == "midojo":
-                raise ConfigFailure(_EXTRA_HINT) from exc
-            raise ConfigFailure(_WRONG_PACKAGE) from exc
-        try:
             super().__init__(config_root=config_root)
-        except ModuleNotFoundError as exc:
-            raise ConfigFailure(_WRONG_PACKAGE) from exc
         except ValueError:
             invalid_end_condition = True
         if invalid_end_condition:
             raise ConfigFailure(
                 f"{self.__class__.__name__}: end_condition must be detector or verify"
             ) from None
-        self._load_unsafe()
-        self._refuse_partial_interceptor()
-        self._validate_upstream()
+        self._config_root = None if config_root is _config else config_root
+        self._check_options()
         invalid_source = False
         if type(self.source_path) is not str or not self.source_path.strip():
             invalid_source = True
@@ -216,29 +232,108 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
             raise ConfigFailure(f"{self.__class__.__name__}: source has no entries")
         self.generations = 1
         self.parallel_attempts = 1
-        self._chains = len(self.entries) * self.repeats
         self.max_calls_per_conv = (
             sum(len(entry.injection_spec.turns) for entry in self.entries)
             * self.repeats
         )
-        self._refuse_unreset_repeats()
-        self._handles = {}
+        self._reset_state()
+
+    def _reset_state(self):
+        self._coordinator = None
+        self._live = {}
+        self._opening = {}
+        self._presented = []
         self._chain_secrets = {}
         self._last_processed = {}
         self._next_attempts = {}
-        self._pending_starts = list(range(self._chains))
+        self._pending_starts = list(range(len(self.entries) * self.repeats))
         self._sealed = set()
+        self._refusal = None
 
     def _load_unsafe(self):
-        """Restore the runtime imports and documents after unpickling."""
-        self._midojo = _midojo()
+        """Restore the documents after unpickling."""
         self.entries = [
             self._read_entry(entry) for entry in getattr(self, "_entry_documents", [])
         ]
 
+    def _check_options(self):
+        """Refuse an option that moved or holds the wrong kind of value, without echoing it."""
+        self._refuse_moved_options()
+        self._validate_options()
+
+    def _refuse_moved_options(self):
+        given = [old for old in MOVED_OPTIONS if hasattr(self, old)]
+        if given:
+            raise ConfigFailure(
+                f"{self.__class__.__name__}: {', '.join(given)} no longer "
+                "configure this probe; set "
+                f"{', '.join(MOVED_OPTIONS[old] for old in given)} for the "
+                "injector (or the MIDOJO_INTERCEPTOR_URL and "
+                "MIDOJO_INTERCEPTOR_CREDENTIAL environment variables)"
+            )
+
+    def _validate_options(self):
+        owner = self.__class__.__name__
+        if type(self.repeats) is not int or self.repeats < 1:
+            raise ConfigFailure(f"{owner}: repeats must be a positive integer")
+        for name, optional in (("chain_timeout", True), ("turn_timeout", False)):
+            value = getattr(self, name)
+            if value is None and optional:
+                continue
+            if (
+                type(value) not in (int, float)
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                raise ConfigFailure(
+                    f"{owner}: {name} must be a finite positive number of seconds"
+                    + (" or null" if optional else "")
+                )
+        if self.upstream is not None:
+            self._check_upstream(self.upstream, "upstream")
+
+    def _check_upstream(self, url, where):
+        valid = False
+        if (
+            type(url) is str
+            and url
+            and not any(
+                char.isspace() or ord(char) < 32 or ord(char) == 127 for char in url
+            )
+        ):
+            try:
+                parsed = urlsplit(url)
+                valid = (
+                    parsed.scheme in ("http", "https")
+                    and bool(parsed.hostname)
+                    and parsed.port != 0
+                    and parsed.username is None
+                    and parsed.password is None
+                )
+            except ValueError:
+                pass
+        if not valid:
+            raise ConfigFailure(
+                f"{self.__class__.__name__}: {where} must be an HTTP(S) URL "
+                "with a host and no user info"
+            ) from None
+
+    def _upstream(self, spec):
+        """The endpoint the injector forwards to: the option, else the document's own."""
+        if self.upstream is not None:
+            return self.upstream
+        url = spec.interception.upstream
+        if url is None:
+            raise ConfigFailure(
+                f"{self.__class__.__name__}: no upstream to intercept; set upstream "
+                "or the document's interception.upstream"
+            )
+        self._check_upstream(url, "the document's interception.upstream")
+        return url
+
     def _read_entry(self, entry: dict) -> InjectionSpecEntry:
         document = entry[INJECTION_SPEC_KEY]
-        supported = ", ".join(self._midojo.SUPPORTED_DOCUMENT_VERSIONS)
+        supported = ", ".join(SUPPORTED_DOCUMENT_VERSIONS)
         if isinstance(document, Mapping):
             if "schema_version" not in document:
                 raise ConfigFailure(
@@ -253,8 +348,8 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
         self._admit_payloads(document)
         refusal = None
         try:
-            spec = self._midojo.InjectionSpec.from_document(document)
-        except self._midojo.UnsupportedDocumentVersion as exc:
+            spec = InjectionSpec.from_document(document)
+        except UnsupportedDocumentVersion as exc:
             version = repr(exc.version[:80])[:96]
             if len(exc.version) > 80:
                 version += "..."
@@ -262,7 +357,7 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
                 f"{self.__class__.__name__}: injection-spec document version "
                 f"{version} is not supported; supported: {supported}"
             )
-        except (self._midojo.InjectionSpecDocumentError, ValueError) as exc:
+        except (InjectionSpecDocumentError, ValueError) as exc:
             refusal = (
                 f"{self.__class__.__name__}: injection-spec document refused: {exc}"
             )
@@ -284,7 +379,7 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
 
     @staticmethod
     def _admit_payloads(document):
-        """Refuse unsafe plan payloads before a handle opens or payloads reach logs."""
+        """Refuse unsafe plan payloads before a chain opens or payloads reach logs."""
         plan = document.get("plan") if isinstance(document, dict) else None
         instructions = plan.get("instructions") if isinstance(plan, dict) else None
         if not isinstance(instructions, list):
@@ -309,127 +404,58 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
                     f"the {MAX_PAYLOAD_BYTES}-byte payload cap"
                 )
 
-    def _refuse_unreset_repeats(self):
-        if self.repeats <= 1:
-            return
-        for entry in self.entries:
-            capabilities = self._midojo.runtime_capabilities(
-                entry.injection_spec.runtime
-            )
-            if not capabilities.isolates_attempts:
-                raise ConfigFailure(
-                    f"{self.__class__.__name__}: repeats needs a "
-                    f"resettable or disposable runtime; {capabilities.name!r} is neither"
-                )
+    def _new_evaluation_id(self) -> str:
+        """An opaque name for one chain's evaluation."""
+        return uuid.uuid4().hex
 
-    def _refuse_partial_interceptor(self):
-        if (self.interceptor_url is None) != (self.interceptor_credential is None):
-            missing = (
-                "interceptor_url"
-                if self.interceptor_url is None
-                else "interceptor_credential"
-            )
-            raise ConfigFailure(
-                f"{self.__class__.__name__}: remote interception needs both "
-                f"interceptor_url and interceptor_credential; {missing} is missing"
-            )
-        self._validate_interceptor_options()
+    def _new_collector(self, evaluation_id: str, spec) -> Collector:
+        """The collector one chain records into: the document's provenance, no modelled environment."""
+        return Collector(
+            evaluation_id,
+            user_task_id=spec.user_task_id,
+            injection_task_id=spec.injection_task_id,
+            interception=spec.interception.mode,
+            pre_environment={},
+        )
 
-    def _validate_interceptor_options(self):
-        self._validate_remote_pair(self.interceptor_url, self.interceptor_credential)
+    def _collector_for(self, evaluation_id: str) -> Collector:
+        return self._new_collector(evaluation_id, self._opening[evaluation_id])
 
-    def _validate_remote_pair(self, url, credential):
-        if url is None and credential is None:
-            return
-        if (
-            type(credential) is not str
-            or not credential.strip()
-            or any(ord(char) < 32 or ord(char) == 127 for char in credential)
-        ):
-            raise ConfigFailure(
-                f"{self.__class__.__name__}: interceptor_credential "
-                "must be a non-empty string"
-            )
-        valid = False
-        if (
-            type(url) is str
-            and url
-            and not any(
-                char.isspace() or ord(char) < 32 or ord(char) == 127 for char in url
-            )
-        ):
-            try:
-                parsed = urlsplit(url)
-                valid = (
-                    parsed.scheme in ("http", "https", "ws", "wss")
-                    and bool(parsed.hostname)
-                    and parsed.port != 0
-                    and parsed.username is None
-                    and parsed.password is None
-                    and not parsed.query
-                    and not parsed.fragment
-                )
-            except ValueError:
-                valid = False
-        if not valid:
-            raise ConfigFailure(
-                f"{self.__class__.__name__}: interceptor_url must be a "
-                "non-empty HTTP(S) or WS(S) URL without user info, query or fragment"
-            )
+    @staticmethod
+    def _tool_block(block) -> dict:
+        """The tool block a Responses-style target takes for the chain's endpoint."""
+        return {
+            "type": "mcp",
+            "server_label": "midojo",
+            "server_url": block.tool_url,
+            "authorization": block.tool_token,
+            "require_approval": "never",
+            "allowed_tools": list(block.tools),
+        }
 
-    def _validate_upstream(self):
-        url = self.upstream
-        if not isinstance(url, str):
-            return
-        valid = False
-        if url and not any(
-            char.isspace() or ord(char) < 32 or ord(char) == 127 for char in url
-        ):
-            try:
-                parsed = urlsplit(url)
-                valid = (
-                    parsed.scheme in ("http", "https")
-                    and bool(parsed.hostname)
-                    and parsed.port != 0
-                    and parsed.username is None
-                    and parsed.password is None
-                )
-            except ValueError:
-                pass
-        if not valid:
-            raise ConfigFailure(
-                f"{self.__class__.__name__}: upstream must be an HTTP(S) URL "
-                "with a host and no user info"
-            ) from None
+    def _presented_credential(self):
+        """The credential the injector presents to its service, if one is set."""
+        injector = getattr(self._coordinator, "injector", None)
+        configured = getattr(injector, "bind_credential", None)
+        if configured:
+            return configured
+        return os.environ.get("MIDOJO_INTERCEPTOR_CREDENTIAL")
 
-    def _interception_option(self):
-        self._refuse_partial_interceptor()
-        if self.interceptor_url is None:
-            from midojo_spec.link import CREDENTIAL_ENV, URL_ENV
+    def _sample_credential(self):
+        """Remember a presented credential: the environment can change before a trace comes back."""
+        value = self._presented_credential()
+        if isinstance(value, str) and value.strip() and value not in self._presented:
+            self._presented.append(value)
 
-            url, credential = os.environ.get(URL_ENV), os.environ.get(CREDENTIAL_ENV)
-            if (url is None) != (credential is None):
-                raise ConfigFailure(
-                    f"{self.__class__.__name__}: remote interception environment "
-                    "needs both interceptor_url and interceptor_credential"
-                ) from None
-            if url is not None:
-                # Apply the same admission without keeping environment secrets on the probe.
-                self._validate_remote_pair(url, credential)
-            return {}
-        self._validate_remote_pair(self.interceptor_url, self.interceptor_credential)
-        interception = None
-        try:
-            interception = self._midojo.RemoteInterception(
-                self.interceptor_url, self.interceptor_credential
-            )
-        except (TypeError, ValueError):
-            pass
-        if interception is None:
-            raise ConfigFailure(
-                f"{self.__class__.__name__}: remote interceptor options are invalid"
-            ) from None
-        return {"interception": interception}
+    def _refuse(self, reason: str, secrets=()):
+        """Stop the run for ``reason``; the iterative base only logs what is raised in its loop.
+
+        An injector's refusal is its own text, which can repeat what it was handed,
+        so the reason leaves with every credential the probe knows masked.
+        """
+        reason = scrub_secrets(reason, [*self._presented, *secrets])
+        self._refusal = f"{self.__class__.__name__}: {reason}"
+        raise ConfigFailure(self._refusal)
 
     def _start_chain(self, chain: int) -> garak.attempt.Attempt:
         if self.end_condition not in ("detector", "verify"):
@@ -438,37 +464,70 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
             )
         entry = self.entries[chain // self.repeats]
         repeat = chain % self.repeats
-        self._validate_upstream()
-        handle = None
-        presented = self._presented_credential()
+        spec = entry.injection_spec
+        upstream = self._upstream(spec)
+        evaluation_id = self._new_evaluation_id()
+        self._sample_credential()
+        scope = self._coordinator.chain(
+            evaluation_id,
+            upstream_url=upstream,
+            plan=spec.plan,
+            policy=spec.tools,
+            repeated=repeat > 0,
+            reset=repeat > 0,
+        )
+        stack = contextlib.ExitStack()
+        self._opening[evaluation_id] = spec
+        refusal = None
         try:
-            handle = self._midojo.evaluation_handle.open(
-                entry.injection_spec,
-                upstream=self.upstream,
-                reset=repeat > 0,
-                **self._interception_option(),
+            stack.enter_context(scope)
+        except (*_CLOSURE_ERRORS, TypeError) as exc:
+            # only a capability refusal's text is the injector's own; any other
+            # error can carry what the injector was handed, so it is named by type
+            refusal = str(exc) if type(exc) is CapabilityError else type(exc).__name__
+        finally:
+            self._opening.pop(evaluation_id, None)
+        if refusal is not None:
+            self._sample_credential()
+            block = scope.tool_block
+            self._refuse(
+                f"evaluation could not open: {refusal}",
+                () if block is None else credential_values(self._tool_block(block)),
             )
-        except self._midojo.InjectionSpecDocumentError:
-            raise ConfigFailure(
-                f"{self.__class__.__name__}: no upstream to intercept"
-            ) from None
-        except (TypeError, ValueError):
-            pass
-        if handle is None:
-            raise ConfigFailure(
-                f"{self.__class__.__name__}: evaluation could not open"
-            ) from None
-        self._handles[chain] = handle
+        if scope.tool_block is None:
+            stack.close()
+            self._refuse("the injector gave no tool endpoint")
         # what the chain presented is fixed here: the environment can change
         # before the trace comes back, and the service echoes what it received.
         # The credential is sampled on both sides of the open, which reads it.
+        self._sample_credential()
         self._chain_secrets[chain] = [
-            *credential_values(handle.tool_block()),
-            presented,
-            self._presented_credential(),
+            *credential_values(self._tool_block(scope.tool_block)),
+            *self._presented,
         ]
-        handle.start_turn(entry.injection_spec.turns[0])
-        return self._turn_attempt(chain, 0, [], handle)
+        state = _Chain(entry, evaluation_id, stack, scope)
+        self._live[chain] = state
+        self._arm_deadline(state)
+        return self._turn_attempt(chain, 0, [], state)
+
+    def _arm_deadline(self, state: _Chain):
+        if self.chain_timeout is None:
+            return
+        state.timer = threading.Timer(self.chain_timeout, self._expire, args=(state,))
+        state.timer.daemon = True
+        state.timer.start()
+
+    def _expire(self, state: _Chain):
+        """Close a chain whose deadline passed; its turn in flight ends when the target returns."""
+        state.expired.set()
+        try:
+            state.scope.cancel("deadline")
+        except _CLOSURE_ERRORS as exc:
+            logging.warning(
+                "%s: chain deadline closure failed: %s",
+                self.__class__.__name__,
+                type(exc).__name__,
+            )
 
     def _create_init_attempts(self) -> Iterable[garak.attempt.Attempt]:
         return [self._start_chain(self._pending_starts.pop(0))]
@@ -481,9 +540,11 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
             return [self._start_chain(self._pending_starts.pop(0))]
         return []
 
-    def _turn_attempt(self, chain: int, index: int, earlier: list, handle):
-        entry = self.entries[chain // self.repeats]
-        notes = {"tools": [redact_credentials(handle.tool_block())]}
+    def _turn_attempt(self, chain: int, index: int, earlier: list, state: _Chain):
+        entry = state.entry
+        notes = {
+            "tools": [redact_credentials(self._tool_block(state.scope.tool_block))]
+        }
         if entry.condition is not None:
             notes[CONDITION_NOTE] = copy.deepcopy(entry.condition)
         user = garak.attempt.Turn(
@@ -503,18 +564,39 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
         return attempt
 
     def _execute_attempt(self, this_attempt):
-        """Give the generator the live block without putting it on a report-bound attempt."""
+        """Run one turn in its scope, giving the generator the live block off the report-bound attempt."""
+        note = this_attempt.notes[CHAIN_NOTE]
+        state = self._live[note["chain"]]
         self._generator_precall_hook(self.generator, this_attempt)
         request = copy.deepcopy(this_attempt.prompt)
-        chain = this_attempt.notes[CHAIN_NOTE]["chain"]
-        request.notes["tools"] = [self._handles[chain].tool_block()]
-        this_attempt.outputs = self.generator.generate(
-            request, generations_this_call=self.generations
-        )
-        if self.post_buff_hook:
-            this_attempt = self._postprocess_buff(this_attempt)
-        this_attempt = self._postprocess_hook(this_attempt)
-        self._generator_cleanup()
+        request.notes["tools"] = [self._tool_block(state.scope.tool_block)]
+        state.reply = ""
+        try:
+            with state.scope.turn(
+                state.entry.injection_spec.turns[note["turn"]]
+            ) as turn:
+                this_attempt.outputs = self.generator.generate(
+                    request, generations_this_call=self.generations
+                )
+                if self.post_buff_hook:
+                    this_attempt = self._postprocess_buff(this_attempt)
+                this_attempt = self._postprocess_hook(this_attempt)
+                self._generator_cleanup()
+                output = this_attempt.outputs[0] if this_attempt.outputs else None
+                if output is not None:
+                    reply = output.text or ""
+                    turn.reply(reply)
+                    state.reply = reply
+        except (TurnTimeout, RejectedError, RuntimeError) as exc:
+            # a call the target makes after the turn's deadline is refused by the
+            # closed chain, so the deadline's record names the cause
+            failed = state.scope.result["failed_turn"] or {}
+            if isinstance(exc, TurnTimeout) or failed.get("kind") == "timeout":
+                state.failure = "TurnTimeout"
+            elif state.expired.is_set() or state.scope.closed:
+                state.failure = "ChainTimeout"
+            else:
+                raise
         return copy.deepcopy(this_attempt)
 
     @staticmethod
@@ -533,51 +615,87 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
         return processed
 
     def _advance_chain(self, attempt):
-        state = attempt.notes[CHAIN_NOTE]
-        chain, index = state["chain"], state["turn"]
-        handle = self._handles[chain]
-        entry = self.entries[chain // self.repeats]
+        note = attempt.notes[CHAIN_NOTE]
+        chain, index = note["chain"], note["turn"]
+        state = self._live[chain]
         output = attempt.outputs[0] if attempt.outputs else None
-        if output is not None and not handle.closed and not handle.sealed:
-            handle.record_reply(index, output.text or "")
-        failure = self._turn_failure(output)
-        if failure is None and not state["final"]:
+        failure = state.failure or self._turn_failure(output)
+        if failure is None and state.expired.is_set():
+            failure = "ChainTimeout"
+        if failure is None and not note["final"]:
             earlier = copy.deepcopy(attempt.prompt.turns)
             if output is not None and output.text:
                 earlier.append(
                     garak.attempt.Turn("assistant", garak.attempt.Message(output.text))
                 )
-            handle.start_turn(entry.injection_spec.turns[index + 1])
             self._next_attempts[chain] = [
-                self._turn_attempt(chain, index + 1, earlier, handle)
+                self._turn_attempt(chain, index + 1, earlier, state)
             ]
             return None
-        state["final"] = True
+        note["final"] = True
         self._sealed.add(chain)
-        try:
-            trace = self._seal_trace(handle, entry.injection_spec.plan)
-        finally:
-            release_error = self._close_handle(chain)
-        if release_error is not None:
-            trace["release_error"] = release_error
+        sealed = self._finish_chain(chain, state, CUT_SHORT if failure else ())
+        if sealed.snapshot is None:
+            trace = self._empty_trace(state, "final", sealed.error)
+        else:
+            trace = self._trace(
+                state,
+                sealed.snapshot,
+                sealed="final",
+                plan=state.entry.injection_spec.plan,
+            )
+        trace["release_error"] = sealed.release_error
+        trace["cleanup_failures"] = sealed.cleanup_failures
         if failure is not None:
             trace["error"] = failure
             trace["response_status"] = "incomplete"
         return trace
 
-    def _seal_trace(self, handle, plan):
-        return self._trace(handle, handle.seal(), sealed="final", plan=plan)
+    def _finish_chain(self, chain: int, state: _Chain, incomplete: tuple) -> _Sealed:
+        """Release and seal one chain: what it left, however its release went."""
+        snapshot, error = None, None
+        try:
+            snapshot = state.scope.seal(state.reply, incomplete=incomplete)
+        except _CLOSURE_ERRORS as exc:
+            snapshot = state.scope.result["snapshot"]
+            error = type(exc).__name__
+        finally:
+            state.stop_deadline()
+            self._live.pop(chain, None)
+        try:
+            state.stack.close()
+        except _CLOSURE_ERRORS:
+            logging.warning(
+                "%s: couldn't close chain %d", self.__class__.__name__, chain
+            )
+        cleanup = list(state.scope.result["cleanup_failures"])
+        release_error = None
+        if "CapabilityError" in cleanup:
+            from midojo_spec.link import LINK_LOST_REASON
 
-    def _trace(self, handle, snapshot, *, sealed: str, plan=None):
+            release_error = LINK_LOST_REASON
+        return _Sealed(snapshot, release_error, cleanup, error or "NoSnapshot")
+
+    def _values(self, spec, snapshot):
+        """The trace's snapshot and verdict, or the refusal that left one out."""
+        try:
+            value = snapshot_value(snapshot)
+        except TraceRefused as exc:
+            return None, None, type(exc).__name__
+        try:
+            return value, grade_sealed(spec, snapshot).to_document(), None
+        except GradingRefused as exc:
+            return value, None, type(exc).__name__
+
+    def _trace(self, state, snapshot, *, sealed: str, plan=None):
         """Describe the sealed snapshot, with its delivery and exposure facts."""
-        verdict = handle.grade()
-        served = self._midojo.snapshot_response(snapshot).model_dump(mode="json")
+        value, verdict, error = self._values(state.entry.injection_spec, snapshot)
         complete = self._capture_complete(snapshot)
         calls = [
             {
                 "call_id": call.call_id,
                 "name": call.function,
-                "arguments": copy.deepcopy(call.args),
+                "arguments": plain(call.args),
                 "result": call.result,
                 "error": call.error,
                 "blocked": call.blocked,
@@ -587,43 +705,64 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
             }
             for call in snapshot.function_calls
         ]
+        delivered = ((verdict or {}).get("grade") or {}).get("injection_delivered")
         return {
-            "evaluation_id": handle.evaluation_id,
+            "evaluation_id": state.evaluation_id,
             "snapshot_id": snapshot.snapshot_id,
-            "snapshot": served,
-            "verdict": verdict.to_document(),
+            "snapshot": value,
+            "verdict": verdict,
             "capture_complete": complete,
             "sealed": sealed,
             "failure": None,
-            "error": None,
+            "error": error,
             "release_error": None,
+            "cleanup_failures": [],
             "tool_calls": calls,
             "delivery": self._delivery(plan, snapshot),
             "exposure": self._exposure(plan, snapshot),
             "response_status": (
-                "completed"
-                if complete and verdict.grade.injection_delivered is True
-                else "incomplete"
+                "completed" if complete and delivered is True else "incomplete"
             ),
         }
 
-    def _delivery(self, plan, snapshot):
+    @staticmethod
+    def _empty_trace(state, sealed: str, error: str):
+        """The trace of a chain that left no snapshot to describe."""
+        return {
+            "evaluation_id": state.evaluation_id,
+            "snapshot_id": None,
+            "snapshot": None,
+            "verdict": None,
+            "capture_complete": False,
+            "sealed": sealed,
+            "failure": None,
+            "error": error,
+            "release_error": None,
+            "cleanup_failures": [],
+            "tool_calls": [],
+            "delivery": None,
+            "exposure": None,
+            "response_status": "incomplete",
+        }
+
+    @staticmethod
+    def _delivery(plan, snapshot):
         if plan is None:
             return None
         return [
-            fact.model_dump(mode="json")
-            for fact in self._midojo.delivery_facts(plan, snapshot.function_calls)
+            fact.to_json() for fact in delivery_facts(plan, snapshot.function_calls)
         ]
 
-    def _exposure(self, plan, snapshot):
+    @staticmethod
+    def _exposure(plan, snapshot):
         if plan is None:
             return None
-        return self._midojo.exposure(
+        return exposure(
             plan,
             snapshot.function_calls,
             turns=len(snapshot.turns),
             evidence_status=snapshot.evidence_status,
-        ).model_dump(mode="json")
+        ).to_json()
 
     @staticmethod
     def _capture_complete(snapshot):
@@ -643,18 +782,10 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
 
         A trace holds what the tools returned and what the service reported, and
         either can repeat a credential it received: the chain's tool bearer, or
-        the credential the probe presents to the service.
+        the credential the injector presents to the service.
         """
         chain = (attempt.notes.get(CHAIN_NOTE) or {}).get("chain")
         return [s for s in self._chain_secrets.get(chain, ()) if isinstance(s, str)]
-
-    def _presented_credential(self):
-        """Return the credential the probe presents to the interception service, if any."""
-        if self.interceptor_url is not None:
-            return self.interceptor_credential
-        from midojo_spec.link import CREDENTIAL_ENV
-
-        return os.environ.get(CREDENTIAL_ENV)
 
     def _attach_trace(self, attempt, trace):
         """Keep ``trace`` on the attempt, scrubbed once here of every credential it could hold."""
@@ -716,21 +847,78 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
                 garak.attempt.Turn("assistant", output)
             )
 
-    def probe(self, generator):
-        """Run every chain and close all handles even when a turn raises."""
-        self._handles = {}
-        self._chain_secrets = {}
-        self._last_processed = {}
-        self._next_attempts = {}
-        self._pending_starts = list(range(self._chains))
-        self._sealed = set()
+    def _refuse_repeats(self, environment):
+        """Refuse repeated chains against an environment that cannot isolate attempts."""
+        refusal = None
         try:
-            attempts = super().probe(generator)
-        finally:
-            try:
-                self._seal_interrupted()
-            finally:
-                self._close_handles()
+            environment.check_attempt(repeated=True)
+        except CapabilityError as exc:
+            refusal = str(exc)
+        if refusal is not None:
+            raise ConfigFailure(
+                f"{self.__class__.__name__}: repeats refused: {refusal}"
+            )
+
+    def probe(self, generator):
+        """Run every chain and release all of them even when a turn raises."""
+        self._check_options()
+        self._reset_state()
+        # a refusal inside the iterative base's loop is logged, not raised
+        for entry in self.entries:
+            self._upstream(entry.injection_spec)
+        request = ContextRequest(
+            injector="mim",
+            environment="unmanaged",
+            required_injector=INJECTOR_NEEDS,
+        )
+        unavailable = None
+        try:
+            injector, environment = select_components(
+                request, config_root=self._config_root
+            )
+        except (GarakException, ValueError) as exc:
+            unavailable = type(exc.__cause__ or exc).__name__
+        if unavailable is not None:
+            raise ConfigFailure(
+                f"{self.__class__.__name__}: the selected injector or environment "
+                f"could not load ({unavailable}); the default 'mim' injector needs "
+                "the 'midojo-mim' extra"
+            )
+        coordinator = RunCoordinator(
+            injector,
+            environment,
+            collector_factory=self._collector_for,
+            max_live=1,
+            turn_timeout=self.turn_timeout,
+            request=request,
+            generator=generator,
+        )
+        attempts = None
+        try:
+            with coordinator:
+                self._coordinator = coordinator
+                self._sample_credential()
+                try:
+                    if self.repeats > 1:
+                        self._refuse_repeats(environment)
+                    attempts = super().probe(generator)
+                finally:
+                    try:
+                        self._seal_interrupted()
+                    finally:
+                        for state in list(self._live.values()):
+                            state.stop_deadline()
+                        self._coordinator = None
+        except _CLOSURE_ERRORS as exc:
+            if attempts is None:
+                raise
+            logging.warning(
+                "%s: the injector run did not close cleanly: %s",
+                self.__class__.__name__,
+                type(exc).__name__,
+            )
+        if not attempts and self._refusal is not None:
+            raise ConfigFailure(self._refusal)
         return [
             attempt
             for attempt in attempts
@@ -738,57 +926,24 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
         ]
 
     def _seal_interrupted(self):
-        for chain, handle in list(self._handles.items()):
+        for chain, state in list(self._live.items()):
             if chain in self._sealed:
                 continue
+            self._sealed.add(chain)
             try:
-                release_error = self._close_handle(chain)
-                self._sealed.add(chain)
+                sealed = self._finish_chain(chain, state, CUT_SHORT)
                 attempt = self._last_processed.get(chain)
                 if attempt is None:
                     continue
-                trace = self._interrupted_trace(handle)
-                trace["release_error"] = release_error
+                if sealed.snapshot is None:
+                    trace = self._empty_trace(state, "interrupted", sealed.error)
+                else:
+                    trace = self._trace(state, sealed.snapshot, sealed="interrupted")
+                trace["release_error"] = sealed.release_error
+                trace["cleanup_failures"] = sealed.cleanup_failures
                 attempt.notes[CHAIN_NOTE]["final"] = True
                 self._attach_trace(attempt, trace)
             except (RuntimeError, ValueError):
                 logging.warning(
                     "InjectionSpecProbe: couldn't seal interrupted chain %d", chain
                 )
-
-    def _interrupted_trace(self, handle):
-        result = handle.result
-        snapshot = None if result is None else result.snapshot
-        if snapshot is None:
-            error = None if result is None else result.snapshot_error
-            return {
-                "evaluation_id": handle.evaluation_id,
-                "snapshot_id": None,
-                "snapshot": None,
-                "verdict": None,
-                "capture_complete": False,
-                "sealed": "interrupted",
-                "failure": None,
-                "error": type(error).__name__ if error is not None else "NoSnapshot",
-                "release_error": None,
-                "tool_calls": [],
-                "delivery": None,
-                "exposure": None,
-                "response_status": "incomplete",
-            }
-        return self._trace(handle, snapshot, sealed="interrupted")
-
-    def _close_handle(self, chain):
-        handle = self._handles.pop(chain, None)
-        if handle is None:
-            return None
-        try:
-            handle.close()
-        except (RuntimeError, ValueError):
-            logging.warning("InjectionSpecProbe: couldn't close chain %d", chain)
-        error = getattr(handle, "close_error", None)
-        return getattr(error, "reason", None)
-
-    def _close_handles(self):
-        for chain in list(self._handles):
-            self._close_handle(chain)

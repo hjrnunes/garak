@@ -18,7 +18,9 @@ CREDENTIAL_KEYS = frozenset(
         "interceptor_credential",
     }
 )
-PROBE_URL_KEYS = frozenset({"interceptor_url", "upstream"})
+# URL options whose user info is masked: the probe's upstream, the injector's
+# service, and the service's old name, which an old configuration still holds
+PROBE_URL_KEYS = frozenset({"interceptor_url", "service_url", "upstream"})
 
 
 def _redact_url_userinfo(value):
