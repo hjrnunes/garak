@@ -158,11 +158,7 @@ def _read_outcome(item: Any) -> _Outcome:
     slot = _recorded_slot(item.get("slot"))
     placed = (*digests, slot) != (None, None, None)
     if occurrence == 0 and (
-        status != "unmatched"
-        or selected
-        or transformation is not None
-        or emitted
-        or placed
+        status != "unmatched" or selected or transformation is not None or emitted
     ):
         raise ValueError("an uncounted outcome places nothing")
     if placed and status not in PLACED_STATUSES:

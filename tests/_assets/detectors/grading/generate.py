@@ -1533,6 +1533,12 @@ def build(runtime: dict[str, Any]) -> Corpus:
         "occurrence-zero-transformed": reshaped(unmatched, transformation="identity"),
         "occurrence-zero-emitted": reshaped(unmatched, emitted=["structured_content"]),
         "occurrence-zero-placed": reshaped(unmatched, payload_digest=slot["id"]),
+        "occurrence-zero-skipped": reshaped(unmatched, status="skipped_occurrence"),
+        "occurrence-zero-no-result": reshaped(unmatched, status="no_result"),
+        "slot-of-no-result": reshaped(outcome(status="no_result"), slot=slot),
+        "placed-digest-of-too-large": reshaped(
+            outcome(status="too_large"), placed_digest=placed["placed_digest"]
+        ),
         "placement-of-unmatched": reshaped(placed, status="unmatched", occurrence=1),
         "placement-of-no-result": reshaped(placed, status="no_result"),
         "placement-of-too-large": reshaped(placed, status="too_large"),
