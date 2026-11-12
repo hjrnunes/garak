@@ -237,10 +237,6 @@ dra = [
 ]
 midojo = ["midojo-spec>=0.1.0"]
 midojo-mim = ["midojo-mim>=0.1.0"]
-# Temporary: remove when the probe moves to the coordinator and components.
-# Never install from the package index: its plain midojo name is unrelated;
-# a trusted source pin must override it.
-midojo-runtime = ["midojo>=0.1.0; python_version >= '3.12'"]
 [project.urls]
 "Homepage" = "https://github.com/NVIDIA/garak"
 "Bug Tracker" = "https://github.com/NVIDIA/garak/issues"
