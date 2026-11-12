@@ -41,6 +41,46 @@ usable response for it.
 
    :doc:`cas` for running intent-based scans and interpreting per-intent results.
 
+Unscored outputs
+^^^^^^^^^^^^^^^^
+
+A detector scores an output with a number, or with ``None`` when it cannot.
+An unscored output is counted in ``nones`` and never enters ``total_evaluated``, the denominator of the attack success rate.
+``total_processed`` is the number of outputs the detector saw: ``total_evaluated`` plus ``nones``.
+
+A detector can say why it left outputs unscored by calling ``Detector.mark_unscored`` with a reason, and with ``not_applicable=True`` when the check does not apply to the output at all, such as an intermediate turn of a multi-turn attack.
+The ``eval`` entry, and the ``detection_counts`` of the ``probe_summary`` entry, then carry:
+
+* ``unscored_reasons``: each reason, with the number of outputs it explains
+* ``not_applicable``: how many of the ``nones`` were not applicable. The remaining ``nones`` are unknown: the detector could not decide.
+
+Both fields appear only when a detector gave a reason, so entries from other detectors are unchanged.
+The console prints an ``unscored:`` line under each detector that left outputs unscored.
+
+Evaluations whose injection was not delivered, or whose delivery was not recorded, stay out of the attack success denominator and are declared in ``unscored_reasons`` as ``not_delivered`` and ``unrecorded_delivery`` (see :doc:`detectors/midojo`).
+
+Utility results
+^^^^^^^^^^^^^^^
+
+A detector has a ``metric_kind``, either ``security`` (the default) or ``utility``.
+A score of 1.0 always means that the behaviour the detector looks for occurred.
+For a ``security`` detector that behaviour is a successful attack, and the score feeds the attack success rate.
+For a ``utility`` detector it is a legitimate task that was completed, and the score never reaches an attack success rate.
+
+The harness records a utility detector under ``attempt.notes["metric_kind"]``, so the kind stays in the report.
+The evaluator then writes a ``utility_eval`` entry instead of an ``eval`` entry:
+
+.. code-block:: json
+
+   {"entry_type": "utility_eval", "probe": "test.Blank", "detector": "midojo.TaskCompleted", "completed": 3, "not_completed": 1, "nones": 2, "total_evaluated": 4, "total_processed": 6}
+
+``completed`` counts the scores that the evaluator would call a hit.
+The entry has no ``passed``, ``fails``, ``hit_at_k`` or confidence fields, and a utility detector writes no hit log row.
+It carries ``not_applicable`` and ``unscored_reasons`` in the same way as an ``eval`` entry.
+The ``probe_summary`` entry gains ``utility_counts``, with the detectors, ``completed``, ``not_completed``, ``nones`` and the unscored fields, only when a utility detector ran. ``detection_counts`` never includes utility.
+The ``digest`` entry gains a ``utility`` section, keyed by probe and then by detector, with the counts and a ``score`` of ``completed / total_evaluated``, or ``null`` when no output was scored.
+A report without a utility detector has none of these entries or fields.
+
 Confidence Intervals (Optional)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

@@ -49,6 +49,13 @@ the effect detector, ``unrecorded_effect``. In particular, an invalid grade,
 an absent delivery fact and incomplete capture never score as resistance.
 Unknown delivery differs from a recorded ``False`` delivery fact.
 
+Each such record also calls ``mark_unscored`` with its reason, so the
+evaluator reports how many outputs each reason explains. ``intermediate_turn``
+counts as not applicable, and every other reason counts as unknown. An
+evaluation whose injection was not delivered, or whose delivery was not
+recorded, stays out of the attack success denominator and is declared under
+``not_delivered`` or ``unrecorded_delivery``; see :doc:`../reporting`.
+
 .. automodule:: garak.detectors.midojo
    :members:
    :undoc-members:
