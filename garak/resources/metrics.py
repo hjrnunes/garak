@@ -17,7 +17,7 @@ result cannot change an attack success rate.
 """
 
 import json
-from typing import Optional, Set, Tuple
+from typing import Optional, Tuple
 
 SECURITY = "security"
 UTILITY = "utility"
@@ -27,6 +27,11 @@ METRIC_KINDS = (SECURITY, UTILITY)
 # ``attempt.detector_results``, to what is known about that detector's results
 UNSCORED_NOTE = "unscored"  # {"reason": str, "not_applicable": bool}
 KIND_NOTE = "metric_kind"  # a metric kind; written only for a non-security kind
+_EVALUATION_ENTRIES = (
+    "eval",
+    "utility_eval",
+    "probe_summary",
+)  # written by the evaluator
 
 
 def _marks(attempt, note: str) -> dict:
@@ -125,30 +130,78 @@ def metric_kind(attempt, detector_name: str) -> str:
     return kind_in_notes(attempt.notes, detector_name)
 
 
-def utility_detectors_in_report(report_path: str) -> Set[Tuple[str, str]]:
-    """The probe and detector pairs that a report treats as utility
+class _EvaluationCounter:
+    """Numbers the evaluations of a report in the order that the report lists them
 
-    The evaluator reports a detector as utility for all the attempts of a probe
-    if any of them carries the utility mark. A tool that reads attempts one at a
-    time must ask this first, or it reads an attempt without the mark as an
-    attack.
+    A report lists the completed attempts of an evaluation, then the entries
+    that the evaluator wrote for it. The first completed attempt after such an
+    entry belongs to the next evaluation.
+    """
+
+    def __init__(self):
+        self.index = 0
+        self._evaluated = False
+
+    def see(self, record) -> None:
+        if not isinstance(record, dict):
+            return
+        entry_type = record.get("entry_type")
+        if entry_type in _EVALUATION_ENTRIES:
+            self._evaluated = True
+        elif entry_type == "attempt" and record.get("status") == 2 and self._evaluated:
+            self.index += 1
+            self._evaluated = False
+
+
+class UtilityScope:
+    """Which probe and detector pairs a report treats as utility, evaluation by evaluation
+
+    The evaluator reports a detector as utility for all the attempts it
+    evaluates together if any of them carries the utility mark. A tool that
+    reads a report one attempt at a time would read an attempt without the mark
+    as an attack, so it makes a scope before it reads, passes each record it
+    reads to :meth:`observe`, and asks :meth:`covers` about each completed
+    attempt. Evaluations of the same probe and detector, as an aggregate of runs
+    holds, stay apart.
 
     :param report_path: path of a report JSONL file
-    :returns: pairs of probe class name and detector name
+    :type report_path: str
     """
-    pairs = set()
-    with open(report_path, "r", encoding="utf-8") as report_file:
-        for line in report_file:
-            if KIND_NOTE not in line:  # no mark can be in the line
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(record, dict) or record.get("entry_type") != "attempt":
-                continue
-            results = record.get("detector_results")
-            for detector_name in results if isinstance(results, dict) else ():
-                if kind_in_notes(record.get("notes"), detector_name) == UTILITY:
-                    pairs.add((record.get("probe_classname"), detector_name))
-    return pairs
+
+    def __init__(self, report_path: str):
+        self._evaluations = []  # per evaluation, the (probe, detector) pairs marked
+        self._reading = _EvaluationCounter()
+        counter = _EvaluationCounter()
+        with open(report_path, "r", encoding="utf-8") as report_file:
+            for line in report_file:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                counter.see(record)
+                if not isinstance(record, dict):
+                    continue
+                if record.get("entry_type") != "attempt" or record.get("status") != 2:
+                    continue
+                results = record.get("detector_results")
+                for detector_name in results if isinstance(results, dict) else ():
+                    if kind_in_notes(record.get("notes"), detector_name) != UTILITY:
+                        continue
+                    while len(self._evaluations) <= counter.index:
+                        self._evaluations.append(set())
+                    self._evaluations[counter.index].add(
+                        (record.get("probe_classname"), detector_name)
+                    )
+
+    def observe(self, record) -> None:
+        """Note a record of the report that the tool has read, in report order"""
+        self._reading.see(record)
+
+    def covers(self, probe_classname: str, detector_name: str) -> bool:
+        """True if the evaluation that the observed records have reached treats
+        the detector as utility for the probe"""
+        index = self._reading.index
+        return (
+            index < len(self._evaluations)
+            and (probe_classname, detector_name) in self._evaluations[index]
+        )

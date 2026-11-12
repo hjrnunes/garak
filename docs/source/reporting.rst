@@ -68,7 +68,7 @@ For a ``security`` detector that behaviour is a successful attack, and the score
 For a ``utility`` detector it is a legitimate task that was completed, and the score never reaches an attack success rate.
 
 The harness records a utility detector under ``attempt.notes["metric_kind"]``, so the kind stays in the report, and a later run of the same detector as a security detector removes the record.
-If any attempt of a probe carries the record for a detector, the evaluator and the report tools treat that detector as utility for every attempt of the probe.
+If any completed attempt of an evaluation carries the record for a detector, the evaluator and the report tools treat that detector as utility for every attempt of that evaluation; the evaluations in an aggregated report stay apart.
 The evaluator then writes a ``utility_eval`` entry instead of an ``eval`` entry:
 
 .. code-block:: json

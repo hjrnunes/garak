@@ -23,7 +23,7 @@ def analyze_log(report_path: str) -> None:
     completed_attempt_uuids = set([])
 
     current_probe_classname = None
-    utility_detectors = garak.resources.metrics.utility_detectors_in_report(report_path)
+    utility = garak.resources.metrics.UtilityScope(report_path)
 
     with open(report_path, "r", encoding="utf-8") as reportfile:
         for _, line in enumerate(reportfile):
@@ -38,6 +38,8 @@ def analyze_log(report_path: str) -> None:
 
             if "entry_type" not in record.keys():
                 continue
+
+            utility.observe(record)
 
             if record["entry_type"] in ("config", "init"):
                 print("##", line)
@@ -59,7 +61,7 @@ def analyze_log(report_path: str) -> None:
                 for detector_name, detector_scores in record[
                     "detector_results"
                 ].items():
-                    if (current_probe_classname, detector_name) in utility_detectors:
+                    if utility.covers(current_probe_classname, detector_name):
                         continue  # a completed task is not a hit
                     normalised_scores = [
                         1 if i >= 0.5 else 0 for i in detector_scores if i is not None
