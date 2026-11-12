@@ -25,13 +25,49 @@ security check looks for, whether a refusal ``blocked`` the attempt, whether the
 effect was observed on the calls that ran to their end, and whether the plan's
 payload was delivered. Each is True, False or None.
 
+A ``reply_judge`` check asks a judge service whether the agent's reply supports
+a claim, so its grade is the service's answer as well as the snapshot's, and
+grading the same snapshot again may give another grade. The check names the
+service by ``url`` or by the environment variable ``url_env`` that holds it, and
+a bearer token only by the variable ``token_env`` that holds it: a literal token
+in a document is refused. The service's verdict ``supported`` makes the check
+True, ``contradicted`` makes it False, and every other outcome makes it unknown,
+never False: no URL or token in the environment, a service that cannot be
+reached or times out, a status other than 2xx, or an answer that is not a valid
+``midojo.judge.v1`` response. The reason names why, without any text the service
+sent. The check asks once for each distinct request in a grading, and the
+token goes only into the request's ``Authorization`` header: no record or
+reason of the grade holds it, nor does any text the service echoes back. The
+one place it can appear is the request itself, which carries the reply it judges
+and is recorded as sent (its id is a digest of it): a token the agent's own
+reply holds stays in the sealed snapshot and in the request alike, as in the
+runtime. An answer in a ``gzip`` or ``deflate`` coding is decoded, and no answer,
+coded or decoded, is read past 8 MiB. An answer in any other coding, ``br`` and
+``zstd`` among them, is not read, whatever its bytes are: the check is unknown,
+the reason says the answer is in a coding the check does not decode, and the
+record keeps the status the answer came with.
+
+A grade a judge took part in lists what each check asked and was answered in
+``judgements``: the request body, the service's endpoint, the HTTP status, the
+verdict, rationale and model, or why the check is unknown. A grade no judge took
+part in has no such member. Pass those records back as ``judgements`` with the
+``judge_model`` and ``judge_prompt_version`` they were answered under, or a ready
+``RecordedJudge``, to grade again offline: each request is answered by the
+record with its id and that identity, no service is asked, and a request no
+record answers is unknown.
+
 The grader refuses, and writes no verdict, when it cannot grade what it is
 given. ``DocumentRefused`` carries the reader's refusal: a member the document
-does not define or that is malformed, a check it cannot read, an OpenShell
-predicate, a runtime other than ``unmanaged``, a ``reply_judge`` check and a plan
-that does not decode. ``EvidenceRefused`` covers a snapshot whose digest no
-longer matches, an environment field a check reads that the snapshot lacks, and
-a malformed delivery fact.
+does not define or that is malformed, a check it cannot read (a ``reply_judge``
+check with a setting it does not define included), an OpenShell predicate, a
+runtime other than ``unmanaged`` and a plan that does not decode.
+``EvidenceRefused`` covers a snapshot whose digest no longer matches, an
+environment field a check reads that the snapshot lacks, and a malformed
+delivery fact. ``GradingRefused`` alone covers ``judgements`` records that are
+not those of a grade, such as one whose request is not the request its
+``request_id`` names, one whose request the schema does not allow, and one that
+answers an id alone: an answer is kept only with the request it answered, which
+a request id, printed in the reason of a grade, does not stand for.
 
 The grader's checks are held to byte-identical verdicts on a corpus the
 runtime graded, kept under ``tests/_assets/detectors/grading`` with the

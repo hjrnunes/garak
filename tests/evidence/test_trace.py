@@ -8,14 +8,20 @@ inconclusive vectors, the consumer's injected-agent fixtures
 (``tests/_assets/evidence/consumer_ipi``) and the snapshots in the grading
 corpus. Each file holds the value the MiDojo runtime served or wrote, so the
 comparison needs no runtime. Two of the thirteen sealed documents hold a reply
-judge check, which the reader refuses until the reply judge lands: their
-verdicts are expected failures that name that refusal.
+judge check. The vector's verdict is the one graded with no judge service to
+ask. The consumer fixture's is the one the runtime graded again from the
+recorded judgement of a scripted service, with its endpoint scrubbed. That
+record names no prompt version, so no judge identity replays it: a scripted
+service gives the same answer, and the verdicts match but for that endpoint.
 """
 
+import contextlib
 import copy
 import hashlib
 import json
+import threading
 from functools import lru_cache
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -41,13 +47,45 @@ CONSUMER_CASES = [
     "sequential",
     "undelivered",
 ]
-REPLY_JUDGED = {("vector", "security-unknown"), ("consumer", "reply-judged")}
+SCRIPTED_JUDGE = ("consumer", "reply-judged")
 
-YET = pytest.mark.xfail(
-    raises=grading.DocumentRefused,
-    strict=True,
-    reason="the reply judge is not part of the grader yet",
-)
+
+@pytest.fixture(autouse=True)
+def no_judge_service(monkeypatch):
+    for name in ("JUDGE_URL", "JUDGE_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+
+
+@contextlib.contextmanager
+def scripted_judge(answer):
+    """A judge service on a loopback port that gives ``answer`` to each request, and keeps the requests."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802 - http.server's name
+            request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            service.asked.append(request)
+            body = json.dumps({**answer, "id": request["id"]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    service = type("Service", (), {})()
+    service.asked = []
+    service.url = f"http://127.0.0.1:{server.server_port}/judge"
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield service
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
 
 
 def text_of(value):
@@ -77,16 +115,9 @@ SEALED = [("vector", case) for case in VECTOR_CASES] + [
 ]
 
 
-def marked(pairs):
-    pairs = sorted(pairs)
+def sealed_cases(pairs):
     return [
-        pytest.param(
-            kind,
-            case,
-            id=f"{kind}/{case}",
-            marks=[YET] if (kind, case) in REPLY_JUDGED else [],
-        )
-        for kind, case in pairs
+        pytest.param(kind, case, id=f"{kind}/{case}") for kind, case in sorted(pairs)
     ]
 
 
@@ -106,7 +137,7 @@ def test_snapshot_value_is_the_one_the_runtime_served(kind, case):
     assert text_of(trace.snapshot_value(snapshot)) == snapshot_text, "byte for byte"
 
 
-@pytest.mark.parametrize("kind, case", marked(SEALED))
+@pytest.mark.parametrize("kind, case", sealed_cases(set(SEALED) - {SCRIPTED_JUDGE}))
 def test_trace_values_are_the_ones_the_runtime_wrote(kind, case):
     document, snapshot, snapshot_text, verdict_text = sealed_of(kind, case)
     values = trace.trace_values(document, snapshot)
@@ -115,7 +146,28 @@ def test_trace_values_are_the_ones_the_runtime_wrote(kind, case):
     assert text_of(values["verdict"]) == verdict_text, "the verdict, byte for byte"
 
 
-@pytest.mark.parametrize("kind, case", marked(set(SEALED) - REPLY_JUDGED))
+def test_a_scripted_judges_verdict_is_the_one_the_runtime_wrote(monkeypatch):
+    document, snapshot, snapshot_text, verdict_text = sealed_of(*SCRIPTED_JUDGE)
+    [kept] = json.loads(verdict_text)["grade"]["judgements"]
+    answer = {
+        "schema": "midojo.judge.v1",
+        **{name: kept[name] for name in ("verdict", "rationale", "model")},
+    }
+    with scripted_judge(answer) as service:
+        monkeypatch.setenv("JUDGE_URL", service.url)
+        monkeypatch.setenv("JUDGE_TOKEN", "FAKE-TEST-VALUE-0000")
+        values = trace.trace_values(document, snapshot)
+    assert service.asked == [
+        kept["request"]
+    ], "the request is the runtime's, id included"
+    [record] = values["verdict"]["grade"]["judgements"]
+    assert record["endpoint"] == service.url
+    record["endpoint"] = None  # the fixture scrubs the port of its live service
+    assert text_of(values["snapshot"]) == snapshot_text
+    assert text_of(values["verdict"]) == verdict_text, "the verdict, byte for byte"
+
+
+@pytest.mark.parametrize("kind, case", sealed_cases(SEALED))
 def test_a_spec_that_was_read_gives_the_same_values(kind, case):
     document, snapshot, _, _ = sealed_of(kind, case)
     spec = InjectionSpec.from_document(document)

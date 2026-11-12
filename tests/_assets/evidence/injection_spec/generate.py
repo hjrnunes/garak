@@ -889,8 +889,6 @@ MESSAGE_ONLY = {
     "unknown-kind-last",
     "openshell-then-unknown",
     "unknown-then-openshell",
-    "reply-judge-unknown-member",
-    "reply-judge-not-a-mapping",
     "not-with-a-list",
 }
 
@@ -930,17 +928,11 @@ def _check_cases() -> None:
             "openshell-under-not",
             [put(member, value={"not": {"network_call_to": "example.com"}})],
         )
-        case(
-            group,
-            "reply-judge",
-            [put(member, value=REPLY_JUDGE)],
-            differs="reply-judge",
-        )
+        case(group, "reply-judge", [put(member, value=REPLY_JUDGE)])
         case(
             group,
             "reply-judge-in-all-of",
             [put(member, value={"all_of": [{"output_contains": "a"}, REPLY_JUDGE]})],
-            differs="reply-judge",
         )
         for label, value in LAX.items():
             case(group, f"lax-{label}", [put(member, value=value)], differs="lax-check")

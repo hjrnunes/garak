@@ -117,11 +117,6 @@ def check_openshell(case, got):
     refused(got, "UnsupportedRuntime")
 
 
-def check_reply_judge(case, got):
-    """The reply judge is not part of the reader yet: the check is refused where it is read."""
-    assert "reply_judge needs the reply-judge module" in refused(got)
-
-
 def check_environment_inference(case, got):
     """MiDojo infers an environment model, so a key that breaks the inference is refused there."""
     assert case["outcome"]["error"]["class"] == "InjectionSpecDocumentError"
@@ -138,7 +133,6 @@ CHECKS = {
     "lax-check": check_lax_check,
     "runtime-crash": check_runtime_crash,
     "openshell": check_openshell,
-    "reply-judge": check_reply_judge,
     "environment-inference": check_environment_inference,
 }
 
@@ -529,13 +523,6 @@ def test_a_well_formed_openshell_check_carries_the_runtime_gap():
     with pytest.raises(InjectionSpecDocumentError) as caught:
         InjectionSpec.from_document(document)
     assert caught.value.gap == injection_spec.OPENSHELL_PREDICATE_GAP
-
-
-def test_a_reply_judge_check_is_refused_until_the_reply_judge_is_read():
-    document = full()
-    document["security"] = copy.deepcopy(generate.REPLY_JUDGE)
-    with pytest.raises(InjectionSpecDocumentError, match="reply-judge module"):
-        InjectionSpec.from_document(document)
 
 
 def test_a_document_member_may_be_any_mapping():

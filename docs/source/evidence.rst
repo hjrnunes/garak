@@ -121,16 +121,15 @@ an ``unmanaged`` runtime carries the gap
 the ``openshell`` runtime is refused last, as ``UnsupportedRuntime``, after every
 other member passed.
 
-The reader holds no environment model, so it differs from the runtime in six
+The reader holds no environment model, so it differs from the runtime in five
 ways. It reads an environment the runtime's model inference refuses (a key such
 as ``model_config``). It refuses a value outside JSON (bytes, a date) that the
 runtime keeps; it holds NaN and infinity, as the runtime does. It checks only
 the ``type`` of an ``openshell`` runtime. It reads checks with the strict reader
 the grade uses, which refuses a few malformed checks the runtime accepts
-(``output_contains: 1``). It refuses a check on which the runtime fails with a
-bare ``KeyError`` (an ``env_field_equals`` without a ``value``) as a document
-error. And a ``reply_judge`` check is refused until the reply judge is read.
-Where both refuse, the class and the ``gap`` agree and the wording of a check's
+(``output_contains: 1``). And it refuses a check on which the runtime fails with
+a bare ``KeyError`` (an ``env_field_equals`` without a ``value``) as a document
+error. Where both refuse, the class and the ``gap`` agree and the wording of a check's
 refusal may not. An OpenShell predicate is checked as the runtime's constructors
 check it, so a malformed one has no ``gap`` and a well-formed one has the
 OpenShell gap.
@@ -140,7 +139,10 @@ the sealed snapshot as the runtime serves it, and the verdict. Serialised with
 sorted keys they are the runtime's bytes. A snapshot sealed with a null
 ``pre_environment`` or ``environment`` digests differently from one sealed with
 ``{}``, and the runtime never serves it, so the trace refuses it: seal an
-``unmanaged`` runtime's evaluation with ``pre_environment={}``.
+``unmanaged`` runtime's evaluation with ``pre_environment={}``. A document with
+a ``reply_judge`` check asks its judge service when the trace states the
+verdict, so the verdict can differ between two calls; it lists what the check
+asked and was answered in ``judgements``.
 
 Per-call cost
 -------------

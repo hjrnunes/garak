@@ -24,8 +24,9 @@ the runtime's registry accepts and the shared check reader does not
 (``output_contains: 1``). Where the runtime fails with a bare ``KeyError`` (an
 ``env_field_equals`` without a ``value``, a ``workdir_file_contains`` without a
 ``path``), this reader refuses the document as :class:`InjectionSpecDocumentError`.
-A ``reply_judge`` check is refused where it is read, until the reply judge
-lands. NaN and infinity are held as they are, as the runtime holds them.
+A ``reply_judge`` check is read by the check reader
+(:mod:`garak.detectors._reply_judge`): the runtime's settings, and a literal
+token refused. NaN and infinity are held as they are, as the runtime holds them.
 
 An OpenShell predicate is read, not graded: its value is checked as the
 runtime's constructors check it (a ``workdir_file_contains`` needs a ``path``

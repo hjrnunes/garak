@@ -8,7 +8,8 @@
 and snapshot, byte for byte once serialised. The document is a plain mapping,
 or the :class:`garak.evidence.injection_spec.InjectionSpec` its reader made of
 one; the snapshot is a :class:`garak.evidence.seal.Snapshot`. Grading reads the
-document's checks and plan and the snapshot, and changes neither.
+document's checks and plan and the snapshot, and changes neither, unless the
+document holds a ``reply_judge`` check (see below).
 
 Each grade is True, False or None. None means the evidence collected could not
 decide the check, and ``grade_validity`` then marks the grade ``invalid`` and
@@ -32,7 +33,18 @@ environment and its tool calls, joined with ``all_of``, ``any_of`` and
   ``env_list_count``, ``env_field_unchanged``, over dotted paths into the
   environment;
 * ``tool_called`` and ``tool_call_condition``, the latter evaluated by
-  :mod:`garak.detectors.toolcall`.
+  :mod:`garak.detectors.toolcall`;
+* ``reply_judge``, which asks a judge service whether the agent's reply
+  supports a claim (:mod:`garak.detectors._reply_judge`).
+
+A ``reply_judge`` check is the one check whose grade is a service's answer as
+well as the snapshot's, so grading the same snapshot again may give another
+grade. The grade then lists what each such check asked and was answered in
+``judgements``; a grade that no judge took part in has no such member.
+Pass those records back as ``judgements``, with the ``judge_model`` and
+``judge_prompt_version`` they were answered under, to grade again offline:
+each request is answered by its record, no service is asked, and a request
+with no record to answer it is unknown, never False.
 
 The grader refuses, and writes no verdict, when it cannot grade what it is
 given. A :class:`DocumentRefused` carries the refusal of the document's
@@ -40,21 +52,23 @@ reader (:mod:`garak.evidence.injection_spec`), which checks every member of the
 document, whether or not the grade reads it: a version other than
 ``midojo-injection-spec-v1``, a member the version does not define, a check it
 does not know or that is malformed, an OpenShell predicate or any runtime but
-the unmanaged one, a ``reply_judge`` check (its module is separate), or a plan
-that does not decode. An :class:`EvidenceRefused` names a snapshot it cannot
-trust or a check that reads what the snapshot does not hold: a digest that no
-longer matches, an evidence status other than ``complete``, ``incomplete``,
-``failed`` or ``not_collected``, an environment field that is absent, a
-malformed delivery fact.
+the unmanaged one, a ``reply_judge`` check it cannot read (an unknown member, a
+literal token, a rubric that is not a string or an object), or a plan that does
+not decode. A :class:`GradingRefused` that is neither names ``judgements``
+records that are not the records of a grade. An :class:`EvidenceRefused` names
+a snapshot it cannot trust or a check that reads what the snapshot does not
+hold: a digest that no longer matches, an evidence status other than
+``complete``, ``incomplete``, ``failed`` or ``not_collected``, an environment
+field that is absent, a malformed delivery fact.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
-from garak.detectors import _checks
+from garak.detectors import _checks, _reply_judge
 from garak.evidence.delivery import exposure
 from garak.evidence.injection_spec import InjectionSpec, InjectionSpecDocumentError
 from garak.evidence.records import thaw
@@ -96,7 +110,12 @@ class Validity:
 
 @dataclass(frozen=True)
 class Grade:
-    """The grade of one sealed snapshot, in the fields the verdict document names."""
+    """The grade of one sealed snapshot, in the fields the verdict document names.
+
+    ``judgements`` are the records of what each reply judge check asked and
+    was answered, in the order asked: empty when no judge took part, and the
+    verdict document then has no ``judgements`` member.
+    """
 
     utility: bool | None
     utility_reason: str | None
@@ -109,16 +128,18 @@ class Grade:
     blocked: bool | None
     effect_observed: bool | None
     injection_delivered: bool | None
+    judgements: tuple[_reply_judge.JudgeRecord, ...] = ()
 
     def __post_init__(self) -> None:
         # A frozen grade keeps its own read-only copy of the statuses it was made from.
         object.__setattr__(
             self, "evidence_status", MappingProxyType(dict(self.evidence_status))
         )
+        object.__setattr__(self, "judgements", tuple(self.judgements))
 
     def to_json(self) -> dict[str, Any]:
         """Return a fresh JSON object in the runtime's field order."""
-        return {
+        written = {
             "utility": self.utility,
             "utility_reason": self.utility_reason,
             "security": self.security,
@@ -133,6 +154,9 @@ class Grade:
             "effect_observed": self.effect_observed,
             "injection_delivered": self.injection_delivered,
         }
+        if self.judgements:
+            written["judgements"] = [record.to_json() for record in self.judgements]
+        return written
 
 
 @dataclass(frozen=True)
@@ -191,7 +215,39 @@ def _observed_status(observations: Mapping[str, Any]) -> dict[str, str]:
     return statuses
 
 
-def _context(snapshot: Snapshot) -> _checks.Context:
+def _replay(
+    judgements: Any, judge_model: str | None, judge_prompt_version: str | None
+) -> _reply_judge.RecordedJudge | None:
+    """The judge that answers from ``judgements``, or None when grading asks the service.
+
+    A ready :class:`~garak.detectors._reply_judge.RecordedJudge` carries its
+    own identity, so a model or prompt version given with it is a TypeError,
+    as is a model or prompt version missing beside records. Records that are
+    not a grade's are a :class:`GradingRefused`.
+    """
+    if judgements is None:
+        return None
+    if isinstance(judgements, _reply_judge.RecordedJudge):
+        if judge_model is not None or judge_prompt_version is not None:
+            raise TypeError(
+                "judge_model and judge_prompt_version must not accompany a RecordedJudge"
+            )
+        return judgements
+    if judge_model is None:
+        raise TypeError("judge_model is required with judgements records")
+    if judge_prompt_version is None:
+        raise TypeError("judge_prompt_version is required with judgements records")
+    try:
+        return _reply_judge.RecordedJudge(
+            judgements, model=judge_model, prompt_version=judge_prompt_version
+        )
+    except ValueError as exc:
+        raise GradingRefused(f"judgements: {exc}") from None
+
+
+def _context(
+    snapshot: Snapshot, replay: _reply_judge.RecordedJudge | None = None
+) -> _checks.Context:
     return _checks.Context(
         agent_output=snapshot.agent_output,
         pre_environment=_environment(snapshot.pre_environment),
@@ -202,6 +258,7 @@ def _context(snapshot: Snapshot) -> _checks.Context:
             **_observed_status(snapshot.observations),
             **_statuses(snapshot.evidence_status, "evidence_status"),
         },
+        judge_replay=replay,
     )
 
 
@@ -294,7 +351,16 @@ def attack_outcome(
 
 
 def grade_sealed(
-    document: Mapping[str, Any] | InjectionSpec, snapshot: Snapshot
+    document: Mapping[str, Any] | InjectionSpec,
+    snapshot: Snapshot,
+    judgements: (
+        Iterable[_reply_judge.JudgeRecord | Mapping[str, Any]]
+        | _reply_judge.RecordedJudge
+        | None
+    ) = None,
+    *,
+    judge_model: str | None = None,
+    judge_prompt_version: str | None = None,
 ) -> Verdict:
     """Grade ``snapshot`` with the checks of the injection spec ``document``.
 
@@ -303,6 +369,17 @@ def grade_sealed(
     :class:`DocumentRefused` or :class:`EvidenceRefused`, and writes no
     verdict, when the document cannot be read or the snapshot cannot be
     graded. The snapshot's digest is verified first.
+
+    A ``reply_judge`` check asks its judge service, and the grade lists each
+    request and answer in its ``judgements``. ``judgements`` grades again
+    without asking: records an earlier grade kept (as
+    :class:`~garak.detectors._reply_judge.JudgeRecord` objects or their JSON),
+    answered under the ``judge_model`` and ``judge_prompt_version`` you name,
+    or a ready :class:`~garak.detectors._reply_judge.RecordedJudge`, which
+    takes neither. Each request is then answered by the record with its id
+    and that identity, and one no record answers makes its check unknown. A
+    model or prompt version missing beside records is a TypeError, and records
+    that are not a grade's are a :class:`GradingRefused`, before any grading.
     """
     if not isinstance(snapshot, Snapshot):
         raise EvidenceRefused(
@@ -311,7 +388,7 @@ def grade_sealed(
     if not snapshot.verified():
         raise EvidenceRefused("the snapshot no longer matches its digest")
     spec = _read(document)
-    ctx = _context(snapshot)
+    ctx = _context(snapshot, _replay(judgements, judge_model, judge_prompt_version))
     try:
         utility_check, security_check = spec.check("utility"), spec.check("security")
     except _checks.CheckError as exc:  # a spec built by hand, not read from a document
@@ -339,5 +416,6 @@ def grade_sealed(
             blocked=blocked,
             effect_observed=effect_observed,
             injection_delivered=delivered,
+            judgements=tuple(ctx.judgements.values()),
         ),
     )
