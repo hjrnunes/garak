@@ -706,12 +706,13 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
             if chain in self._sealed:
                 continue
             try:
-                handle.close()
+                release_error = self._close_handle(chain)
                 self._sealed.add(chain)
                 attempt = self._last_processed.get(chain)
                 if attempt is None:
                     continue
                 trace = self._interrupted_trace(handle)
+                trace["release_error"] = release_error
                 attempt.notes[CHAIN_NOTE]["final"] = True
                 self._attach_trace(attempt, trace)
             except (RuntimeError, ValueError):

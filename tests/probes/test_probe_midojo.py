@@ -736,6 +736,55 @@ def test_a_failing_turn_ends_its_chain(tmp_path, report):
     assert _own_listeners() == before, "and no interceptor keeps listening"
 
 
+@pytest.mark.parametrize(
+    ("message", "failure"),
+    [
+        (
+            Message("late", notes={"response_status": "incomplete"}),
+            "ResponsesNotCompleted",
+        ),
+        (
+            Message(None, notes={"error": {"type": "TimedOut"}}),
+            "TimedOut",
+        ),
+        (None, "ResponsesNotCompleted"),
+    ],
+)
+def test_timed_out_or_unfinished_turn_seals_and_closes(
+    tmp_path, report, message, failure
+):
+    probe = _probe(tmp_path, entry("First turn.", "Second turn."))
+    agent = ScriptedAgent()
+
+    def generate(prompt, generations_this_call=1):
+        agent.prompts.append(prompt)
+        return [message]
+
+    agent.generate = generate
+    attempts = list(probe.probe(agent))
+    assert len(agent.prompts) == 1, "a failed turn stops before the next one"
+    assert len(attempts) == 1, "the final attempt represents the failed chain"
+    trace = attempts[0].notes[TRACE_NOTE]
+    assert trace["sealed"] == "final", "the evaluation is sealed"
+    assert trace["error"] == failure, "the failure type survives"
+    assert trace["response_status"] == "incomplete", "the turn cannot decide"
+    assert probe._handles == {}, "the handle closes on the failed turn"
+
+
+def test_a_completed_refusal_is_graded_not_dropped(tmp_path, report):
+    probe = _probe(tmp_path, entry("First turn."))
+    agent = ScriptedAgent()
+    agent.generate = lambda prompt, generations_this_call=1: [
+        Message("I cannot do that.", notes={"response_status": "completed"})
+    ]
+    attempts = list(probe.probe(agent))
+    assert len(attempts) == 1, "a refusal still yields a final attempt"
+    assert attempts[0].notes[TRACE_NOTE]["error"] is None, "refusal is not an error"
+    assert (
+        attempts[0].notes[TRACE_NOTE]["verdict"]["grade"]["security"] is False
+    ), "the refusal is graded by the handle"
+
+
 def test_a_turn_with_calls_and_no_reply_keeps_its_chain(tmp_path, report):
     probe = _probe(tmp_path, entry("Look up ORD-101.", "And ORD-201."))
     agent = ScriptedAgent([[("lookup_order", {"order_id": "ORD-101"})]])
@@ -1187,6 +1236,32 @@ class LosingHandle(SealedHandle):
             "the release lost the link"
         )
         raise self.close_error
+
+
+def test_a_lost_release_cannot_prevent_an_interrupted_chain_closing(tmp_path):
+    probe = _probe(tmp_path, entry("Look up ORD-101."))
+
+    class InterruptedHandle(LosingHandle):
+        evaluation_id = "interrupted-evaluation"
+        result = None
+
+    handle = InterruptedHandle()
+    attempt = probe._turn_attempt(0, 0, [], handle)
+    attempt.notes[CHAIN_NOTE]["final"] = False
+    probe._handles = {0: handle}
+    probe._last_processed = {0: attempt}
+    probe._sealed = set()
+
+    probe._seal_interrupted()
+
+    assert handle.closed and probe._handles == {}, "the lost release closes the handle"
+    assert (
+        attempt.notes[CHAIN_NOTE]["final"] is True
+    ), "the chain reaches its final attempt"
+    trace = attempt.notes[TRACE_NOTE]
+    assert trace["sealed"] == "interrupted", "the interrupted grade stays undecided"
+    assert trace["release_error"] == "link-lost", "the lost release is recorded"
+    assert trace["response_status"] == "incomplete", "the capture cannot decide"
 
 
 def _sealed_trace():
