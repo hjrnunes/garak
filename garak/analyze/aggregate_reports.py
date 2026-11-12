@@ -31,6 +31,7 @@ def _process_file_body(in_file, out_file, aggregate_uuid) -> dict | None:
         if entry["entry_type"] not in (
             "attempt",
             "eval",
+            "utility_eval",
             "probe_summary",
             "plugin_cache",
         ):

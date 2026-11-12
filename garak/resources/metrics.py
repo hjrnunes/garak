@@ -103,6 +103,15 @@ def mark_kind(attempt, detector_name: str, kind: str) -> None:
         _marks(attempt, KIND_NOTE)[detector_name] = kind
 
 
+def kind_in_notes(notes, detector_name: str) -> str:
+    """Read the kind that :func:`mark_kind` recorded in a notes mapping, such as
+    the ``notes`` of an attempt entry in a report; anything else reads as security
+    """
+    marks = notes.get(KIND_NOTE) if isinstance(notes, dict) else None
+    recorded = marks.get(detector_name) if isinstance(marks, dict) else None
+    return UTILITY if recorded == UTILITY else SECURITY
+
+
 def metric_kind(attempt, detector_name: str) -> str:
     """Read what :func:`mark_kind` recorded; anything else reads as security"""
-    return UTILITY if _read(attempt, KIND_NOTE, detector_name) == UTILITY else SECURITY
+    return kind_in_notes(attempt.notes, detector_name)

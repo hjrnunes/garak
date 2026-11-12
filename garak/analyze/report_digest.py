@@ -59,6 +59,7 @@ def _parse_report(reportfile: IO):
     reportfile.seek(0)
 
     evals = []
+    utility_evals = []
     payloads = []
     setup = defaultdict(str)
     init = {}
@@ -68,6 +69,8 @@ def _parse_report(reportfile: IO):
     for record in [json.loads(line.strip()) for line in reportfile if line.strip()]:
         if record["entry_type"] == "eval":
             evals.append(record)
+        elif record["entry_type"] == "utility_eval":
+            utility_evals.append(record)
         elif record["entry_type"] == "init":
             init = {
                 "garak_version": record["garak_version"],
@@ -98,7 +101,7 @@ def _parse_report(reportfile: IO):
 
         plugin_cache = deepcopy(garak._plugins.PluginCache.instance())
         plugin_cache["version"] = garak.__version__
-    return init, setup, payloads, evals, plugin_cache, probe_summaries
+    return init, setup, payloads, evals, utility_evals, plugin_cache, probe_summaries
 
 
 def _extract_to_probespec(setup: dict) -> str:
@@ -593,6 +596,41 @@ def _compute_technique_intent_matrix(evals: list, report_plugin_cache: dict) -> 
     return matrix
 
 
+def _summarise_utility(utility_evals: list) -> dict:
+    """Completion counts of utility detectors, by probe and detector
+
+    Utility results stay out of the eval section: a completed task is not an
+    attack, and no attack success statistic includes it.
+    """
+    section = {}
+    for record in utility_evals:
+        try:
+            probe = record["probe"].replace("probes.", "")
+            detector = record["detector"].replace("detector.", "")
+            entry = {
+                key: record[key]
+                for key in (
+                    "completed",
+                    "not_completed",
+                    "nones",
+                    "total_evaluated",
+                    "total_processed",
+                    "not_applicable",
+                    "unscored_reasons",
+                )
+                if key in record
+            }
+            evaluated = record["total_evaluated"]
+            entry["score"] = record["completed"] / evaluated if evaluated else None
+        except (KeyError, TypeError, AttributeError) as e:
+            raise ReportIncompatibleError(
+                "Report utility_eval entry is malformed; "
+                "the report was likely generated with a different garak version"
+            ) from e
+        section.setdefault(probe, {})[detector] = entry
+    return section
+
+
 def build_digest(report_filename: str, config=_config):
 
     # taxonomy = config.reporting.taxonomy
@@ -606,9 +644,15 @@ def build_digest(report_filename: str, config=_config):
     }
 
     with open(report_filename, "r", encoding="utf-8") as reportfile:
-        init, setup, payloads, evals, report_plugin_cache, probe_summaries = (
-            _parse_report(reportfile)
-        )
+        (
+            init,
+            setup,
+            payloads,
+            evals,
+            utility_evals,
+            report_plugin_cache,
+            probe_summaries,
+        ) = _parse_report(reportfile)
 
     calibration = garak.analyze.calibration.Calibration()
     calibration_used = False
@@ -710,6 +754,9 @@ def build_digest(report_filename: str, config=_config):
     report_digest["technique_intent_matrix"] = _compute_technique_intent_matrix(
         evals, report_plugin_cache
     )
+
+    if utility_evals:
+        report_digest["utility"] = _summarise_utility(utility_evals)
 
     return report_digest
 

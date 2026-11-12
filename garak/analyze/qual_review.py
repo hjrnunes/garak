@@ -17,6 +17,7 @@ import sys
 import garak
 import garak.analyze
 import garak.analyze.calibration
+import garak.resources.metrics
 from garak.probes import Tier
 
 PROBE_DETECTOR_SEP = "+"
@@ -76,7 +77,16 @@ def build_review(report_path: str) -> dict:
             elif record["entry_type"] == "attempt" and record["status"] == 2:
                 results = record["detector_results"]
                 for detector_name in results:
+                    if (
+                        garak.resources.metrics.kind_in_notes(
+                            record.get("notes"), detector_name
+                        )
+                        == garak.resources.metrics.UTILITY
+                    ):
+                        continue  # a completed task is not a failing example
                     for i, score in enumerate(results[detector_name]):
+                        if score is None:
+                            continue
                         try:
                             fields = [record["prompt"], record["outputs"][i]]
                             if "triggers" in record.get("notes", {}).keys():

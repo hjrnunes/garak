@@ -15,6 +15,7 @@ import sys
 import json
 
 import garak
+import garak.resources.metrics
 
 
 def analyze_log(report_path: str) -> None:
@@ -57,7 +58,16 @@ def analyze_log(report_path: str) -> None:
                 for detector_name, detector_scores in record[
                     "detector_results"
                 ].items():
-                    normalised_scores = [1 if i >= 0.5 else 0 for i in detector_scores]
+                    if (
+                        garak.resources.metrics.kind_in_notes(
+                            record.get("notes"), detector_name
+                        )
+                        == garak.resources.metrics.UTILITY
+                    ):
+                        continue  # a completed task is not a hit
+                    normalised_scores = [
+                        1 if i >= 0.5 else 0 for i in detector_scores if i is not None
+                    ]
                     # are there any hits?
                     if sum(normalised_scores):
                         # if so print prompt & hit rate
@@ -91,6 +101,11 @@ def analyze_log(report_path: str) -> None:
                             ],
                         )
                     )
+                )
+            elif record["entry_type"] == "utility_eval":
+                print(
+                    f"## utility, not an attack: {record['probe']} {record['detector']} "
+                    f"completed {record['completed']}/{record['total_evaluated']}"
                 )
 
     if not started_attempt_uuids:
