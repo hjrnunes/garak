@@ -498,6 +498,26 @@ def test_turns_stamp_calls_and_refuse_overlaps():
     assert [turn["reply"] for turn in turns] == ["hi", None], "turn replies changed"
 
 
+def test_turn_times_come_from_the_injected_clock():
+    """A turn's times come from the injected clock; an unanswered turn has no end."""
+    unit, clock = collector()
+    started = [clock.clock()]
+    unit.start_turn("hello")
+    clock.advance(5.0)
+    ended = [clock.clock()]
+    unit.record_reply(0, "hi")
+    clock.advance(10.0)
+    started.append(clock.clock())
+    unit.start_turn("more")
+    unit.close(0.0)
+    turns = unit.seal("done").to_json()["turns"]
+    assert [(turn["started_at"], turn["ended_at"]) for turn in turns] == [
+        (started[0], ended[0]),
+        (started[1], None),
+    ], "turn times did not follow the injected clock"
+    assert len({started[0], ended[0], started[1]}) == 3, "the clock did not advance"
+
+
 def test_turns_outside_open_are_late():
     """A turn or reply outside open is a late fact keyed turns."""
     unit, clock = collector()
