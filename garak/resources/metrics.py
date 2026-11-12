@@ -281,7 +281,7 @@ def _checked_counts(summary) -> Tuple[dict, dict]:
     :raises ValueError: if a count is missing or is not a non-negative integer,
         if the valid and invalid pairs do not make up the pairs, if a side
         completed more tasks than there are valid pairs, or if the reasons are
-        not a mapping of text to such counts
+        not a mapping of text to such counts that makes up the invalid pairs
     """
     if not isinstance(summary, dict):
         raise ValueError("a pair summary must be a mapping")
@@ -302,6 +302,8 @@ def _checked_counts(summary) -> Tuple[dict, dict]:
         for reason, count in reasons.items()
     ):
         raise ValueError("pair summary invalid_reasons must map text to counts")
+    if sum(reasons.values()) != counts["invalid"]:
+        raise ValueError("pair summary invalid_reasons must name each invalid pair")
     return counts, reasons
 
 

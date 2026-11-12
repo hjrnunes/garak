@@ -252,12 +252,18 @@ GOOD = {
     "invalid": 1,
     "benign_completed": 1,
     "attacked_completed": 0,
+    "invalid_reasons": {"attacked:errored": 1},
 }
 
 
 @pytest.mark.parametrize(
     "bad",
     [
+        {key: value for key, value in GOOD.items() if key != "invalid_reasons"},
+        {**GOOD, "invalid_reasons": {}},
+        {**GOOD, "invalid_reasons": {"attacked:errored": 0}},
+        {**GOOD, "invalid_reasons": {"attacked:errored": 2}},
+        {**GOOD, "invalid_reasons": {"attacked:errored": 1, "baseline:errored": 1}},
         None,
         "x",
         [],
@@ -275,6 +281,11 @@ GOOD = {
         {**GOOD, "invalid_reasons": {1: 1}},
     ],
     ids=[
+        "reasons-missing",
+        "reasons-empty",
+        "reasons-zero",
+        "reasons-too-many",
+        "reasons-for-two-pairs",
         "none",
         "text",
         "list",

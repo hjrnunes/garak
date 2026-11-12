@@ -28,6 +28,8 @@ def pairs(valid, benign, attacked, invalid=0, reasons=None):
         "utility_under_attack": attacked / valid if valid else None,
         "drop": (benign - attacked) / valid if valid else None,
     }
+    if reasons is None and invalid:
+        reasons = {"attacked:errored": invalid}
     if reasons:
         counts["invalid_reasons"] = reasons
     return counts
@@ -127,6 +129,9 @@ BAD_PAIRS = [
     {**pairs(1, 2, 1)},
     {**pairs(1, 1, 2)},
     {**pairs(1, 1, 0), "pairs": 3},
+    pairs(0, 0, 0, 1, {}),
+    {**pairs(0, 0, 0, 1), "invalid_reasons": {"attacked:errored": 0}},
+    {**pairs(0, 0, 0, 1), "invalid_reasons": {"attacked:errored": 2}},
 ]
 BAD_PAIR_IDS = [
     "none",
@@ -137,6 +142,9 @@ BAD_PAIR_IDS = [
     "benign-above-valid",
     "attacked-above-valid",
     "counts-do-not-add-up",
+    "invalid-pair-without-reason",
+    "reason-counts-zero",
+    "reason-counts-too-many",
 ]
 
 
