@@ -7,6 +7,7 @@ import json
 import logging
 import pickle
 import socket
+import threading
 from urllib.parse import urlsplit
 
 import pytest
@@ -563,6 +564,212 @@ def test_bound_response_rejects_invalid_values(live, values):
         run.close()
         server.close()
         owner._submit(server.wait_closed())
+
+
+def _run_aside(call, error, seconds=5):
+    """Call in a thread; return the thread and the errors of that type it raised."""
+    caught = []
+
+    def target():
+        try:
+            call()
+        except error as raised:
+            caught.append(raised)
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    return thread, caught
+
+
+def _unused_service_run(**options):
+    """A run that names a service it never contacts."""
+    pytest.importorskip("midojo_mim")
+    config = {
+        "service_url": "http://127.0.0.1:1",
+        "bind_credential": "key",
+        **options,
+    }
+    return Mim(config_root={"injectors": {"mim": config}}).start_run()
+
+
+@pytest.mark.parametrize("cleanup", [0.05, 0.6])
+def test_a_stalled_operation_is_cleaned_up_before_the_timeout_is_reported(cleanup):
+    """The caller learns of the timeout once the operation's cleanup has ended."""
+    run = _unused_service_run(loop_timeout=0.3, release_timeout=5)
+    started = threading.Event()
+    cleaned = threading.Event()
+
+    async def stall():
+        started.set()
+        try:
+            await asyncio.sleep(3600)
+        finally:
+            await asyncio.sleep(cleanup)
+            cleaned.set()
+
+    try:
+        thread, caught = _run_aside(lambda: run._submit(stall()), TimeoutError)
+        assert not thread.is_alive(), "the caller is not held by the stall"
+        assert caught and "loop_timeout" in str(caught[0]), "the stall is a timeout"
+        assert started.is_set(), "the operation began"
+        assert cleaned.is_set(), "cleanup finished before the timeout was reported"
+    finally:
+        run.close()
+
+
+def test_an_operations_own_timeout_is_not_relabelled():
+    """A timeout raised by the operation reaches the caller with its own text."""
+    run = _unused_service_run(loop_timeout=0.2)
+
+    async def times_out():
+        raise TimeoutError("the peer was too slow")
+
+    async def times_out_when_cancelled():
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            raise TimeoutError("cleanup was too slow") from None
+
+    try:
+        with pytest.raises(TimeoutError, match="peer was too slow"):
+            run._submit(times_out())
+        thread, caught = _run_aside(
+            lambda: run._submit(times_out_when_cancelled()), TimeoutError
+        )
+        assert not thread.is_alive(), "the caller is not held by the operation"
+        assert caught and "cleanup was too slow" in str(caught[0]), "own text kept"
+    finally:
+        run.close()
+
+
+def test_an_operation_that_ends_despite_cancellation_keeps_its_result():
+    """A result produced after the deadline is returned, not discarded."""
+    run = _unused_service_run(loop_timeout=0.2)
+
+    async def stubborn():
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            return "finished anyway"
+
+    results = []
+    try:
+        thread, _ = _run_aside(
+            lambda: results.append(run._submit(stubborn())), TimeoutError
+        )
+        assert not thread.is_alive(), "the caller is not held by the operation"
+        assert results == ["finished anyway"], "the result stands"
+    finally:
+        run.close()
+
+
+def test_a_blocked_loop_thread_does_not_hold_the_caller():
+    """A caller stops waiting when the loop cannot run its own deadline."""
+    run = _unused_service_run(loop_timeout=0.3, release_timeout=0.2)
+    entered = threading.Event()
+    release = threading.Event()
+
+    async def block():
+        entered.set()
+        release.wait()
+
+    try:
+        thread, caught = _run_aside(lambda: run._submit(block()), TimeoutError)
+        assert entered.is_set(), "the operation blocked the loop"
+        assert not thread.is_alive(), "the caller is not held by the blocked loop"
+        assert caught and "loop_timeout" in str(caught[0]), "the block is a timeout"
+    finally:
+        release.set()
+        run.close()
+
+
+def test_close_reports_a_loop_thread_that_will_not_stop():
+    """A loop thread that ignores stop is reported after loop_timeout."""
+    run = _unused_service_run(loop_timeout=0.3)
+    release = threading.Event()
+    run._loop.call_soon_threadsafe(release.wait)
+    try:
+        thread, caught = _run_aside(run.close, TimeoutError)
+        assert not thread.is_alive(), "close returns while the loop is blocked"
+        assert caught and "loop thread" in str(caught[0]), "the stuck thread is named"
+    finally:
+        release.set()
+        run._thread.join(5)
+    assert not run._thread.is_alive(), "the loop thread stops once released"
+
+
+def test_arm_reports_a_bind_that_outlasts_loop_timeout(live):
+    """A bind answer that never comes fails the arm at loop_timeout."""
+    from websockets.asyncio.server import serve
+
+    owner, upstream = live
+    closed = asyncio.Event()
+
+    async def peer(socket):
+        await socket.recv()
+        await socket.wait_closed()
+        closed.set()
+
+    async def start_peer():
+        server = await serve(
+            peer, "127.0.0.1", 0, subprotocols=[owner.wire.SUBPROTOCOL]
+        )
+        return server, server.sockets[0].getsockname()[1]
+
+    async def stop_peer(server):
+        server.close()
+        await server.wait_closed()
+
+    server, port = owner._submit(start_peer())
+    run = Mim(
+        config_root={
+            "injectors": {
+                "mim": {
+                    "service_url": f"http://127.0.0.1:{port}",
+                    "bind_credential": "peer-key",
+                    "bind_timeout": 30,
+                    "release_timeout": 30,
+                    "loop_timeout": 1,
+                }
+            }
+        }
+    ).start_run()
+    try:
+        with pytest.raises(CapabilityError, match="did not finish"):
+            run.arm(Collector("stalled-bind"), upstream_url=upstream, plan=_plan())
+        assert not run._armings, "no binding is registered"
+        assert owner._submit(asyncio.wait_for(closed.wait(), 3)), "socket closes"
+    finally:
+        run.close()
+        owner._submit(stop_peer(server))
+
+
+def test_a_release_cut_short_by_loop_timeout_still_ends_the_binding(live, monkeypatch):
+    """A cancelled release closes the socket, and a second disarm has no effect."""
+    run, upstream = live
+    run._loop_timeout = 0.5
+    run._release_timeout = 30
+    arming = run.arm(Collector("cut-short"), upstream_url=upstream, plan=_plan())
+
+    async def never_sent(*args, **kwargs):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(arming._socket, "send", never_sent)
+    thread, caught = _run_aside(arming.disarm, TimeoutError)
+    assert not thread.is_alive(), "disarm is not held by the stalled release"
+    assert caught and "loop_timeout" in str(caught[0]), "the stall is a timeout"
+    assert arming._socket.state.name == "CLOSED", "the socket is closed"
+    lost = arming._link.summary()["lost"]
+    assert lost and "cancelled" in lost, "the cancelled release marks the loss"
+    assert arming.disarm() == (False, []), "the binding ended without release"
+
+
+@pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf"), True, "1"])
+def test_loop_timeout_must_be_finite_and_positive(value):
+    """A loop_timeout that cannot bound a wait is refused before a run starts."""
+    with pytest.raises(CapabilityError, match="loop_timeout"):
+        Mim(config_root={"injectors": {"mim": {"loop_timeout": value}}}).start_run()
 
 
 @pytest.mark.parametrize(

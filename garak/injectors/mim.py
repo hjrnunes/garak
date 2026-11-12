@@ -34,6 +34,7 @@ _OUTCOME_FIELDS = frozenset(
 _PLACEMENT_FIELDS = frozenset({"payload_digest", "placed_digest", "slot"})
 _PLACED_STATUSES = frozenset({"applied", "partial", "fallback"})
 _CLEANUP_ERRORS = (RuntimeError, OSError, TimeoutError, ValueError, CancelledError)
+_STALLED = "Mim injector operation did not finish within loop_timeout"
 
 
 def _bind_url(service_url: str) -> str:
@@ -106,10 +107,11 @@ class Mim(Injector):
     bind_credential: str | None = None
     bind_timeout: float = 10.0
     release_timeout: float = 10.0
+    loop_timeout: float = 60.0
 
     def start_run(self) -> MimRun:
         """Acquire a private loop and optionally a local interceptor listener."""
-        for name in ("bind_timeout", "release_timeout"):
+        for name in ("bind_timeout", "release_timeout", "loop_timeout"):
             value = getattr(self, name)
             if (
                 type(value) not in (int, float)
@@ -129,7 +131,13 @@ class Mim(Injector):
             raise CapabilityError(
                 "Mim injector requires both service_url and bind_credential"
             )
-        return MimRun(url, credential, self.bind_timeout, self.release_timeout)
+        return MimRun(
+            url,
+            credential,
+            self.bind_timeout,
+            self.release_timeout,
+            self.loop_timeout,
+        )
 
 
 class MimRun:
@@ -143,6 +151,7 @@ class MimRun:
         credential: str | None,
         bind_timeout: float,
         release_timeout: float,
+        loop_timeout: float,
     ):
         from garak.configurable import Configurable
 
@@ -161,6 +170,7 @@ class MimRun:
         self._credential = credential or secrets.token_urlsafe(32)
         self._bind_timeout = bind_timeout
         self._release_timeout = release_timeout
+        self._loop_timeout = loop_timeout
         self._loop = asyncio.new_event_loop()
         self._ready = threading.Event()
         self._thread = threading.Thread(
@@ -199,14 +209,52 @@ class MimRun:
         self._loop.run_forever()
         self._loop.close()
 
+    async def _within_loop_timeout(self, coroutine):
+        """Cancel an operation at ``loop_timeout`` and wait for its cleanup.
+
+        An operation that ends in spite of the cancellation keeps its own
+        result or error.
+        """
+        task = asyncio.current_task()
+        expired = False
+
+        def expire():
+            nonlocal expired
+            expired = True
+            task.cancel()
+
+        timer = self._loop.call_later(self._loop_timeout, expire)
+        try:
+            return await coroutine
+        except asyncio.CancelledError:
+            if expired:
+                raise TimeoutError(_STALLED) from None
+            raise
+        finally:
+            timer.cancel()
+
     def _submit(self, coroutine):
-        """Execute an operation on the run's loop, without leaking transport errors."""
+        """Execute an operation on the run's loop, without waiting for ever.
+
+        The loop cancels an operation at ``loop_timeout`` and finishes its
+        cleanup before the caller sees the timeout. The caller stops waiting
+        ``release_timeout`` later if that cleanup, or the loop thread itself,
+        is still blocked.
+        """
         if threading.current_thread() is self._thread:
             coroutine.close()
             raise RuntimeError(
                 "Mim injector run cannot be used from its own event loop"
             )
-        return asyncio.run_coroutine_threadsafe(coroutine, self._loop).result()
+        future = asyncio.run_coroutine_threadsafe(
+            self._within_loop_timeout(coroutine), self._loop
+        )
+        try:
+            return future.result(self._loop_timeout + self._release_timeout)
+        except TimeoutError:
+            if not future.cancel():
+                return future.result()
+            raise TimeoutError(_STALLED) from None
 
     def arm(
         self,
@@ -231,7 +279,12 @@ class MimRun:
             raise CapabilityError("Mim injector lacks host tool capability")
         if self._closed:
             raise CapabilityError("Mim injector run is closed; cannot arm a binding")
-        arming = self._submit(self._bind(collector, upstream_url, plan, policy))
+        try:
+            arming = self._submit(self._bind(collector, upstream_url, plan, policy))
+        except TimeoutError:
+            raise CapabilityError(
+                "Mim injector binding did not finish within loop_timeout"
+            ) from None
         self._armings.append(arming)
         return arming
 
@@ -371,7 +424,13 @@ class MimRun:
         finally:
             self._closed = True
             self._loop.call_soon_threadsafe(self._loop.stop)
-            self._thread.join()
+            self._thread.join(self._loop_timeout)
+            if self._thread.is_alive():
+                failures.append(
+                    TimeoutError(
+                        "Mim injector loop thread did not stop within loop_timeout"
+                    )
+                )
         if len(failures) == 1:
             raise failures[0]
         if failures:
@@ -496,16 +555,24 @@ class _MimArming(Arming):
         """Request release and mark an unacknowledged response as lost."""
         from websockets.exceptions import ConnectionClosed
 
-        if not self._done.is_set():
-            try:
-                await self._socket.send(self._run.wire.encode_message("unbind"))
-                await asyncio.wait_for(self._done.wait(), self._run._release_timeout)
-            except (ConnectionClosed, OSError, RuntimeError, TimeoutError):
-                self._link.lose("Mim injector release was not acknowledged")
-                self._task.cancel()
-        if not self._released:
-            self._link.lose("Mim injector binding ended without release")
-        await self._socket.close()
+        try:
+            if not self._done.is_set():
+                try:
+                    await self._socket.send(self._run.wire.encode_message("unbind"))
+                    await asyncio.wait_for(
+                        self._done.wait(), self._run._release_timeout
+                    )
+                except (ConnectionClosed, OSError, RuntimeError, TimeoutError):
+                    self._link.lose("Mim injector release was not acknowledged")
+                    self._task.cancel()
+            if not self._released:
+                self._link.lose("Mim injector binding ended without release")
+        except asyncio.CancelledError:
+            self._link.lose("Mim injector release was cancelled")
+            self._task.cancel()
+            raise
+        finally:
+            await self._socket.close()
 
 
 async def socket_receive(socket):
