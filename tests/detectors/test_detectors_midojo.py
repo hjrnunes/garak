@@ -22,6 +22,9 @@ from garak.attempt import Attempt, Conversation, Message, Turn  # noqa: E402
 from garak.detectors import midojo  # noqa: E402
 from garak.evaluators.base import ThresholdEvaluator  # noqa: E402
 from garak.resources.metrics import UNSCORED_NOTE  # noqa: E402
+from garak.detectors.toolcall import (  # noqa: E402
+    RESULTS_NOTE as CONDITION_RESULTS_NOTE,
+)
 
 VECTORS = Path(__file__).parents[1] / "_assets" / "detectors" / "inconclusive_vectors"
 CASES = json.loads((VECTORS / "MANIFEST.json").read_text())["cases"]
@@ -130,6 +133,63 @@ def test_blocked_call_keeps_validity_and_effect_separate():
     ), "a blocked call complies but has no effect"
     assert vrecords[0]["security"] is True, "the security check held"
     assert erecords[0]["effect_observed"] is False, "the action did not run"
+
+
+@pytest.mark.parametrize("detector", DETECTORS)
+@pytest.mark.parametrize(
+    ("case", "condition_outcome", "expected"),
+    [
+        ("control-resisted", "detected", None),
+        ("blocked-call", "not_detected", None),
+        ("control-resisted", "not_detected", 0.0),
+        ("blocked-call", "detected", 1.0),
+    ],
+)
+def test_sealed_grade_cross_checks_a_recorded_condition(
+    detector, case, condition_outcome, expected
+):
+    built = attempt(trace(case))
+    built.notes[CONDITION_RESULTS_NOTE] = [
+        {"outcome": condition_outcome, "reason": None, "matched_calls": []}
+    ]
+    cls, name = detector
+    scores = cls().detect(built)
+    record = built.notes[name][0]
+    if expected is None:
+        assert scores == [None], "a contradicting condition never proves resistance"
+        assert record["reason"] == midojo.CONDITION_DISAGREEMENT
+        assert record["disagreement"], "the contradiction is recorded"
+    elif cls is midojo.EvaluationVerdict:
+        assert scores == [expected], "agreement leaves the sealed verdict unchanged"
+    else:
+        assert scores == [0.0], "effect grades the observed action, not compliance"
+    assert record["condition"]["outcome"] == condition_outcome
+
+
+@pytest.mark.parametrize("detector", DETECTORS)
+def test_agreement_cannot_repair_an_incomplete_capture(detector):
+    built = attempt(trace("capture-incomplete"))
+    built.notes[CONDITION_RESULTS_NOTE] = [
+        {"outcome": "detected", "reason": None, "matched_calls": []}
+    ]
+    cls, name = detector
+    assert cls().detect(built) == [None], "an incomplete seal stays undecided"
+    assert built.notes[name][0]["reason"] == midojo.INCOMPLETE
+
+
+def test_condition_is_graded_before_its_detector_runs():
+    built = attempt(trace("control-resisted"))
+    built.prompt.notes["tool_call_condition"] = {
+        "comparisons": [{"kind": "not_called", "operation": "update_listing"}]
+    }
+    built.outputs[0].notes = {"tool_calls": [], "response_status": "completed"}
+    assert CONDITION_RESULTS_NOTE not in built.notes, "the condition has not run yet"
+    assert midojo.EvaluationVerdict().detect(built) == [
+        None
+    ], "an independently graded contradictory condition lowers the verdict"
+    record = built.notes[midojo.RESULTS_NOTE][0]
+    assert record["reason"] == midojo.CONDITION_DISAGREEMENT
+    assert record["condition"]["outcome"] == "detected"
 
 
 def test_observed_effect_does_not_change_a_false_security_grade():
@@ -510,6 +570,38 @@ def test_intermediate_turn_is_marked_not_applicable(detector):
         "reason": midojo.INTERMEDIATE_TURN,
         "not_applicable": True,
     }, "an intermediate turn is not an evaluation"
+
+
+@pytest.mark.parametrize("detector", DETECTORS)
+def test_refused_outputs_share_one_mark_on_the_attempt(detector):
+    cls, _ = detector
+    built = attempt(trace("not-delivered"), outputs=3)
+    assert cls().detect(built) == [None] * 3, "every output is undecided"
+    assert built.notes[UNSCORED_NOTE][f"midojo.{cls.__name__}"] == {
+        "reason": midojo.NOT_DELIVERED,
+        "not_applicable": False,
+    }, "the attempt carries one mark with the shared reason"
+
+
+def test_mark_names_the_first_unscored_output():
+    marked = []
+
+    class Recorder:
+        def mark_unscored(self, attempt, reason, not_applicable=False):
+            marked.append((reason, not_applicable))
+
+    midojo._mark_refusal(
+        Recorder(),
+        None,
+        [
+            {"score": 1.0, "reason": None},
+            {"score": None, "reason": midojo.INTERMEDIATE_TURN},
+            {"score": None, "reason": midojo.INVALID},
+        ],
+    )
+    assert marked == [
+        (midojo.INTERMEDIATE_TURN, True)
+    ], "one mark, from the first output left without a score"
 
 
 @pytest.mark.parametrize("detector", DETECTORS)
