@@ -36,6 +36,7 @@ METADATA_NOTE = "source_metadata"
 CONDITION_NOTE = "tool_call_condition"
 INJECTION_SPEC_KEY = "injection_spec"
 EMPTY_REPLY = "EmptyReply"
+MAX_PAYLOAD_BYTES = 8192
 
 _EXTRA_HINT = (
     "the injection-spec probe needs the MiDojo harness (Python 3.12 or newer); "
@@ -243,6 +244,7 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
                     f"{self.__class__.__name__}: injection-spec document "
                     f"schema_version must be a string; supported: {supported}"
                 )
+        self._admit_payloads(document)
         refusal = None
         try:
             spec = self._midojo.InjectionSpec.from_document(document)
@@ -273,6 +275,33 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
             copy.deepcopy(entry.get("metadata")),
             None if condition is None else plain(condition),
         )
+
+    @staticmethod
+    def _admit_payloads(document):
+        """Refuse unsafe plan payloads before a handle opens or payloads reach logs."""
+        plan = document.get("plan") if isinstance(document, dict) else None
+        instructions = plan.get("instructions") if isinstance(plan, dict) else None
+        if not isinstance(instructions, list):
+            return
+        for index, instruction in enumerate(instructions):
+            if not isinstance(instruction, dict):
+                continue
+            payload = instruction.get("payload")
+            if type(payload) is not str or not payload:
+                raise ConfigFailure(
+                    f"InjectionSpecProbe: plan instruction {index} needs a non-empty string payload"
+                )
+            try:
+                size = len(payload.encode("utf-8"))
+            except UnicodeEncodeError as exc:
+                raise ConfigFailure(
+                    f"InjectionSpecProbe: plan instruction {index} needs UTF-8 payload text"
+                ) from exc
+            if size > MAX_PAYLOAD_BYTES:
+                raise ConfigFailure(
+                    f"InjectionSpecProbe: plan instruction {index} exceeds "
+                    f"the {MAX_PAYLOAD_BYTES}-byte payload cap"
+                )
 
     def _refuse_unreset_repeats(self):
         if self.repeats <= 1:

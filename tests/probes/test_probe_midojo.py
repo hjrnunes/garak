@@ -36,6 +36,7 @@ from garak.generators.openai import OpenAIResponsesGenerator
 from garak.probes.midojo import (
     CHAIN_NOTE,
     InjectionSpecProbe,
+    MAX_PAYLOAD_BYTES,
     METADATA_NOTE,
     TRACE_NOTE,
 )
@@ -463,6 +464,35 @@ def test_unsupported_document_version_is_refused(tmp_path, monkeypatch):
         caught.value
     ), "the refusal names the version"
     assert opened == [], "the document is read before any handle opens"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "",
+        None,
+        14,
+        [],
+        "x" * (MAX_PAYLOAD_BYTES + 1),
+        "£" * (MAX_PAYLOAD_BYTES // 2 + 1),
+    ],
+)
+def test_invalid_plan_payload_is_refused_without_echoing_it(
+    tmp_path, monkeypatch, payload
+):
+    opened = []
+    monkeypatch.setattr(
+        midojo.evaluation_handle,
+        "open",
+        lambda *args, **kwargs: opened.append(args),
+    )
+    bad = entry("Look up ORD-101.", instructions=[instruction(payload)])
+    with pytest.raises(ConfigFailure) as caught:
+        _probe(tmp_path, bad)
+    assert "instruction 0" in str(caught.value), "the refusal names the plan item"
+    if isinstance(payload, str) and payload:
+        assert payload not in str(caught.value), "the refusal never repeats the content"
+    assert not opened, "no handle opens for an unadmitted payload"
 
 
 def test_missing_extra_asks_for_the_midojo_extra(tmp_path, monkeypatch):

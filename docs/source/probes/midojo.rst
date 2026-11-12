@@ -7,6 +7,9 @@ optional ``metadata``. The document's plan holds the authored payload; the
 probe never rewrites it. A missing, malformed or unsupported schema version is
 refused before any handle opens; the refusal names the harness's supported
 versions and truncates an unsupported version's representation to 99 characters.
+Each plan instruction needs a non-empty UTF-8 string payload of at most
+8192 bytes. The cap bounds a hostile document at this route's entry point;
+the refusal identifies the instruction by its index without printing content.
 
 The ``midojo-runtime`` extra is temporary while this route moves to the
 coordinator and components. **Do not install it from the package index.**
