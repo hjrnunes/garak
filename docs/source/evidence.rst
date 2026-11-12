@@ -89,6 +89,21 @@ both are null: nothing in v1 produces an environment for a single call. The
 snapshot's own ``pre_environment`` and ``environment`` are the only observation of the
 world.
 
+Delivery facts and exposure
+---------------------------
+
+A sealed call keeps the delivery facts its interceptor reported: for each
+injection instruction, whether its selector matched, how the payload was
+transformed and which parts of the result carry it. :mod:`garak.evidence.delivery`
+flattens the facts and derives, from them and the plan, an exposure per
+instruction and per boundary (``emitted``, ``agent_tool_result`` and
+``model_input``), each ``exposed``, ``not_exposed`` or ``unknown``. Nothing past
+the interceptor is observed, so an emitted payload's ``agent_tool_result`` is
+unknown and every payload's ``model_input`` is. A missing fact is a gap, never
+an absence: only a complete capture whose every call to the tool ran to its end
+shows a payload was not emitted. Delivery and exposure are report only and never
+change a grade.
+
 Per-call cost
 -------------
 
@@ -129,6 +144,7 @@ work from them, which review has to catch.
    evidence/links
    evidence/intake
    evidence/seal
+   evidence/delivery
    evidence/sealing
    evidence/world
    evidence/collector
