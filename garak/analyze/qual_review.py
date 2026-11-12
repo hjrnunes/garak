@@ -44,6 +44,7 @@ def build_review(report_path: str) -> dict:
     probe_detector_scores = {}
     pos_examples = defaultdict(list)
     neg_examples = defaultdict(list)
+    utility_detectors = garak.resources.metrics.utility_detectors_in_report(report_path)
 
     with open(report_path, "r", encoding="utf-8") as report_file:
         g = (json.loads(line.strip()) for line in report_file if line.strip())
@@ -78,11 +79,9 @@ def build_review(report_path: str) -> dict:
                 results = record["detector_results"]
                 for detector_name in results:
                     if (
-                        garak.resources.metrics.kind_in_notes(
-                            record.get("notes"), detector_name
-                        )
-                        == garak.resources.metrics.UTILITY
-                    ):
+                        record["probe_classname"],
+                        detector_name,
+                    ) in utility_detectors:
                         continue  # a completed task is not a failing example
                     for i, score in enumerate(results[detector_name]):
                         if score is None:

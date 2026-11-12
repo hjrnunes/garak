@@ -16,7 +16,8 @@ legitimate task. The evaluator reports the two kinds apart so that a utility
 result cannot change an attack success rate.
 """
 
-from typing import Optional, Tuple
+import json
+from typing import Optional, Set, Tuple
 
 SECURITY = "security"
 UTILITY = "utility"
@@ -122,3 +123,32 @@ def kind_in_notes(notes, detector_name: str) -> str:
 def metric_kind(attempt, detector_name: str) -> str:
     """Read what :func:`mark_kind` recorded; anything else reads as security"""
     return kind_in_notes(attempt.notes, detector_name)
+
+
+def utility_detectors_in_report(report_path: str) -> Set[Tuple[str, str]]:
+    """The probe and detector pairs that a report treats as utility
+
+    The evaluator reports a detector as utility for all the attempts of a probe
+    if any of them carries the utility mark. A tool that reads attempts one at a
+    time must ask this first, or it reads an attempt without the mark as an
+    attack.
+
+    :param report_path: path of a report JSONL file
+    :returns: pairs of probe class name and detector name
+    """
+    pairs = set()
+    with open(report_path, "r", encoding="utf-8") as report_file:
+        for line in report_file:
+            if KIND_NOTE not in line:  # no mark can be in the line
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(record, dict) or record.get("entry_type") != "attempt":
+                continue
+            results = record.get("detector_results")
+            for detector_name in results if isinstance(results, dict) else ():
+                if kind_in_notes(record.get("notes"), detector_name) == UTILITY:
+                    pairs.add((record.get("probe_classname"), detector_name))
+    return pairs

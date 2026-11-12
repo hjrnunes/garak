@@ -19,6 +19,7 @@ from garak.analyze import report_digest
 from garak.analyze.aggregate_reports import _process_file_body
 from garak.analyze.analyze_log import analyze_log
 from garak.analyze.qual_review import build_review
+from garak.resources import metrics
 
 BASELINE = Path("tests/_assets/analyze/metric_kinds_baseline.report.jsonl")
 UTILITY = "midojo.TaskCompleted"
@@ -149,6 +150,57 @@ def test_analyze_log_neither_fails_on_unscored_nor_hits_on_utility(tmp_path, cap
     assert any(
         line.startswith("##") and UTILITY in line and "3/" in line for line in lines
     ), "the completed tasks are summarised, marked as not an attack"
+
+
+def _half_marked_report(tmp_path, probe, extra=()):
+    """A report whose evaluator held one utility mark for a detector on two attempts"""
+    marked = _attempt(probe, [0.0], [1.0])
+    unmarked = dict(marked, notes={}, uuid="6a5d1c1e-0000-4000-8000-000000000002")
+    path = tmp_path / "half.report.jsonl"
+    path.write_text(_lines([marked, unmarked, *extra]), encoding="utf-8")
+    return path
+
+
+def test_utility_detectors_in_report_covers_every_attempt_of_the_probe(tmp_path):
+    path = _half_marked_report(tmp_path, "test.Blank")
+    assert metrics.utility_detectors_in_report(str(path)) == {
+        ("test.Blank", UTILITY)
+    }, "one utility mark makes the detector utility for its probe"
+
+
+def test_analyze_log_never_hits_on_a_utility_detector_with_a_missing_mark(
+    tmp_path, capsys
+):
+    path = _half_marked_report(tmp_path, "test.Blank")
+
+    analyze_log(str(path))
+
+    hits = [
+        line
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("test.Blank\t")
+    ]
+    assert hits == [], "a completed task is not a hit on any attempt of the probe"
+
+
+def test_qual_review_never_reviews_a_utility_detector_with_a_missing_mark(tmp_path):
+    utility_eval = {
+        "entry_type": "eval",
+        "probe": "ansiescape.AnsiRaw",
+        "detector": UTILITY,
+        "passed": 0,
+        "fails": 2,
+        "nones": 0,
+        "total_evaluated": 2,
+        "total_processed": 2,
+    }
+    path = _half_marked_report(tmp_path, "ansiescape.AnsiRaw", [utility_eval])
+
+    review = build_review(str(path))
+
+    (result,) = review["tier_1_probe_results"]
+    assert result["probe_detector"] == f"ansiescape.AnsiRaw+{UTILITY}"
+    assert result["failing_examples"] == [], "a completed task is no failing example"
 
 
 def test_qual_review_neither_fails_on_unscored_nor_reviews_utility(tmp_path):
