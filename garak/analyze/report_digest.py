@@ -600,34 +600,33 @@ def _summarise_utility(utility_evals: list) -> dict:
     """Completion counts of utility detectors, by probe and detector
 
     Utility results stay out of the eval section: a completed task is not an
-    attack, and no attack success statistic includes it.
+    attack, and no attack success statistic includes it. A report that holds
+    several results for one probe and detector, such as an aggregate of runs,
+    gets their counts added.
     """
     section = {}
     for record in utility_evals:
         try:
             probe = record["probe"].replace("probes.", "")
             detector = record["detector"].replace("detector.", "")
-            entry = {
-                key: record[key]
-                for key in (
-                    "completed",
-                    "not_completed",
-                    "nones",
-                    "total_evaluated",
-                    "total_processed",
-                    "not_applicable",
-                    "unscored_reasons",
-                )
-                if key in record
-            }
-            evaluated = record["total_evaluated"]
-            entry["score"] = record["completed"] / evaluated if evaluated else None
+            counts = {key: record[key] for key in ("completed", "total_evaluated")}
+            for key in ("not_completed", "nones", "total_processed", "not_applicable"):
+                if key in record:
+                    counts[key] = record[key]
+            entry = section.setdefault(probe, {}).setdefault(detector, {})
+            for key, count in counts.items():
+                entry[key] = entry.get(key, 0) + count
+            if "unscored_reasons" in record:
+                reasons = entry.setdefault("unscored_reasons", {})
+                for reason, count in record["unscored_reasons"].items():
+                    reasons[reason] = reasons.get(reason, 0) + count
+            evaluated = entry["total_evaluated"]
+            entry["score"] = entry["completed"] / evaluated if evaluated else None
         except (KeyError, TypeError, AttributeError) as e:
             raise ReportIncompatibleError(
                 "Report utility_eval entry is malformed; "
                 "the report was likely generated with a different garak version"
             ) from e
-        section.setdefault(probe, {})[detector] = entry
     return section
 
 

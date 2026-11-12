@@ -90,6 +90,43 @@ def test_digest_reports_utility_in_its_own_section(digest_pair):
     }, "utility is listed by probe and detector with its completion rate"
 
 
+def test_digest_pools_utility_results_repeated_for_a_probe_and_detector(tmp_path):
+    _config.load_base_config()
+    _config.reporting.taxonomy = None
+    second = {
+        "entry_type": "utility_eval",
+        "probe": "test.Blank",
+        "detector": UTILITY,
+        "completed": 1,
+        "not_completed": 3,
+        "nones": 1,
+        "total_evaluated": 4,
+        "total_processed": 5,
+        "unscored_reasons": {"errored": 1},
+    }
+    other_probe = dict(UTILITY_EVAL, probe="test.Other")
+    aggregate = io.StringIO()
+    _process_file_body(
+        io.StringIO(_lines([UTILITY_EVAL, second, other_probe])), aggregate, "agg"
+    )
+    path = tmp_path / "aggregate.report.jsonl"
+    path.write_text(BASELINE.read_text(encoding="utf-8") + aggregate.getvalue())
+
+    utility = report_digest.build_digest(str(path))["utility"]
+
+    assert utility["test.Blank"][UTILITY] == {
+        "completed": 4,
+        "not_completed": 4,
+        "nones": 3,
+        "total_evaluated": 8,
+        "total_processed": 11,
+        "not_applicable": 1,
+        "unscored_reasons": {"no_utility_check": 1, "errored": 2},
+        "score": 0.5,
+    }, "the counts of every result add, and the rate is over the sum"
+    assert utility["test.Other"][UTILITY]["completed"] == 3, "probes stay apart"
+
+
 def test_digest_attack_success_ignores_utility(digest_pair):
     without, with_utility = digest_pair
     for key in ("eval", "technique_intent_matrix"):
