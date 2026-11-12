@@ -33,12 +33,28 @@ original records remain in ``generator_tool_calls``. The trace is graded by
 ``toolcall.ToolCallCondition``, ``midojo.EvaluationVerdict`` and
 ``midojo.EvaluationEffect``.
 
+The probe gives the generator the live per-binding tool token so it can make
+tool calls. The Responses generator scrubs that token from the errors it
+records. Other generators are outside the probe's control: anything a
+generator emits is its own output, which the probe does not scrub.
+
 The tool block's bearer credential and ``interceptor_credential`` must never
 appear in serialisable conversation notes, the trace, a report or DEBUG logs.
 A remote interceptor needs both ``interceptor_url`` and
-``interceptor_credential``; alternatively the harness reads its environment
-pair. A lost release is recorded as ``release_error`` after sealing and does
-not overturn the sealed verdict.
+``interceptor_credential``. The credential must be a non-empty string with
+non-whitespace content and no control characters. The URL must be an HTTP(S)
+or WS(S) URL without user info, a query or a fragment. Paths and proxy
+prefixes are accepted. Invalid options are refused without echoing their values.
+Alternatively the harness reads its environment pair. A lost release is
+recorded as ``release_error`` after sealing and does not overturn the sealed
+verdict.
+
+The environment pair follows the same URL and credential admission rules as
+explicit interceptor options. A string ``upstream`` needs an HTTP(S) URL with
+a host and no user info; ports, paths and queries are accepted. Non-string
+upstream transport objects remain available for in-process interception.
+Unreadable source files and invalid handle-open options produce value-free
+configuration errors.
 
 .. automodule:: garak.probes.midojo
    :members:

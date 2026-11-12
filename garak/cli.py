@@ -9,8 +9,36 @@ REDACTED = "[redacted]"
 # option names that hold a secret, compared in lower case: a generator's key, and
 # the credentials a tool definition carries, such as an MCP server's authorization
 CREDENTIAL_KEYS = frozenset(
-    {"api_key", "authorization", "proxy-authorization", "x-api-key", "bind_credential"}
+    {
+        "api_key",
+        "authorization",
+        "proxy-authorization",
+        "x-api-key",
+        "bind_credential",
+        "interceptor_credential",
+    }
 )
+PROBE_URL_KEYS = frozenset({"interceptor_url", "upstream"})
+
+
+def _redact_url_userinfo(value):
+    """Mask the user info of a URL, valid or not, and keep the rest.
+
+    A URL option is logged before it is validated, so its user info can be pasted
+    with a missing or malformed scheme, or with a slash, question mark or hash in
+    the secret. Everything between the scheme separator, if there is one, and the
+    last at sign is masked.
+    """
+    import re
+
+    if not isinstance(value, str):
+        return value
+    scheme = re.match(r"(?:[a-z0-9+.-]*:)?//", value, re.I)
+    prefix = scheme.group(0) if scheme is not None else ""
+    at = value.rfind("@", len(prefix))
+    if at < 0:
+        return value
+    return prefix + REDACTED + value[at:]
 
 
 def redact_credentials(value):
@@ -30,7 +58,15 @@ def redact_credentials(value):
             key: (
                 REDACTED
                 if isinstance(key, str) and key.lower() in CREDENTIAL_KEYS
-                else redact_credentials(item)
+                else (
+                    _redact_url_userinfo(item)
+                    if (
+                        isinstance(key, str)
+                        and key.lower() in PROBE_URL_KEYS
+                        and isinstance(item, str)
+                    )
+                    else redact_credentials(item)
+                )
             )
             for key, item in value.items()
         }
@@ -120,7 +156,7 @@ def _redact_json(text):
     try:
         parsed = json.loads(body)
     except json.JSONDecodeError:
-        if any(key in body.lower() for key in CREDENTIAL_KEYS):
+        if any(key in body.lower() for key in CREDENTIAL_KEYS | PROBE_URL_KEYS):
             return f"{name}={REDACTED}" if name else REDACTED
         return text
     redacted = redact_credentials(parsed)

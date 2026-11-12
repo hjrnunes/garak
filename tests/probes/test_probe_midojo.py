@@ -13,9 +13,14 @@ import pathlib
 import pickle
 import subprocess
 import sys
+import traceback
 from types import SimpleNamespace
 
+import httpx
+import openai
 import pytest
+from openai._models import construct_type
+from openai.types.responses import Response
 
 import garak._plugins
 import garak.cli
@@ -26,7 +31,8 @@ from garak.attempt import Message
 from garak.detectors.midojo import EvaluationEffect, EvaluationVerdict
 from garak.detectors.toolcall import ToolCallCondition
 from garak.evaluators import ThresholdEvaluator
-from garak.exception import ConfigFailure
+from garak.exception import ConfigFailure, GarakException
+from garak.generators.openai import OpenAIResponsesGenerator
 from garak.probes.midojo import (
     CHAIN_NOTE,
     InjectionSpecProbe,
@@ -45,6 +51,7 @@ from midojo.injection_spec_document import SUPPORTED_DOCUMENT_VERSIONS  # noqa: 
 from midojo_spec.link import CREDENTIAL_ENV, URL_ENV  # noqa: E402
 from midojo.interception_host import RemoteInterception  # noqa: E402
 from midojo.runtimes import RuntimeCapabilities  # noqa: E402
+from midojo_sdk.binding import binding_url  # noqa: E402
 
 CREDENTIAL = "the-bind-credential"
 
@@ -1389,6 +1396,447 @@ def test_one_interceptor_parameter_alone_is_refused(tmp_path, given):
     assert CREDENTIAL not in str(caught.value), "and never repeats the credential"
 
 
+def _exception_chain_text(error):
+    parts = []
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        parts.append(str(error))
+        error = error.__cause__ or error.__context__
+    return " ".join(parts)
+
+
+def _option_values(sentinel):
+    class RevealingValue:
+        def __str__(self):
+            return sentinel
+
+        __repr__ = __str__
+
+    class RevealingString(str):
+        def __str__(self):
+            return sentinel
+
+        __repr__ = __str__
+
+    class RevealingInt(int):
+        def __str__(self):
+            return sentinel
+
+        __repr__ = __str__
+
+    class RevealingFloat(float):
+        def __str__(self):
+            return sentinel
+
+        __repr__ = __str__
+
+    return {
+        "list": [sentinel],
+        "tuple": (sentinel,),
+        "dict": {sentinel: sentinel},
+        "set": {sentinel},
+        "bytes": sentinel.encode(),
+        "int": RevealingInt(1),
+        "float": RevealingFloat(1.0),
+        "bool": True,
+        "object": RevealingValue(),
+        "str_subclass": RevealingString("verify"),
+        "empty": "",
+        "control": f"\x00{sentinel}\r\n",
+        "none": None,
+    }
+
+
+@pytest.mark.parametrize("option", tuple(InjectionSpecProbe.DEFAULT_PARAMS))
+@pytest.mark.parametrize("kind", tuple(_option_values("marker")))
+def test_every_probe_option_keeps_hostile_values_out_of_diagnostics(
+    tmp_path, monkeypatch, caplog, capsys, option, kind
+):
+    sentinel = f"sentinel-option-{option}-{kind}-end"
+    value = _option_values(sentinel)[kind]
+
+    class OfflineHandle:
+        result = None
+        closed = False
+
+        def start_turn(self, turn):
+            pass
+
+        def tool_block(self):
+            return {"server_url": "http://localhost/mcp", "authorization": "safe"}
+
+        def close(self):
+            self.closed = True
+
+    class OfflineGenerator:
+        def generate(self, prompt, generations_this_call=1):
+            return [Message("Done.", notes={"response_status": "completed"})]
+
+        def clear_history(self):
+            pass
+
+    monkeypatch.setattr(
+        midojo.evaluation_handle, "open", lambda *args, **kwargs: OfflineHandle()
+    )
+    caplog.set_level(logging.DEBUG)
+    caplog.set_level(logging.DEBUG, logger="garak")
+    for route in ("config", "assigned"):
+        caplog.clear()
+        capsys.readouterr()
+        attempts = []
+        error = None
+        try:
+            params = {
+                "interceptor_url": "http://localhost:8767",
+                "interceptor_credential": "safe",
+            }
+            if route == "config":
+                params[option] = value
+            probe = _probe(tmp_path, entry("Look up ORD-101."), **params)
+            if route == "assigned":
+                setattr(probe, option, value)
+            probe.generator = OfflineGenerator()
+            attempt = probe._start_chain(0)
+            attempts.append(probe._execute_attempt(attempt))
+            probe._attach_trace(
+                attempts[-1],
+                {
+                    "tool_calls": [],
+                    "sealed": "final",
+                    "error": None,
+                    "capture_complete": True,
+                    "verdict": {"grade": {"injection_delivered": True}},
+                },
+            )
+            if route == "assigned" and option in (
+                "max_calls_per_conv",
+                "follow_prompt_cap",
+            ):
+                monkeypatch.setattr(probe, "_execute_all", lambda attempts: [])
+                probe.probe(OfflineGenerator())
+        except (GarakException, TypeError, ValueError, OSError) as exc:
+            error = exc
+        captured = capsys.readouterr()
+        records = "\n".join(
+            str(record.msg)
+            + repr(record.args)
+            + record.getMessage()
+            + (
+                "".join(traceback.format_exception(*record.exc_info))
+                if record.exc_info
+                else ""
+            )
+            for record in caplog.records
+        )
+        assert sentinel not in records + captured.out + captured.err, (
+            option,
+            kind,
+            route,
+            "log or console",
+        )
+        if error is not None:
+            chain = []
+            pending = [error]
+            seen = set()
+            while pending:
+                current = pending.pop()
+                if current is None or id(current) in seen:
+                    continue
+                seen.add(id(current))
+                chain.extend((str(current), repr(current)))
+                pending.extend((current.__cause__, current.__context__))
+            assert sentinel not in " ".join(chain), (option, kind, route, "exception")
+        for attempt in attempts:
+            notes = json.dumps(
+                {"attempt": attempt.notes, "conversation": attempt.prompt.notes},
+                default=repr,
+            )
+            report = json.dumps(attempt.as_dict(), default=repr)
+            assert sentinel not in notes + report, (option, kind, route, "report notes")
+
+
+@pytest.mark.parametrize(
+    "kind", ["missing", "directory", "relative", "file_parent", "unreadable"]
+)
+def test_source_path_filesystem_refusals_seal_diagnostics(
+    tmp_path, monkeypatch, caplog, capsys, kind
+):
+    sentinel = f"sentinel-source-{kind}"
+    source = tmp_path / sentinel
+    if kind == "directory":
+        source.mkdir()
+    elif kind == "relative":
+        source = pathlib.Path(sentinel) / "missing.json"
+    elif kind == "file_parent":
+        source.write_text("not a directory", encoding="utf-8")
+        source = source / "missing.json"
+    elif kind == "unreadable":
+        source.write_text("[]", encoding="utf-8")
+        source.chmod(0)
+    try:
+        if kind == "unreadable":
+            try:
+                if (
+                    os.access(source, os.R_OK)
+                    and source.read_text(encoding="utf-8") == "[]"
+                ):
+                    pytest.skip("the process can read files without mode bits")
+            except PermissionError:
+                pass
+        caplog.set_level(logging.DEBUG)
+        with pytest.raises(ConfigFailure) as caught:
+            InjectionSpecProbe(
+                config_root={
+                    "probes": {
+                        "midojo": {"InjectionSpecProbe": {"source_path": str(source)}}
+                    }
+                }
+            )
+        assert "source_path" in str(caught.value)
+        assert sentinel not in _exception_chain_text(caught.value)
+        output = capsys.readouterr()
+        assert sentinel not in output.out + output.err
+        assert sentinel not in " ".join(
+            record.getMessage() for record in caplog.records
+        )
+    finally:
+        if kind == "unreadable":
+            source.chmod(0o600)
+
+
+@pytest.mark.parametrize("suffix", [".json", ".jsonl"])
+def test_source_path_read_error_is_value_free(
+    tmp_path, monkeypatch, caplog, capsys, suffix
+):
+    sentinel = "sentinel-unreadable-source"
+    source = tmp_path / (sentinel + suffix)
+    source.write_text("[]", encoding="utf-8")
+    real_read = pathlib.Path.read_text
+
+    def unreadable(path, *args, **kwargs):
+        if path == source:
+            raise PermissionError(13, sentinel, str(source))
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "read_text", unreadable)
+    caplog.set_level(logging.DEBUG)
+    with pytest.raises(ConfigFailure) as caught:
+        InjectionSpecProbe(
+            config_root={
+                "probes": {
+                    "midojo": {"InjectionSpecProbe": {"source_path": str(source)}}
+                }
+            }
+        )
+    assert "source_path" in str(caught.value)
+    assert sentinel not in _exception_chain_text(caught.value)
+    output = capsys.readouterr()
+    assert sentinel not in output.out + output.err
+    assert sentinel not in " ".join(record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "sentinel-upstream",
+        "ftp://sentinel-upstream.example/mcp",
+        "https://sentinel-upstream@localhost:8767/mcp",
+        "https://localhost:bad-sentinel-upstream/mcp",
+        "https://localhost:8767/mcp?x=sentinel-upstream\n",
+    ],
+)
+def test_upstream_refusal_is_value_free(tmp_path, value):
+    source = tmp_path / "source.json"
+    source.write_text(json.dumps([entry("Look up ORD-101.")]), encoding="utf-8")
+    with pytest.raises(ConfigFailure) as caught:
+        InjectionSpecProbe(
+            config_root={
+                "probes": {
+                    "midojo": {
+                        "InjectionSpecProbe": {
+                            "source_path": str(source),
+                            "upstream": value,
+                        }
+                    }
+                }
+            }
+        )
+    assert "upstream" in str(caught.value)
+    assert "sentinel-upstream" not in _exception_chain_text(caught.value)
+
+
+@pytest.mark.parametrize("error_type", [TypeError, ValueError])
+def test_handle_open_errors_do_not_echo_options(tmp_path, monkeypatch, error_type):
+    probe = _probe(tmp_path, entry("Look up ORD-101."))
+    probe.upstream = "https://localhost:8767/mcp?key=sentinel-upstream"
+
+    def fail(*args, **kwargs):
+        raise error_type("sentinel-upstream")
+
+    monkeypatch.setattr(midojo.evaluation_handle, "open", fail)
+    with pytest.raises(ConfigFailure) as caught:
+        probe._start_chain(0)
+    assert "evaluation" in str(caught.value)
+    assert "sentinel-upstream" not in _exception_chain_text(caught.value)
+
+
+@pytest.mark.parametrize("kind", ["userinfo", "scheme", "port", "credential"])
+def test_environment_interceptor_is_admitted_before_open(tmp_path, monkeypatch, kind):
+    sentinel = "sentinel-environment"
+    url = "https://localhost:8767/proxy"
+    credential = "valid-credential"
+    if kind == "userinfo":
+        url = f"https://{sentinel}@localhost:8767/proxy"
+    elif kind == "scheme":
+        url = f"{sentinel}://localhost:8767/proxy"
+    elif kind == "port":
+        url = f"https://localhost:{sentinel}/proxy"
+    else:
+        credential = "\n" + sentinel
+    monkeypatch.setenv(URL_ENV, url)
+    monkeypatch.setenv(CREDENTIAL_ENV, credential)
+    probe = _probe(tmp_path, entry("Look up ORD-101."))
+    monkeypatch.setattr(
+        midojo.evaluation_handle,
+        "open",
+        lambda *args, **kwargs: pytest.fail("invalid environment reached open"),
+    )
+    with pytest.raises(ConfigFailure) as caught:
+        probe._start_chain(0)
+    assert "interceptor_" in str(caught.value)
+    assert sentinel not in _exception_chain_text(caught.value)
+
+
+def test_valid_environment_pair_and_upstream_reach_handle(tmp_path, monkeypatch):
+    monkeypatch.setenv(URL_ENV, "https://localhost:8767/proxy")
+    monkeypatch.setenv(CREDENTIAL_ENV, "valid-credential")
+    opened = []
+    monkeypatch.setattr(midojo.evaluation_handle, "open", _recording_open(opened))
+    probe = _probe(tmp_path, entry("Look up ORD-101."))
+    upstream = "https://localhost:8767/mcp?keep=value"
+    probe.upstream = upstream
+    probe._start_chain(0)
+    assert opened[0]["upstream"] == upstream
+    assert "interception" not in opened[0], "the harness reads its environment pair"
+
+
+@pytest.mark.parametrize(
+    "credential",
+    [
+        ["sentinel-option-secret"],
+        {"key": "sentinel-option-secret"},
+        23,
+        b"sentinel-option-secret",
+        "",
+        "  ",
+    ],
+)
+def test_remote_credential_refusal_never_repeats_the_value(tmp_path, credential):
+    with pytest.raises(ConfigFailure) as caught:
+        _probe(
+            tmp_path,
+            entry("Look up ORD-101."),
+            interceptor_url="http://127.0.0.1:8767",
+            interceptor_credential=credential,
+        )
+    assert "interceptor_credential" in str(caught.value)
+    assert "must be a non-empty string" in str(caught.value)
+    assert "sentinel-option-secret" not in _exception_chain_text(caught.value)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        ["sentinel-option-secret"],
+        {"host": "sentinel-option-secret"},
+        23,
+        b"sentinel-option-secret",
+        "",
+        "http://user:sentinel-option-secret@127.0.0.1:8767",
+        "http://127.0.0.1:8767/?token=sentinel-option-secret",
+    ],
+)
+def test_remote_url_refusal_never_repeats_the_value(tmp_path, url):
+    with pytest.raises(ConfigFailure) as caught:
+        _probe(
+            tmp_path,
+            entry("Look up ORD-101."),
+            interceptor_url=url,
+            interceptor_credential=CREDENTIAL,
+        )
+    assert "interceptor_url" in str(caught.value)
+    assert "sentinel-option-secret" not in _exception_chain_text(caught.value)
+
+
+def test_mutated_interceptor_options_are_refused_before_a_handle_opens(
+    tmp_path, monkeypatch
+):
+    probe = _probe(
+        tmp_path,
+        entry("Look up ORD-101."),
+        interceptor_url="http://127.0.0.1:8767",
+        interceptor_credential=CREDENTIAL,
+    )
+    probe.interceptor_credential = ["sentinel-option-secret"]
+    monkeypatch.setattr(
+        midojo.evaluation_handle,
+        "open",
+        lambda *args, **kwargs: pytest.fail("no handle may open"),
+    )
+    with pytest.raises(ConfigFailure) as caught:
+        probe._start_chain(0)
+    assert "sentinel-option-secret" not in _exception_chain_text(caught.value)
+
+
+def test_remote_interception_constructor_error_does_not_escape_in_context(
+    tmp_path, monkeypatch
+):
+    probe = _probe(
+        tmp_path,
+        entry("Look up ORD-101."),
+        interceptor_url="http://127.0.0.1:8767",
+        interceptor_credential=CREDENTIAL,
+    )
+    monkeypatch.setattr(
+        probe._midojo,
+        "RemoteInterception",
+        lambda *args: (_ for _ in ()).throw(ValueError("sentinel-option-secret")),
+    )
+    with pytest.raises(ConfigFailure) as caught:
+        probe._start_chain(0)
+    assert "sentinel-option-secret" not in _exception_chain_text(caught.value)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost",
+        "https://localhost:8767",
+        "http://127.0.0.1:8767/",
+        "https://127.0.0.1:8767/proxy",
+        "http://[::1]:8767",
+        "https://HOST_Name:8767/prefix/",
+        "ws://localhost:8767",
+        "wss://localhost:8767/prefix",
+    ],
+)
+def test_remote_service_url_forms_preserve_the_binding_path(tmp_path, monkeypatch, url):
+    opened = []
+    monkeypatch.setattr(midojo.evaluation_handle, "open", _recording_open(opened))
+    probe = _probe(
+        tmp_path,
+        entry("Look up ORD-101."),
+        interceptor_url=url,
+        interceptor_credential=CREDENTIAL,
+    )
+    probe._start_chain(0)
+    assert opened[0]["interception"].url == url, "the probe retains the service URL"
+    assert binding_url(url).endswith(
+        "/v1/bindings"
+    ), "the harness accepts the service base and appends its binding path"
+
+
 def test_without_an_interceptor_the_probe_listens_in_this_process(tmp_path, report):
     before = _own_listeners()
     probe = _probe(tmp_path, entry("Look up ORD-101 for me."))
@@ -1478,3 +1926,433 @@ def test_the_environment_names_the_service_when_the_probe_sets_no_interceptor(
     assert (
         trace["verdict"]["grade"]["security"] is True
     ), "the environment alone selects the same remote chain"
+
+
+@pytest.mark.parametrize(
+    "status,kind",
+    [
+        (400, openai.BadRequestError),
+        (418, openai.APIStatusError),
+        (401, openai.AuthenticationError),
+        (None, None),
+    ],
+    ids=["400", "418", "401", "structured-failed-response"],
+)
+def test_responses_error_echoing_live_probe_bearer_stays_out_of_evidence(
+    tmp_path, monkeypatch, caplog, capsys, report, status, kind
+):
+    """The actual Responses generator receives the probe's bearer and scrubs echoes."""
+    observed = []
+    escaped_header = 'quoted-"\\-credential'
+    escaped_spelling = json.dumps(escaped_header)[1:-1]
+
+    def reject(**create_args):
+        bearer = create_args["tools"][0]["authorization"]
+        token = bearer.split()[-1]
+        observed.append((bearer, token))
+        assert create_args["tools"][0]["headers"]["X-Api-Key"] == escaped_header
+        body = (
+            f"rejected plain={bearer}; escaped={escaped_spelling}; "
+            f"bare={token}; header={escaped_header}"
+        )
+        if status is None:
+            # the API answers 200 with a response that failed and echoes the request
+            return construct_type(
+                type_=Response,
+                value={
+                    "id": "resp_1",
+                    "object": "response",
+                    "created_at": 0,
+                    "model": "test-model",
+                    "status": "failed",
+                    "parallel_tool_calls": True,
+                    "tool_choice": "auto",
+                    "tools": [],
+                    "output": [
+                        {
+                            "type": "mcp_call",
+                            "id": f"mc_{token}",
+                            "name": "lookup_order",
+                            "arguments": "{}",
+                            "server_label": "target",
+                            "status": "failed",
+                            "output": body,
+                            "error": body,
+                        }
+                    ],
+                    "error": {"code": "server_error", "message": body},
+                },
+            )
+        response = httpx.Response(
+            status,
+            request=httpx.Request("POST", "http://offline.test/v1/responses"),
+            text=body,
+        )
+        raise kind(message=body, response=response, body=body)
+
+    client = SimpleNamespace(
+        responses=SimpleNamespace(create=reject), close=lambda: None
+    )
+    monkeypatch.setattr(openai, "OpenAI", lambda **kwargs: client)
+    generator = OpenAIResponsesGenerator(
+        name="test-model",
+        config_root={
+            "generators": {
+                "openai": {"OpenAIResponsesGenerator": {"api_key": "offline-test-key"}}
+            }
+        },
+    )
+    probe = _probe(tmp_path, entry("Look up ORD-101."))
+    real_open = midojo.evaluation_handle.open
+
+    def open_with_escaped_header(*args, **kwargs):
+        handle = real_open(*args, **kwargs)
+        tool_block = handle.tool_block
+
+        def block():
+            return {**tool_block(), "headers": {"X-Api-Key": escaped_header}}
+
+        monkeypatch.setattr(handle, "tool_block", block)
+        return handle
+
+    monkeypatch.setattr(midojo.evaluation_handle, "open", open_with_escaped_header)
+    caplog.set_level(logging.DEBUG)
+    generator_errors = []
+    if status == 401:
+        original_call = generator._call_model
+
+        def record_exception(*args, **kwargs):
+            try:
+                return original_call(*args, **kwargs)
+            except garak.exception.GarakException as error:
+                generator_errors.append(str(error))
+                raise
+
+        monkeypatch.setattr(generator, "_call_model", record_exception)
+        assert (
+            probe.probe(generator) == []
+        ), "the iterative base stops on authentication failure"
+        assert generator_errors, "the generator raises its own scrubbed exception"
+        evidence = generator_errors[0]
+        assert "authentication failed" in evidence
+    else:
+        (attempt,) = probe.probe(generator)
+        notes = attempt.outputs[0].notes
+        if status is None:
+            assert attempt.notes[TRACE_NOTE]["error"] == "ResponsesNotCompleted"
+            assert "[redacted]" in notes["response"]["error"]["message"]
+            (call,) = notes["generator_tool_calls"]
+            assert "[redacted]" in call["error"]
+            assert "[redacted]" in call["output"]
+            assert call["id"] == "mc_[redacted]", "an id the API chose can echo it too"
+            assert notes["output_items"][0]["id"] == "mc_[redacted]"
+        else:
+            assert attempt.notes[TRACE_NOTE]["error"] == kind.__name__
+            assert notes["error"]["type"] == kind.__name__
+            assert "[redacted]" in notes["error"]["body"]
+        evidence = json.dumps(
+            {
+                "outputs": [output.notes for output in attempt.outputs],
+                "trace": attempt.notes[TRACE_NOTE],
+                "report": attempt.as_dict(),
+            },
+            default=repr,
+        )
+    report.flush()
+    evidence += pathlib.Path(report.name).read_text(encoding="utf-8")
+    assert observed, "the real generator sent the live tool block to its client"
+    bearer, token = observed[0]
+    assert bearer and token and bearer != "offline-test-key"
+    output = capsys.readouterr()
+    recorded = "\n".join(
+        record.getMessage()
+        + (
+            ""
+            if record.exc_info is None
+            else "".join(traceback.format_exception(*record.exc_info))
+        )
+        for record in caplog.records
+    )
+    for secret in (
+        bearer,
+        json.dumps(bearer)[1:-1],
+        token,
+        escaped_header,
+        escaped_spelling,
+    ):
+        assert secret not in evidence + recorded + output.out + output.err, (
+            status,
+            "generator error echoed a request credential",
+        )
+
+
+SENTINEL = "sentinel-probe-option-credential-must-never-be-written"
+REDACTION_MARKER = "[redacted]"
+INTERCEPTOR_URL = "http://127.0.0.1:8767"
+
+# Every spelling that hands the probe its credential, named after the option it uses
+ROUTES = [
+    "probe_options",
+    "probe_options_equals",
+    "probe_option_file",
+    "config",
+    "generator_options_equals",
+]
+# The routes that hand the probe this credential, so the run reaches its bind
+PROBE_ROUTES = [
+    "probe_options",
+    "probe_options_equals",
+    "probe_option_file",
+    "config",
+]
+
+
+def _cli_homes(tmp_path):
+    """A private garak data, config and cache home, so the run leaves the shell alone."""
+    homes = {}
+    for name in ("data", "config", "cache"):
+        home = tmp_path / name
+        home.mkdir()
+        homes[f"XDG_{name.upper()}_HOME"] = str(home)
+    return homes
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"midojo.InjectionSpecProbe": {"interceptor_credential": "sentinel"}}',
+        '--probe_options={"midojo.InjectionSpecProbe": {"interceptor_credential": "sentinel"}}',
+        '-o={"interceptor_credential": "sentinel"}',
+    ],
+)
+def test_the_log_masks_a_midojo_credential_in_every_json_option_spelling(text):
+    redacted = garak.cli.redact_credentials(text)
+
+    assert "sentinel" not in redacted
+    assert REDACTION_MARKER in redacted
+
+
+def test_the_midojo_log_leaves_a_non_json_option_unchanged():
+    assert (
+        garak.cli.redact_credentials("--probe_option_file=options=1.json")
+        == "--probe_option_file=options=1.json"
+    )
+
+
+@pytest.mark.parametrize("key", ["interceptor_url", "upstream"])
+@pytest.mark.parametrize("route", ["dict", "json", "equals"])
+def test_cli_redacts_only_url_userinfo(key, route):
+    url = "https://sentinel-user:sentinel-pass@localhost:8767/prefix?keep=value"
+    options = {
+        "midojo.InjectionSpecProbe": {
+            key: url,
+            "other_url": url,
+            "interceptor_credential": "sentinel-credential",
+        }
+    }
+    given = (
+        options
+        if route == "dict"
+        else (
+            json.dumps(options)
+            if route == "json"
+            else f"--probe_options={json.dumps(options)}"
+        )
+    )
+    redacted = garak.cli.redact_credentials(given)
+    rendered = str(redacted)
+    assert "sentinel-user" in rendered, "unrelated URL values stay unchanged"
+    assert rendered.count("sentinel-user") == 1, "only named option userinfo is masked"
+    assert "sentinel-credential" not in rendered
+    assert f"https://[redacted]@localhost:8767/prefix?keep=value" in rendered
+
+
+@pytest.mark.parametrize("key", ["interceptor_url", "upstream"])
+def test_cli_preserves_nested_credential_redaction_for_non_url_option_values(key):
+    value = {key: {"api_key": "sentinel-nested-secret"}}
+    assert garak.cli.redact_credentials(value) == {
+        key: {"api_key": "[redacted]"}
+    }, "non-string values still follow the existing credential masking rule"
+
+
+@pytest.mark.parametrize(
+    "scheme", ["http://", "9http://", "//", "", "http://sentinel-cli-user:p/"]
+)
+def test_cli_log_masks_probe_url_userinfo_offline(tmp_path, scheme):
+    """The log is written before the probe refuses a malformed URL."""
+    url = f"{scheme}sentinel-cli-user:sentinel-cli-pass@localhost:8767/proxy"
+    upstream = "https://sentinel-upstream@localhost:8767/mcp?keep=yes"
+    output, log_text, _ = _cli_run(
+        tmp_path, "probe_options", url=url, upstream=upstream
+    )
+    assert "DEBUG" in log_text
+    assert "sentinel-cli-user" not in log_text + output
+    assert "sentinel-cli-pass" not in log_text + output
+    assert "sentinel-upstream" not in log_text + output
+    assert "[redacted]@localhost:8767" in log_text
+
+
+def _credential_route(tmp_path, route, url=INTERCEPTOR_URL, upstream=None):
+    """The CLI arguments for one hand-supplied credential route."""
+    options = {
+        "midojo.InjectionSpecProbe": {
+            "interceptor_url": url,
+            "interceptor_credential": SENTINEL,
+        }
+    }
+    if upstream is not None:
+        options["midojo.InjectionSpecProbe"]["upstream"] = upstream
+    if route == "probe_options":
+        return ["--probe_options", json.dumps(options)]
+    if route == "probe_options_equals":
+        return [f"--probe_options={json.dumps(options)}"]
+    if route == "probe_option_file":
+        option_file = tmp_path / "probe_options.json"
+        option_file.write_text(json.dumps(options), encoding="utf-8")
+        return ["--probe_option_file", str(option_file)]
+    if route == "generator_options_equals":
+        # the generator never reads it: the raw argument is what the log must mask
+        generator_options = {"test.Blank": {"interceptor_credential": SENTINEL}}
+        return [f"--generator_options={json.dumps(generator_options)}"]
+    config_file = tmp_path / "credential.yaml"
+    config_file.write_text(
+        "plugins:\n"
+        "  probes:\n"
+        "    midojo.InjectionSpecProbe:\n"
+        f"      interceptor_url: {url}\n"
+        f"      interceptor_credential: {SENTINEL}\n"
+        + (f"      upstream: {upstream}\n" if upstream is not None else ""),
+        encoding="utf-8",
+    )
+    return ["--config", str(config_file)]
+
+
+def _cli_run(tmp_path, route, url=INTERCEPTOR_URL, upstream=None):
+    """Run the probe from the CLI with one credential route; return its output and files."""
+    log_path = tmp_path / "garak.log"
+    env = dict(os.environ, **_cli_homes(tmp_path), GARAK_LOG_FILE=str(log_path))
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "garak",
+            "--target_type",
+            "test",
+            "--probes",
+            "midojo.InjectionSpecProbe",
+            "--generations",
+            "1",
+            *_credential_route(tmp_path, route, url=url, upstream=upstream),
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    output = completed.stdout + completed.stderr
+    reports = sorted((tmp_path / "data" / "garak" / "garak_runs").glob("*.jsonl"))
+    return output, log_path.read_text(encoding="utf-8"), reports
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_the_cli_masks_a_hand_supplied_midojo_credential_in_every_option_spelling(
+    tmp_path, route
+):
+    output, log_text, reports = _cli_run(tmp_path, route)
+
+    assert "DEBUG" in log_text, "garak.log holds the run's debug lines"
+    assert SENTINEL not in log_text, "garak.log never records the credential"
+    if route in PROBE_ROUTES:
+        assert (
+            "probe start for garak.probes.midojo.InjectionSpecProbe" in log_text
+        ), "the probe takes the hand-supplied credential, so the run reaches the bind"
+    if route in ("probe_options", "probe_options_equals", "generator_options_equals"):
+        assert (
+            "interceptor_credential" in log_text
+        ), "the log still records the option the run was given"
+        assert REDACTION_MARKER in log_text, "with its value masked"
+
+    assert reports, f"the run wrote no report: {output[-2000:]}"
+    report_text = "\n".join(path.read_text(encoding="utf-8") for path in reports)
+    assert SENTINEL not in report_text, "report.jsonl never records the credential"
+    assert (
+        "midojo.InjectionSpecProbe" in report_text
+    ), "the report still records the plugin the run selected"
+
+
+def test_the_cli_binds_the_midojo_remote_interceptor_from_its_probe_options(tmp_path):
+    """The hand-supplied route reaches the service and seals a real evaluation."""
+    with _remote_interceptor(SENTINEL) as service:
+        output, log_text, reports = _cli_run(
+            tmp_path,
+            "probe_options",
+            url=service["url"],
+            upstream=service["upstream_url"],
+        )
+
+    assert "DEBUG" in log_text, "garak.log holds the run's debug lines"
+    assert SENTINEL not in log_text, "garak.log never records the credential"
+    assert reports, f"the run wrote no report: {output[-2000:]}"
+    attempts = [
+        entry
+        for path in reports
+        for entry in _report_entries(path)
+        if entry.get("entry_type") == "attempt"
+    ]
+    assert attempts, "the CLI run reaches the probe's attempt"
+    trace = attempts[-1]["notes"][TRACE_NOTE]
+    assert trace["sealed"] == "final", "the service acknowledged the bind and the seal"
+    assert trace["evaluation_id"], "the service sealed an evaluation for this run"
+    report_text = "\n".join(path.read_text(encoding="utf-8") for path in reports)
+    assert SENTINEL not in report_text, "report.jsonl never records the credential"
+
+
+def test_a_tool_block_and_bind_credential_never_enter_report_notes(
+    tmp_path, report, remote_service, monkeypatch, caplog
+):
+    actual_open = midojo.evaluation_handle.open
+
+    def with_sentinel_block(*args, **kwargs):
+        handle = actual_open(*args, **kwargs)
+        original = handle.tool_block
+        handle.tool_block = lambda: {**original(), "authorization": SENTINEL}
+        return handle
+
+    monkeypatch.setattr(midojo.evaluation_handle, "open", with_sentinel_block)
+    probe = _probe(
+        tmp_path,
+        entry("Look up ORD-101."),
+        interceptor_url=remote_service["url"],
+        interceptor_credential=CREDENTIAL,
+    )
+    probe.upstream = remote_service["upstream_url"]
+    agent = ScriptedAgent()
+
+    def reply(prompt, generations_this_call=1):
+        agent.prompts.append(prompt)
+        assert (
+            prompt.notes["tools"][0]["authorization"] == SENTINEL
+        ), "the generator receives the live MCP credential"
+        return [Message("I cannot do that.", notes={"response_status": "completed"})]
+
+    agent.generate = reply
+    with caplog.at_level(logging.DEBUG):
+        attempts = list(probe.probe(agent))
+    report.flush()
+    written = (tmp_path / "probe.report.jsonl").read_text(encoding="utf-8")
+    written += json.dumps(attempts[0].as_dict())
+    assert (
+        SENTINEL not in written
+    ), "no started or final report line holds the tool token"
+    assert CREDENTIAL not in written, "the bind credential stays out of the report"
+    assert SENTINEL not in "\n".join(
+        record.getMessage() for record in caplog.records
+    ), "DEBUG records never hold the tool token"
+    assert CREDENTIAL not in "\n".join(
+        record.getMessage() for record in caplog.records
+    ), "DEBUG records never hold the bind credential"
+    assert (
+        attempts[0].prompt.notes["tools"][0]["authorization"] == "[redacted]"
+    ), "the serialisable conversation has a redacted block"

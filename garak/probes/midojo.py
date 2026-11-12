@@ -15,16 +15,19 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterable
+from urllib.parse import urlsplit
 
 import garak.attempt
 import garak.probes
 from garak import _config
-from garak.exception import ConfigFailure
+from garak.cli import redact_credentials
+from garak.exception import ConfigFailure, GarakException
 from garak.probes._injection_shared import resolve_source, turn_failure
 
 CHAIN_NOTE = "injection_spec_chain"
@@ -55,8 +58,8 @@ def _midojo() -> SimpleNamespace:
         from midojo.injection_spec import InjectionSpec
         from midojo.injection_spec_document import (
             InjectionSpecDocumentError,
-            UnsupportedDocumentVersion,
             SUPPORTED_DOCUMENT_VERSIONS,
+            UnsupportedDocumentVersion,
         )
         from midojo.interception_host import RemoteInterception
         from midojo.runtimes import runtime_capabilities
@@ -73,8 +76,8 @@ def _midojo() -> SimpleNamespace:
         exposure=exposure,
         InjectionSpec=InjectionSpec,
         InjectionSpecDocumentError=InjectionSpecDocumentError,
-        UnsupportedDocumentVersion=UnsupportedDocumentVersion,
         SUPPORTED_DOCUMENT_VERSIONS=SUPPORTED_DOCUMENT_VERSIONS,
+        UnsupportedDocumentVersion=UnsupportedDocumentVersion,
         RemoteInterception=RemoteInterception,
         runtime_capabilities=runtime_capabilities,
     )
@@ -91,23 +94,25 @@ def plain(value: Any) -> Any:
 
 def load_injection_spec_entries(source: Path, owner: str) -> list[dict]:
     """Load JSON or JSONL entries, skipping malformed records with a warning."""
+    contents = None
+    try:
+        contents = source.read_text(encoding="utf-8")
+    except OSError:
+        pass
+    if contents is None:
+        raise ConfigFailure(f"{owner}: source_path cannot be read") from None
     if source.suffix == ".jsonl":
-        entries = [
-            json.loads(line)
-            for line in source.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        entries = [json.loads(line) for line in contents.splitlines() if line.strip()]
     else:
-        data = json.loads(source.read_text(encoding="utf-8"))
+        data = json.loads(contents)
         entries = data if isinstance(data, list) else [data]
     kept = []
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict) or INJECTION_SPEC_KEY not in entry:
             logging.warning(
-                "%s: skipping malformed injection-spec entry %d in %s",
+                "%s: skipping malformed injection-spec entry %d",
                 owner,
                 index,
-                source,
             )
             continue
         kept.append(entry)
@@ -169,21 +174,40 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
     }
 
     def __init__(self, config_root=_config):
+        invalid_end_condition = False
         try:
             super().__init__(config_root=config_root)
         except ModuleNotFoundError as exc:
             if exc.name == "midojo":
                 raise ConfigFailure(_EXTRA_HINT) from exc
             raise ConfigFailure(_WRONG_PACKAGE) from exc
+        except ValueError:
+            invalid_end_condition = True
+        if invalid_end_condition:
+            raise ConfigFailure(
+                f"{self.__class__.__name__}: end_condition must be detector or verify"
+            ) from None
         self._load_unsafe()
         self._refuse_partial_interceptor()
-        source = resolve_source(self.source_path)
+        self._validate_upstream()
+        invalid_source = False
+        if type(self.source_path) is not str or not self.source_path.strip():
+            invalid_source = True
+        else:
+            try:
+                source = resolve_source(self.source_path)
+            except (GarakException, TypeError, ValueError, OSError):
+                invalid_source = True
+        if invalid_source:
+            raise ConfigFailure(
+                f"{self.__class__.__name__}: source_path must name an injection-spec file"
+            ) from None
         self._entry_documents = load_injection_spec_entries(
             source, self.__class__.__name__
         )
         self.entries = [self._read_entry(entry) for entry in self._entry_documents]
         if not self.entries:
-            raise ConfigFailure(f"{self.__class__.__name__}: {source} has no entries")
+            raise ConfigFailure(f"{self.__class__.__name__}: source has no entries")
         self.generations = 1
         self.parallel_attempts = 1
         self._chains = len(self.entries) * self.repeats
@@ -259,35 +283,128 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
             )
             if not capabilities.isolates_attempts:
                 raise ConfigFailure(
-                    f"{self.__class__.__name__}: repeats={self.repeats} needs a "
+                    f"{self.__class__.__name__}: repeats needs a "
                     f"resettable or disposable runtime; {capabilities.name!r} is neither"
                 )
 
     def _refuse_partial_interceptor(self):
-        if (self.interceptor_url is None) == (self.interceptor_credential is None):
+        if (self.interceptor_url is None) != (self.interceptor_credential is None):
+            missing = (
+                "interceptor_url"
+                if self.interceptor_url is None
+                else "interceptor_credential"
+            )
+            raise ConfigFailure(
+                f"{self.__class__.__name__}: remote interception needs both "
+                f"interceptor_url and interceptor_credential; {missing} is missing"
+            )
+        self._validate_interceptor_options()
+
+    def _validate_interceptor_options(self):
+        self._validate_remote_pair(self.interceptor_url, self.interceptor_credential)
+
+    def _validate_remote_pair(self, url, credential):
+        if url is None and credential is None:
             return
-        missing = (
-            "interceptor_url"
-            if self.interceptor_url is None
-            else "interceptor_credential"
-        )
-        raise ConfigFailure(
-            f"{self.__class__.__name__}: remote interception needs both "
-            f"interceptor_url and interceptor_credential; {missing} is missing"
-        )
+        if (
+            type(credential) is not str
+            or not credential.strip()
+            or any(ord(char) < 32 or ord(char) == 127 for char in credential)
+        ):
+            raise ConfigFailure(
+                f"{self.__class__.__name__}: interceptor_credential "
+                "must be a non-empty string"
+            )
+        valid = False
+        if (
+            type(url) is str
+            and url
+            and not any(
+                char.isspace() or ord(char) < 32 or ord(char) == 127 for char in url
+            )
+        ):
+            try:
+                parsed = urlsplit(url)
+                valid = (
+                    parsed.scheme in ("http", "https", "ws", "wss")
+                    and bool(parsed.hostname)
+                    and parsed.port != 0
+                    and parsed.username is None
+                    and parsed.password is None
+                    and not parsed.query
+                    and not parsed.fragment
+                )
+            except ValueError:
+                valid = False
+        if not valid:
+            raise ConfigFailure(
+                f"{self.__class__.__name__}: interceptor_url must be a "
+                "non-empty HTTP(S) or WS(S) URL without user info, query or fragment"
+            )
+
+    def _validate_upstream(self):
+        url = self.upstream
+        if not isinstance(url, str):
+            return
+        valid = False
+        if url and not any(
+            char.isspace() or ord(char) < 32 or ord(char) == 127 for char in url
+        ):
+            try:
+                parsed = urlsplit(url)
+                valid = (
+                    parsed.scheme in ("http", "https")
+                    and bool(parsed.hostname)
+                    and parsed.port != 0
+                    and parsed.username is None
+                    and parsed.password is None
+                )
+            except ValueError:
+                pass
+        if not valid:
+            raise ConfigFailure(
+                f"{self.__class__.__name__}: upstream must be an HTTP(S) URL "
+                "with a host and no user info"
+            ) from None
 
     def _interception_option(self):
+        self._refuse_partial_interceptor()
         if self.interceptor_url is None:
+            from midojo_spec.link import CREDENTIAL_ENV, URL_ENV
+
+            url, credential = os.environ.get(URL_ENV), os.environ.get(CREDENTIAL_ENV)
+            if (url is None) != (credential is None):
+                raise ConfigFailure(
+                    f"{self.__class__.__name__}: remote interception environment "
+                    "needs both interceptor_url and interceptor_credential"
+                ) from None
+            if url is not None:
+                # Apply the same admission without keeping environment secrets on the probe.
+                self._validate_remote_pair(url, credential)
             return {}
-        return {
-            "interception": self._midojo.RemoteInterception(
+        self._validate_remote_pair(self.interceptor_url, self.interceptor_credential)
+        interception = None
+        try:
+            interception = self._midojo.RemoteInterception(
                 self.interceptor_url, self.interceptor_credential
             )
-        }
+        except (TypeError, ValueError):
+            pass
+        if interception is None:
+            raise ConfigFailure(
+                f"{self.__class__.__name__}: remote interceptor options are invalid"
+            ) from None
+        return {"interception": interception}
 
     def _start_chain(self, chain: int) -> garak.attempt.Attempt:
+        if self.end_condition not in ("detector", "verify"):
+            raise ConfigFailure(
+                f"{self.__class__.__name__}: end_condition must be detector or verify"
+            )
         entry = self.entries[chain // self.repeats]
         repeat = chain % self.repeats
+        self._validate_upstream()
+        handle = None
         try:
             handle = self._midojo.evaluation_handle.open(
                 entry.injection_spec,
@@ -295,10 +412,16 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
                 reset=repeat > 0,
                 **self._interception_option(),
             )
-        except self._midojo.InjectionSpecDocumentError as exc:
+        except self._midojo.InjectionSpecDocumentError:
             raise ConfigFailure(
-                f"{self.__class__.__name__}: no upstream to intercept: {exc}"
-            ) from exc
+                f"{self.__class__.__name__}: no upstream to intercept"
+            ) from None
+        except (TypeError, ValueError):
+            pass
+        if handle is None:
+            raise ConfigFailure(
+                f"{self.__class__.__name__}: evaluation could not open"
+            ) from None
         self._handles[chain] = handle
         handle.start_turn(entry.injection_spec.turns[0])
         return self._turn_attempt(chain, 0, [], handle)
@@ -316,7 +439,7 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
 
     def _turn_attempt(self, chain: int, index: int, earlier: list, handle):
         entry = self.entries[chain // self.repeats]
-        notes = {"tools": [handle.tool_block()]}
+        notes = {"tools": [redact_credentials(handle.tool_block())]}
         if entry.condition is not None:
             notes[CONDITION_NOTE] = copy.deepcopy(entry.condition)
         user = garak.attempt.Turn(
@@ -334,6 +457,21 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
         }
         attempt.notes[METADATA_NOTE] = copy.deepcopy(entry.metadata)
         return attempt
+
+    def _execute_attempt(self, this_attempt):
+        """Give the generator the live block without putting it on a report-bound attempt."""
+        self._generator_precall_hook(self.generator, this_attempt)
+        request = copy.deepcopy(this_attempt.prompt)
+        chain = this_attempt.notes[CHAIN_NOTE]["chain"]
+        request.notes["tools"] = [self._handles[chain].tool_block()]
+        this_attempt.outputs = self.generator.generate(
+            request, generations_this_call=self.generations
+        )
+        if self.post_buff_hook:
+            this_attempt = self._postprocess_buff(this_attempt)
+        this_attempt = self._postprocess_hook(this_attempt)
+        self._generator_cleanup()
+        return copy.deepcopy(this_attempt)
 
     @staticmethod
     def _turn_failure(output):

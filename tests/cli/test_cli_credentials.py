@@ -123,6 +123,71 @@ def test_the_cli_log_never_records_a_plugin_option_credential(spelling, caplog):
     assert cli.REDACTED in caplog.text, "the log still shows the option was given"
 
 
+URL_KEYS = ("interceptor_url", "upstream")
+HOST = "localhost:8767/proxy?keep=value"
+# a URL the probe will refuse, still logged first: its user info is the secret
+USERINFO_FORMS = [
+    ("https://", "reader:sentinel-pass"),
+    ("HTTP://", "reader:sentinel-pass"),
+    ("9http://", "reader:sentinel-pass"),
+    ("://", "reader:sentinel-pass"),
+    ("//", "reader:sentinel-pass"),
+    ("", "reader:sentinel-pass"),
+    ("https://", "reader:sentinel/pass"),
+    ("https://", "reader:sentinel?pass#end"),
+    ("https://", "reader:sentinel@pass"),
+    ("https://", "sentinel-only-user"),
+]
+
+
+@pytest.mark.parametrize("scheme,userinfo", USERINFO_FORMS)
+def test_url_userinfo_is_masked_in_every_form_a_url_can_be_mistyped(scheme, userinfo):
+    masked = cli._redact_url_userinfo(f"{scheme}{userinfo}@{HOST}")
+
+    assert masked == f"{scheme}{cli.REDACTED}@{HOST}", "only the user info goes"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        f"http://{HOST}",
+        "ws://localhost:8767/mcp#section",
+        "localhost:8767",
+        "",
+    ],
+)
+def test_a_url_without_user_info_is_unchanged(url):
+    assert cli._redact_url_userinfo(url) == url
+
+
+def test_masked_user_info_stays_masked():
+    once = cli._redact_url_userinfo(f"https://reader:pass@{HOST}")
+
+    assert cli._redact_url_userinfo(once) == once, "masking twice changes nothing"
+
+
+@pytest.mark.parametrize("key", URL_KEYS)
+@pytest.mark.parametrize("route", ["dict", "json", "equals"])
+@pytest.mark.parametrize("scheme,userinfo", USERINFO_FORMS)
+def test_a_malformed_url_option_is_masked_whichever_way_it_is_given(
+    key, route, scheme, userinfo
+):
+    url = f"{scheme}{userinfo}@{HOST}"
+    options = {"midojo.InjectionSpecProbe": {key: url, "other_url": url}}
+    given = {
+        "dict": options,
+        "json": json.dumps(options),
+        "equals": f"--probe_options={json.dumps(options)}",
+    }[route]
+
+    redacted = cli.redact_credentials(given)
+
+    masked = f"{scheme}{cli.REDACTED}@{HOST}"
+    rendered = json.dumps(redacted) if route == "dict" else redacted
+    assert json.dumps(masked)[1:-1] in rendered, "the named option is masked"
+    assert rendered.count(json.dumps(userinfo)[1:-1]) == 1, "only that option"
+
+
 def _route_args(route, tmp_path):
     """Return CLI arguments that give generator options with credentials by a route."""
     options = {"test": {"Blank": OPTIONS["openai"]["OpenAIResponsesGenerator"]}}
