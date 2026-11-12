@@ -9,6 +9,7 @@ import garak.generators.base
 import garak.harnesses.base
 import garak.probes.base
 from garak.exception import GarakException
+from tests_runtime_midojo import missing_runtime_error
 from garak.services.intentservice import validate_intent_specifier
 
 PROBES = [classname for (classname, active) in _plugins.enumerate_plugins("probes")]
@@ -53,9 +54,8 @@ def set_fake_env(request) -> None:
 
 
 def _probe_intent_may_be_none(probe_instance) -> bool:
-    return (
-        probe_instance.__class__.__module__ == "garak.probes.base"
-        or isinstance(probe_instance, garak.probes.base.IntentProbe)
+    return probe_instance.__class__.__module__ == "garak.probes.base" or isinstance(
+        probe_instance, garak.probes.base.IntentProbe
     )
 
 
@@ -89,8 +89,14 @@ def test_instantiate_probes(plugin_configuration, loaded_intent_service):
         p = _plugins.load_plugin(classname, config_root=config_root)
     except ModuleNotFoundError:
         pytest.skip("required deps not present")
+    except GarakException as exc:
+        if missing_runtime_error(exc):
+            pytest.skip("optional MiDojo harness not present")
+        raise
     assert isinstance(p, garak.probes.base.Probe)
-    assert p.intent == p.__class__.intent, "probe instances should expose the class intent unchanged"
+    assert (
+        p.intent == p.__class__.intent
+    ), "probe instances should expose the class intent unchanged"
     if _probe_intent_may_be_none(p):
         assert (
             p.intent is None

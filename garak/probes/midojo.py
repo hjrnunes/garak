@@ -13,6 +13,7 @@ on an attempt, which the iterative base deep-copies between turns.
 from __future__ import annotations
 
 import copy
+import importlib
 import json
 import logging
 import os
@@ -177,10 +178,14 @@ class InjectionSpecProbe(garak.probes.IterativeProbe):
     def __init__(self, config_root=_config):
         invalid_end_condition = False
         try:
-            super().__init__(config_root=config_root)
+            importlib.import_module("midojo")
         except ModuleNotFoundError as exc:
             if exc.name == "midojo":
                 raise ConfigFailure(_EXTRA_HINT) from exc
+            raise ConfigFailure(_WRONG_PACKAGE) from exc
+        try:
+            super().__init__(config_root=config_root)
+        except ModuleNotFoundError as exc:
             raise ConfigFailure(_WRONG_PACKAGE) from exc
         except ValueError:
             invalid_end_condition = True

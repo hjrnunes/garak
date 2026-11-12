@@ -95,8 +95,6 @@ jobs:
       - name: Install pinned sources of the fork extras
         if: env.FOLD_EXTRA_SOURCES != ''
         run: pip install --no-cache-dir ${FOLD_EXTRA_SOURCES}
-      - name: Install the package with the fork extras
-        run: pip install --no-cache-dir -e ".[tests${FOLD_EXTRAS:+,${FOLD_EXTRAS}}]"
       - name: Refuse an unrelated MiDojo distribution
         if: contains(env.FOLD_EXTRAS, 'midojo-runtime')
         run: |
@@ -104,6 +102,8 @@ jobs:
             echo "::error::The installed midojo is unrelated to the MiDojo harness; pin the harness source before installing midojo-runtime."
             exit 1
           }
+      - name: Install the package with the fork extras
+        run: pip install --no-cache-dir -e ".[tests${FOLD_EXTRAS:+,${FOLD_EXTRAS}}]"
       - name: Check the installed command
         run: |
           garak --version

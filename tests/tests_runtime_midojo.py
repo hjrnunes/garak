@@ -6,6 +6,14 @@
 import importlib
 
 import pytest
+from garak.exception import ConfigFailure
+
+
+def missing_runtime_error(error):
+    """Identify only a directly absent optional harness in plugin loading."""
+    cause = error.__cause__
+    absent = cause.__cause__ if isinstance(cause, ConfigFailure) else None
+    return isinstance(absent, ModuleNotFoundError) and absent.name == "midojo"
 
 
 def require_runtime():
@@ -14,7 +22,9 @@ def require_runtime():
         module = importlib.import_module("midojo")
     except ModuleNotFoundError as exc:
         if exc.name == "midojo":
-            pytest.skip("the optional MiDojo harness is absent")
+            pytest.skip(
+                "the optional MiDojo harness is absent", allow_module_level=True
+            )
         raise
     try:
         importlib.import_module("midojo.injection_spec")

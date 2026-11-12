@@ -11,6 +11,8 @@ from garak import _config, _plugins
 from garak.attempt import Turn, Conversation, Message, Attempt
 import garak.probes
 from garak.services.intentservice import validate_intent_specifier
+from garak.exception import GarakException
+from tests_runtime_midojo import missing_runtime_error
 
 PROBES = [classname for (classname, active) in _plugins.enumerate_plugins("probes")]
 
@@ -133,6 +135,10 @@ def test_probe_metadata(classname, loaded_intent_service):
         p = _plugins.load_plugin(classname)
     except ModuleNotFoundError:
         pytest.skip("required deps not present")
+    except GarakException as exc:
+        if missing_runtime_error(exc):
+            pytest.skip("optional MiDojo harness not present")
+        raise
     if not isinstance(p, garak.probes.IntentProbe):  # intent probes have flexible goal
         assert isinstance(p.goal, str), "probe goals should be a text string"
         assert len(p.goal) > 0, "probes must state their general goal"
