@@ -247,6 +247,25 @@ def test_finish_mismatch_and_replay():
     assert caught.value.kind == "call_conflict", "finish conflict accepted"
 
 
+@pytest.mark.parametrize(
+    ("function", "args"),
+    [("other", {"n": 1}), ("tool", {"n": 2}), ("other", {"n": 2})],
+)
+def test_finish_must_name_the_function_and_args_it_started(function, args):
+    """A finish that differs from its start conflicts and leaves the start open."""
+    unit, _ = collector()
+    channel = unit.channel("host")
+    started = channel.start_call("one", function="tool", args={"n": 1})
+    with pytest.raises(RejectedError) as caught:
+        channel.finish_call("one", function=function, args=args, result="ok")
+    assert caught.value.kind == "call_conflict", "a mismatched finish was accepted"
+    records = _records(unit)
+    assert records == [started.record], "the refused finish changed the ledger"
+    assert not records[0].complete, "the refused finish completed the start"
+    finished = channel.finish_call("one", function="tool", args={"n": 1}, result="ok")
+    assert finished.record.complete, "a refused finish blocked the matching finish"
+
+
 def test_whole_record_path_is_unchanged():
     """A finish without an ID records whole, with a fresh ID, as before."""
     unit, _ = collector()
