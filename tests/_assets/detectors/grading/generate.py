@@ -1582,6 +1582,22 @@ def build(runtime: dict[str, Any]) -> Corpus:
             document(all_of(called("ghost"), leaf("T", 0))),
             snapshot(evidence=evidence),
         )
+    # A status outside the runtime's four is a snapshot the runtime never loads.
+    for case, evidence in {
+        "unknown-word": {"function_calls": "unknown"},
+        "empty": {"function_calls": ""},
+        "wrong-case": {"function_calls": "Complete"},
+        "none": {"function_calls": None},
+        "number": {"turns": 5},
+        "list": {"agent_output": ["complete"]},
+    }.items():
+        corpus.add(
+            "evidence-refused",
+            case,
+            document(all_of(called("ghost"), leaf("T", 0))),
+            snapshot(evidence=evidence),
+            refused=True,
+        )
     failure = {
         "at": AT.format(50),
         "by": "interceptor",
@@ -1610,8 +1626,46 @@ def build(runtime: dict[str, Any]) -> Corpus:
             document(called("ghost")),
             snapshot(observations={"openshell": observed}),
         )
+        for case, status in {
+            "observation-unknown-word": "unknown",
+            "observation-empty": "",
+            "observation-none": None,
+        }.items():
+            reported = copy.deepcopy(observed)
+            reported["evidence_status"]["workdir"] = status
+            corpus.add(
+                "evidence-refused",
+                case,
+                document(called("ghost")),
+                snapshot(observations={"openshell": reported}),
+                refused=True,
+            )
     except ImportError:
         pass
+
+    # A document the runtime refuses is no document to grade by: another version, a member it does not know
+    # (a misspelt check would be an unauthored one), a runtime definition with more than its type.
+    for case, change in {
+        "version-none": {"schema_version": None},
+        "version-number": {"schema_version": 1},
+        "version-empty": {"schema_version": ""},
+        "version-other": {"schema_version": "midojo-injection-spec-v2"},
+        "version-case": {"schema_version": "MIDOJO-INJECTION-SPEC-V1"},
+        "version-padded": {"schema_version": "midojo-injection-spec-v1 "},
+        "member-unknown": {"securty": leaf("T", 0)},
+        "runtime-extra-member": {"runtime": {"type": "unmanaged", "extra": 1}},
+        "runtime-name": {"runtime": {"type": "unmanaged", "name": "agent"}},
+        "runtime-no-type": {"runtime": {}},
+        "runtime-type-other": {"runtime": {"type": "elsewhere"}},
+        "runtime-text": {"runtime": "unmanaged"},
+    }.items():
+        corpus.add(
+            "document-refused",
+            case,
+            document(leaf("T", 0), None, **change),
+            base,
+            refused=True,
+        )
     return corpus
 
 

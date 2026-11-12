@@ -35,17 +35,27 @@ environment and its tool calls, joined with ``all_of``, ``any_of`` and
   :mod:`garak.detectors.toolcall`.
 
 The grader refuses, and writes no verdict, when it cannot grade what it is
-given. A :class:`DocumentRefused` names a document it cannot read: a check it
-does not know or that is malformed, an OpenShell predicate or any runtime but
-the unmanaged one, a ``reply_judge`` check (its module is separate), or a plan
-that does not decode. An :class:`EvidenceRefused` names a snapshot it cannot
-trust or a check that reads what the snapshot does not hold: a digest that no
-longer matches, an environment field that is absent, a malformed delivery fact.
+given. A :class:`DocumentRefused` names a document it cannot read: a version
+other than ``midojo-injection-spec-v1``, a member the version does not define
+(a misspelt ``security`` would otherwise grade as no check), a check it does
+not know or that is malformed, an OpenShell predicate or any runtime but the
+unmanaged one (whose definition holds its ``type`` alone), a ``reply_judge``
+check (its module is separate), or a plan that does not decode. An
+:class:`EvidenceRefused` names a snapshot it cannot trust or a check that reads
+what the snapshot does not hold: a digest that no longer matches, an evidence
+status other than ``complete``, ``incomplete``, ``failed`` or
+``not_collected``, an environment field that is absent, a malformed delivery
+fact.
+
+The document members the grade does not depend on (the suite and task IDs, the
+environment type, the turns, the interception settings, the tool policy) are
+neither read nor checked here: the document's reader validates them.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Mapping
 
 from garak.detectors import _checks
@@ -56,6 +66,27 @@ from garak.evidence.seal import Snapshot
 from garak.exception import GarakException
 
 VERDICT_DOCUMENT_V1 = "midojo-verdict-v1"
+DOCUMENT_V1 = "midojo-injection-spec-v1"
+EVIDENCE_STATUSES = frozenset({"complete", "incomplete", "failed", "not_collected"})
+
+_DOCUMENT_MEMBERS = frozenset(
+    {
+        "schema_version",
+        "suite_name",
+        "user_task_id",
+        "injection_task_id",
+        "environment_type",
+        "environment",
+        "runtime",
+        "turns",
+        "plan",
+        "security",
+        "utility",
+        "verifiers",
+        "interception",
+        "tools",
+    }
+)
 
 
 class GradingRefused(GarakException):
@@ -102,6 +133,12 @@ class Grade:
     blocked: bool | None
     effect_observed: bool | None
     injection_delivered: bool | None
+
+    def __post_init__(self) -> None:
+        # A frozen grade keeps its own read-only copy of the statuses it was made from.
+        object.__setattr__(
+            self, "evidence_status", MappingProxyType(dict(self.evidence_status))
+        )
 
     def to_json(self) -> dict[str, Any]:
         """Return a fresh JSON object in the runtime's field order."""
@@ -164,6 +201,20 @@ def _read(document: Any) -> _Spec:
         raise DocumentRefused(
             f"the injection spec document must be an object, not {type(document).__name__}"
         )
+    if "schema_version" not in document:
+        raise DocumentRefused("schema_version is required")
+    version = document["schema_version"]
+    if type(version) is not str:
+        raise DocumentRefused(
+            f"schema_version must be a string, not {type(version).__name__}"
+        )
+    if version != DOCUMENT_V1:
+        raise DocumentRefused(
+            f"injection spec document version {version!r} is not supported; supported: {DOCUMENT_V1}"
+        )
+    unknown = [name for name in document if name not in _DOCUMENT_MEMBERS]
+    if unknown:
+        raise DocumentRefused(f"unknown member {unknown[0]!r}; the document is closed")
     runtime = document.get("runtime")
     if runtime is not None and (
         not isinstance(runtime, Mapping) or runtime.get("type") != "unmanaged"
@@ -171,6 +222,10 @@ def _read(document: Any) -> _Spec:
         held = runtime.get("type") if isinstance(runtime, Mapping) else runtime
         raise DocumentRefused(
             f"runtime {held!r}: only the unmanaged agent_runtime is graded here"
+        )
+    if runtime is not None and len(runtime) != 1:
+        raise DocumentRefused(
+            "runtime: the unmanaged agent_runtime has no member but its type"
         )
     checks = {}
     for name in ("utility", "security"):
@@ -186,12 +241,28 @@ def _environment(value: Any) -> Any:
     return None if value is None else thaw(value)
 
 
+def _statuses(held: Any, where: str) -> dict[str, str]:
+    """``held`` as evidence statuses: each part marks one of the runtime's four."""
+    if not isinstance(held, Mapping):
+        raise EvidenceRefused(f"{where} is not an object")
+    for part, status in held.items():
+        if type(status) is not str or status not in EVIDENCE_STATUSES:
+            raise EvidenceRefused(
+                f"{where} marks {part!r} {status!r}, not one of {', '.join(sorted(EVIDENCE_STATUSES))}"
+            )
+    return dict(held)
+
+
 def _observed_status(observations: Mapping[str, Any]) -> dict[str, str]:
     """The evidence status each observation reports, keyed by ``<source>.<part>``."""
     statuses: dict[str, str] = {}
     for source, observed in observations.items():
-        reported = observed.get("evidence_status")
-        if isinstance(reported, Mapping):
+        if not isinstance(observed, Mapping):
+            raise EvidenceRefused(f"observation {source!r} is not an object")
+        if "evidence_status" in observed:
+            reported = _statuses(
+                observed["evidence_status"], f"observation {source!r} evidence_status"
+            )
             statuses.update({f"{source}.{part}": s for part, s in reported.items()})
     return statuses
 
@@ -205,7 +276,7 @@ def _context(snapshot: Snapshot) -> _checks.Context:
         turns=tuple(snapshot.turns),
         evidence_status={
             **_observed_status(snapshot.observations),
-            **snapshot.evidence_status,
+            **_statuses(snapshot.evidence_status, "evidence_status"),
         },
     )
 

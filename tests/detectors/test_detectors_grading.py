@@ -203,7 +203,9 @@ def test_corpus_has_every_group():
         "delivery",
         "delivery-refused",
         "delivery-with-check",
+        "document-refused",
         "evidence",
+        "evidence-refused",
         "leaf",
         "leaf-refused",
         "leaf-utility",
@@ -212,7 +214,7 @@ def test_corpus_has_every_group():
         "reply-judge",
         "truth-table",
     }, "the corpus covers every part of the grade"
-    assert len(corpus()[2]) >= 760, "the corpus is whole"
+    assert len(corpus()[2]) >= 780, "the corpus is whole"
 
 
 @pytest.mark.parametrize("name", sorted(corpus()[1]))
@@ -868,6 +870,20 @@ def test_only_the_unmanaged_runtime_is_graded(runtime):
         grading.grade_sealed(value, sealed())
 
 
+def test_document_must_name_its_version():
+    value = document(TRUE)
+    del value["schema_version"]
+    with pytest.raises(grading.DocumentRefused, match="schema_version"):
+        grading.grade_sealed(value, sealed())
+
+
+def test_document_version_is_named_in_the_refusal():
+    with pytest.raises(grading.DocumentRefused, match="midojo-injection-spec-v2"):
+        grading.grade_sealed(
+            document(TRUE, schema_version="midojo-injection-spec-v2"), sealed()
+        )
+
+
 @pytest.mark.parametrize("value", [None, [], "document", 5])
 def test_document_must_be_an_object(value):
     with pytest.raises(grading.DocumentRefused):
@@ -989,6 +1005,30 @@ def test_documents_are_fresh_and_grading_changes_nothing():
         "reasons": [],
     }, "a written document is detached from the verdict"
     assert grading.grade_sealed(source, snapshot).to_document() == verdict.to_document()
+
+
+def test_a_grade_holds_its_evidence_status_read_only():
+    verdict = grading.grade_sealed(
+        document(TRUE), sealed(evidence={"function_calls": "complete"})
+    )
+    before = verdict.to_document()
+    with pytest.raises(TypeError):
+        verdict.grade.evidence_status["function_calls"] = "failed"
+    with pytest.raises(TypeError):
+        del verdict.grade.evidence_status["function_calls"]
+    assert verdict.to_document() == before, "the verdict is as it was graded"
+    written = verdict.to_document()["grade"]["evidence_status"]
+    written["function_calls"] = "failed"
+    assert verdict.grade.evidence_status["function_calls"] == "complete"
+
+
+def test_a_grade_is_detached_from_the_mapping_it_was_made_from():
+    statuses = {"function_calls": "complete"}
+    verdict = grading.grade_sealed(document(TRUE), sealed())
+    grade = dataclasses.replace(verdict.grade, evidence_status=statuses)
+    statuses["function_calls"] = "failed"
+    assert dict(grade.evidence_status) == {"function_calls": "complete"}
+    assert grade.to_json()["evidence_status"] == {"function_calls": "complete"}
 
 
 def test_grading_a_snapshot_rebuilt_from_json_matches_the_original():
