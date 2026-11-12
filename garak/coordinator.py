@@ -17,6 +17,7 @@ from typing import Callable
 
 from garak import _config, _plugins
 from garak.evidence.collector import Collector, Stage
+from garak.evidence.facts import ENVIRONMENT, FUNCTION_CALLS, TURNS
 from garak.exception import CapabilityError, GarakException
 
 _EXPECTED_CLEANUP = (RuntimeError, OSError, ValueError, CapabilityError, ExceptionGroup)
@@ -531,8 +532,23 @@ class ChainScope:
         if self._closure_failure is not None:
             raise self._closure_failure
 
-    def seal(self, agent_output: str = ""):
-        """Release the chain, then seal its immutable evidence snapshot."""
+    def seal(self, agent_output: str = "", *, incomplete: tuple[str, ...] = ()):
+        """Release the chain, then seal its immutable evidence snapshot.
+
+        ``incomplete`` names evidence the caller knows was cut short, such as
+        ``TURNS``, ``FUNCTION_CALLS`` and ``AGENT_OUTPUT`` for a chain that
+        ended before its agent finished. The names join what the coordinator
+        marks itself (``TURNS`` after a failed turn; ``FUNCTION_CALLS`` and
+        ``ENVIRONMENT`` after a failed closure) and never replace it. The first
+        seal fixes the snapshot: a later call returns it and ignores a
+        different ``agent_output`` or ``incomplete``. A closure failure is
+        sticky, so after one every call raises it again, and the snapshot the
+        first call made stays in ``result["snapshot"]``.
+        """
+        if type(incomplete) is not tuple or any(
+            type(name) is not str or not name for name in incomplete
+        ):
+            raise TypeError("incomplete must be a tuple of evidence names")
         failures: list[BaseException] = []
         with _Step(failures):
             self._finish()
@@ -543,12 +559,12 @@ class ChainScope:
         )
         if can_seal:
             with _Step(failures):
-                incomplete = ("turns",) if self.result["failed_turn"] else ()
+                own = (TURNS,) if self.result["failed_turn"] else ()
                 if self._closure_failure is not None:
-                    incomplete += ("function_calls", "environment")
+                    own += (FUNCTION_CALLS, ENVIRONMENT)
                 self.result["snapshot"] = self.collector.seal(
                     agent_output,
-                    incomplete=incomplete,
+                    incomplete=tuple(dict.fromkeys((*own, *incomplete))),
                 )
                 self._sealed = True
         _raise_failures(failures)

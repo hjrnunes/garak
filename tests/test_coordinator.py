@@ -23,7 +23,12 @@ from garak.coordinator import (
     select_components,
 )
 from garak.evidence.collector import Collector
+from garak.evidence.facts import AGENT_OUTPUT, ENVIRONMENT, FUNCTION_CALLS, TURNS
 from garak.exception import CapabilityError
+from sealed_replay import ScriptedClock, call_fields, grading_case
+
+#: What a chain cut short by a failure leaves incomplete.
+INTERRUPTED = (FUNCTION_CALLS, TURNS, AGENT_OUTPUT)
 
 
 class Surprise(Exception):
@@ -683,6 +688,163 @@ def test_failed_closure_before_collecting_never_seals():
     assert fake.events.count("disarm") == 1, "binding disarmed"
     assert fake.events.count("close") == 1, "environment closed once"
     assert fake.events.count("run_close") == 1, "run closed once"
+
+
+def sealed_status(fake=None, *, turns=1, **keyword):
+    """The evidence status of a chain that completed ``turns`` turns and sealed with ``keyword``."""
+    fake = fake or Fakes()
+    with coordinator(fake) as run:
+        with run.chain("named", upstream_url="unused", plan=object()) as chain:
+            for index in range(turns):
+                with chain.turn(f"message {index}") as turn:
+                    turn.reply(f"reply {index}")
+            return chain.seal("reply 0", **keyword).evidence_status
+
+
+def test_seal_marks_the_evidence_the_caller_names_incomplete():
+    require_shared_codec()
+    assert sealed_status() == {}, "a seal that names nothing marks nothing"
+    assert sealed_status(incomplete=INTERRUPTED) == {
+        name: "incomplete" for name in INTERRUPTED
+    }, "each named source is marked, no other"
+
+
+def test_seal_names_join_the_coordinators_own_marks():
+    require_shared_codec()
+    fake = Fakes()
+    fake.disarm = lambda: (fake.step("disarm"), (False, []))[1]
+    with coordinator(fake) as run:
+        scope = run.chain("closure", upstream_url="unused", plan=object())
+        scope.__enter__()
+        with pytest.raises(CapabilityError):
+            scope.cancel()
+        with pytest.raises(CapabilityError):
+            scope.seal(incomplete=(AGENT_OUTPUT,))
+        assert scope.result["snapshot"].evidence_status == {
+            AGENT_OUTPUT: "incomplete",
+            ENVIRONMENT: "incomplete",
+            FUNCTION_CALLS: "incomplete",
+        }, "a failed closure keeps its own marks beside the named one"
+    with coordinator(Fakes()) as run:
+        with run.chain("turn", upstream_url="unused", plan=object()) as chain:
+            with pytest.raises(Surprise):
+                with chain.turn("first"):
+                    raise Surprise("the agent failed")
+            chain.seal(incomplete=(FUNCTION_CALLS, TURNS))
+        assert chain.result["snapshot"].evidence_status == {
+            FUNCTION_CALLS: "incomplete",
+            TURNS: "incomplete",
+        }, "a failed turn's mark and the same name join once"
+
+
+def test_second_seal_returns_the_first_snapshot_whatever_it_names():
+    require_shared_codec()
+    fake = Fakes()
+    with coordinator(fake) as run:
+        with run.chain("twice", upstream_url="unused", plan=object()) as chain:
+            with chain.turn("first") as turn:
+                turn.reply("one")
+            first = chain.seal("one", incomplete=(AGENT_OUTPUT,))
+            again = chain.seal("other", incomplete=(TURNS,))
+    assert again is first, "the first seal fixes the snapshot"
+    assert first.evidence_status == {AGENT_OUTPUT: "incomplete"}, "names unchanged"
+    assert first.agent_output == "one", "output unchanged"
+    assert fake.events.count("disarm") == 1, "one release"
+
+
+def test_a_failed_closure_makes_every_seal_raise_and_keeps_the_first_snapshot():
+    require_shared_codec()
+    fake = Fakes()
+    fake.disarm = lambda: (fake.step("disarm"), (False, []))[1]
+    with coordinator(fake) as run:
+        scope = run.chain("closure", upstream_url="unused", plan=object())
+        scope.__enter__()
+        with pytest.raises(CapabilityError) as first:
+            scope.seal("one", incomplete=(AGENT_OUTPUT,))
+        snapshot = scope.result["snapshot"]
+        with pytest.raises(CapabilityError) as again:
+            scope.seal("other", incomplete=(TURNS,))
+        assert again.value is first.value, "the closure failure is sticky"
+        assert scope.result["snapshot"] is snapshot, "the first snapshot stays"
+        assert snapshot.agent_output == "one", "output unchanged"
+        assert snapshot.evidence_status == {
+            AGENT_OUTPUT: "incomplete",
+            ENVIRONMENT: "incomplete",
+            FUNCTION_CALLS: "incomplete",
+        }, "names unchanged"
+    assert fake.events.count("disarm") == 1, "one release"
+
+
+@pytest.mark.parametrize(
+    "incomplete", ["turns", [TURNS], (TURNS, ""), (TURNS, 3), None]
+)
+def test_seal_refuses_names_that_are_not_a_tuple_of_text_before_releasing(incomplete):
+    require_shared_codec()
+    fake = Fakes()
+    with coordinator(fake) as run:
+        with run.chain("refused", upstream_url="unused", plan=object()) as chain:
+            with pytest.raises(TypeError, match="evidence names"):
+                chain.seal(incomplete=incomplete)
+            assert "disarm" not in fake.events, "nothing released by the refusal"
+            assert chain.seal(incomplete=(TURNS,)).evidence_status == {
+                TURNS: "incomplete"
+            }, "the chain still seals"
+
+
+def cut_short_chain(case, **keyword):
+    """Seal a chain that stopped in its last turn, with the evidence of a corpus case, and return its snapshot."""
+    document, expected, oracle = case
+    clock = ScriptedClock(expected["turns"][0]["started_at"])
+
+    def collector(evaluation_id):
+        return Collector(
+            evaluation_id,
+            pre_environment=expected["pre_environment"],
+            clock=clock,
+        )
+
+    first, last = expected["turns"]
+    (call,) = expected["function_calls"]
+    fake = Fakes()
+    with RunCoordinator(
+        fake.injector, fake.environment, collector_factory=collector
+    ) as run:
+        with run.chain(expected["evaluation_id"], plan=object()) as chain:
+            with chain.turn(first["message"]) as turn:
+                clock.at(first["ended_at"])
+                turn.reply(first["reply"])
+            clock.at(last["started_at"])
+            with pytest.raises(Surprise):
+                with chain.turn(last["message"]):
+                    clock.at(call["timestamp"])
+                    chain.collector.channel("interceptor").record_call(
+                        call_id=call["call_id"], **call_fields(call)
+                    )
+                    raise Surprise("the agent stopped")
+            clock.at(expected["sealed_at"])
+            return chain.seal(expected["agent_output"], **keyword)
+
+
+def test_cut_short_chain_with_a_delivered_call_never_grades_as_resisted():
+    require_shared_codec()
+    from garak.detectors import grading
+
+    case = grading_case("delivery-with-check.interrupted-delivered")
+    document, expected, oracle = case
+    cut = cut_short_chain(case, incomplete=INTERRUPTED)
+    assert {
+        **cut.to_json(),
+        "snapshot_id": cut.snapshot_id,
+    } == expected, "the snapshot is the one the runtime sealed for a chain cut short"
+    grade = grading.grade_sealed(document, cut).to_document()["grade"]
+    assert grade == oracle["grade"], "the grade is the runtime's"
+    assert grade["security"] is None, "the check is undecided, not resisted"
+    assert grade["injection_delivered"] is True, "the delivered call still counts"
+
+    bare = cut_short_chain(case)
+    assert (
+        grading.grade_sealed(document, bare).to_document()["grade"]["security"] is False
+    ), "without the names the same evidence grades as a decided resistance"
 
 
 def test_bounded_blocking_environment_close():

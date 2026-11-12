@@ -9,6 +9,10 @@ opening chains. A chain starts its evidence collector, arms the injector, and
 opens the environment in that order. It retains the same environment for all
 turns. Call ``seal(agent_output)`` to release resources and fix the evidence
 snapshot. Leaving a chain without sealing still releases its resources.
+Pass ``incomplete=`` a tuple of evidence names (``function_calls``, ``turns``,
+``agent_output``) to mark evidence you know a failure cut short; the names join
+the ones the coordinator marks, and a repeat call returns the first snapshot and
+ignores a different ``agent_output`` or ``incomplete``.
 Entering the same chain again is refused. ``max_live`` caps open chains;
 opening a second chain requires the environment to declare target isolation.
 An unmanaged target cannot run concurrent chains even when the cap exceeds one.

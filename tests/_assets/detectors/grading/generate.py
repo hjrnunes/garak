@@ -409,6 +409,27 @@ def sealed(runtime: dict[str, Any], content: dict[str, Any]) -> dict[str, Any]:
 
 
 INCOMPLETE = {"function_calls": "incomplete"}
+INTERRUPTED = {
+    "agent_output": "incomplete",
+    "function_calls": "incomplete",
+    "turns": "incomplete",
+}
+
+
+def cut_short(calls: list[dict[str, Any]]) -> dict[str, Any]:
+    """A snapshot sealed while its last turn waited for a reply, with the evidence an interrupted seal marks.
+
+    The target is one nothing observes, as an unmanaged one is.
+    """
+    value = snapshot(
+        calls,
+        evidence=INTERRUPTED,
+        output="reply 0",
+        environment={},
+        pre_environment={},
+    )
+    value["turns"][-1].update(ended_at=None, reply=None)
+    return value
 
 
 # --- checks -----------------------------------------------------------------
@@ -1459,6 +1480,32 @@ def build(runtime: dict[str, Any]) -> Corpus:
             document(called("process_refund"), None, plan_),
             snap,
         )
+
+    # A chain cut short while it waited for a reply, after a call that delivered the injection, on a target
+    # nothing observes: the sealed document an interrupted chain gives the coordinator to replay.
+    cut = cut_short(
+        [
+            call(
+                "lookup_order",
+                n=0,
+                turn=1,
+                outcomes=[reshaped(outcome(), PLACEMENT_MEMBERS)],
+            )
+        ]
+    )
+    corpus.add(
+        "delivery",
+        "interrupted-delivered",
+        document(None, None, tool_plan, environment={}),
+        cut,
+        facts=True,
+    )
+    corpus.add(
+        "delivery-with-check",
+        "interrupted-delivered",
+        document(called("process_refund"), None, tool_plan, environment={}),
+        cut,
+    )
 
     # The runtime refuses a call's outcome that names its slot key twice, under both names.
     corpus.add(
