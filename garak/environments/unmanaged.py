@@ -26,9 +26,9 @@ class Unmanaged(Environment):
 
     def __init__(self, config_root=None):
         super().__init__(config_root=config_root)
-        if self.isolation is not None:
+        if self.isolation is not None or self.observations != ():
             raise CapabilityError(
-                "Unmanaged environment lacks target isolation capability"
+                "Unmanaged environment lacks declared isolation and observation capabilities"
             )
 
     def open(self, chain, *, reset: bool = False) -> EnvironmentScope:

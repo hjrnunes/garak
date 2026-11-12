@@ -9,7 +9,7 @@ REDACTED = "[redacted]"
 # option names that hold a secret, compared in lower case: a generator's key, and
 # the credentials a tool definition carries, such as an MCP server's authorization
 CREDENTIAL_KEYS = frozenset(
-    {"api_key", "authorization", "proxy-authorization", "x-api-key"}
+    {"api_key", "authorization", "proxy-authorization", "x-api-key", "bind_credential"}
 )
 
 

@@ -4,11 +4,12 @@ import subprocess
 import sys
 
 
-def test_environment_import_stays_light():
-    """Listing an environment leaves optional service modules unloaded."""
+def test_component_import_stays_light():
+    """Listing either component leaves optional service modules unloaded."""
     code = (
         "import sys; from garak import _plugins; "
         "_plugins.load_plugin('environments.unmanaged'); "
+        "_plugins.load_plugin('injectors.mim'); "
         "assert not {'midojo_spec', 'midojo_mim', 'fastmcp', 'uvicorn'} "
         "& set(sys.modules)"
     )

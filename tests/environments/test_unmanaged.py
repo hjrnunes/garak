@@ -45,3 +45,10 @@ def test_scope_lifecycle():
     scope.close()
     with pytest.raises(TypeError, match="pickled"):
         pickle.dumps(scope)
+
+
+def test_config_cannot_claim_target_isolation():
+    """Configuration cannot turn an unmanaged target into a disposable one."""
+    root = {"environments": {"unmanaged": {"isolation": "disposable"}}}
+    with pytest.raises(CapabilityError, match="Unmanaged.*isolation"):
+        Unmanaged(config_root=root)

@@ -24,9 +24,9 @@ permissions:
 env:
   XDG_CACHE_HOME: ${{ github.workspace }}/.cache
   # pyproject extras that the fork adds beyond requirements.txt, comma separated
-  FOLD_EXTRAS: "midojo"
+  FOLD_EXTRAS: "midojo,midojo-mim"
   # tests that need those extras, space separated
-  FOLD_EXTRAS_TESTS: "tests/evidence"
+  FOLD_EXTRAS_TESTS: "tests/evidence tests/injectors tests/environments"
   # pip requirement specifiers, space separated, that pin the source of an extra no index serves; the owner sets it when the pins are set
   FOLD_EXTRA_SOURCES: ""
 

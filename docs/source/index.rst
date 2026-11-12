@@ -69,6 +69,7 @@ Check out the :doc:`usage` section for further information, including :doc:`inst
    exception
    evidence
    environments
+   injectors
    interactive
    intents
    payloads
