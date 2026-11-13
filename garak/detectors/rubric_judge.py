@@ -550,6 +550,7 @@ class RubricJudge(ModelAsJudge):
             ValueError,
             UnicodeDecodeError,
             OSError,
+            RecursionError,  # an answer nested past what the parser reads
         ) as exc:
             return _record(
                 rules,

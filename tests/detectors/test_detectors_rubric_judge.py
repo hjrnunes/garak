@@ -715,6 +715,41 @@ def test_service_rejects_invalid_answer_or_request_digest(fake_service, alter, r
     ), "refusal names the violated rule"
 
 
+def test_service_answer_nested_past_the_parser_is_unresolved(monkeypatch):
+    body = b"[" * (1 << 20)  # the longest answer the check reads
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    monkeypatch.setenv("TEST_JUDGE_TOKEN", "sentinel-private-token")
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    try:
+        judge = configured(
+            "service",
+            service_url=f"http://127.0.0.1:{server.server_port}/",
+            service_token_env="TEST_JUDGE_TOKEN",
+        )
+        built = attempt()
+        assert judge.detect(built) == [None], "a nested answer cannot score"
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join()
+    assert built.notes[detector.RESULTS_NOTE][0]["reason"].startswith(
+        "judge_failed:"
+    ), "an answer the parser cannot read is a failed call, not an exception"
+
+
 def test_service_drops_hostile_reason_and_secret_reference(fake_service):
     url, state, _, token = fake_service
 
