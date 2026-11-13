@@ -30,6 +30,7 @@ from garak.detectors.toolcall import (
     validate_condition,
 )
 from garak.evaluators.base import ThresholdEvaluator
+from garak.evidence.records import MAX_NESTING_DEPTH
 
 UNDECODABLE = "{not json"
 
@@ -289,6 +290,20 @@ def test_normalise_keeps_only_text_names(name):
 )
 def test_normalise_treats_text_python_cannot_parse_as_null(raw):
     assert normalise_tool_call({"name": "x", "arguments": raw})["arguments"] is None
+
+
+@pytest.mark.parametrize("shape", ["[%s]", '{"a": %s}'], ids=["list", "object"])
+@pytest.mark.parametrize(
+    "levels, kept",
+    [(MAX_NESTING_DEPTH, True), (MAX_NESTING_DEPTH + 1, False)],
+    ids=["at-limit", "past-limit"],
+)
+def test_normalise_bounds_nesting_by_depth_not_by_parser_stack(shape, levels, kept):
+    raw = "1"
+    for _ in range(levels):
+        raw = shape % raw
+    decoded = normalise_tool_call({"name": "x", "arguments": raw})["arguments"]
+    assert (decoded is not None) == kept, "text nested past the limit is not decoded"
 
 
 # ── the detector end to end ──────────────────────────────────────────────────

@@ -28,6 +28,7 @@ from typing import Any, List, Optional, Tuple
 
 from garak.attempt import Attempt, Message
 from garak.detectors.base import Detector
+from garak.evidence.records import MAX_NESTING_DEPTH
 
 DETECTED = "detected"
 NOT_DETECTED = "not_detected"
@@ -61,15 +62,37 @@ def decode_payload(raw: Any) -> Any:
 
     Strings are parsed as JSON, and a parse failure gives ``None``; any other value
     passes through unchanged. Text that Python cannot parse, such as an integer
-    with more digits than its conversion limit or a document nested too deeply,
-    is a parse failure.
+    with more digits than its conversion limit, is a parse failure. So is a
+    document nested more than ``MAX_NESTING_DEPTH`` levels: how deep the parser
+    reads depends on the interpreter and its stack, so the limit is applied to
+    what it returns.
     """
     if not isinstance(raw, str):
         return raw
     try:
-        return json.loads(raw)
+        decoded = json.loads(raw)
     except (ValueError, RecursionError):
         return None
+    return None if _nests_past(decoded, MAX_NESTING_DEPTH) else decoded
+
+
+def _nests_past(value: Any, limit: int) -> bool:
+    """Say whether ``value`` holds a node more than ``limit`` levels below its root.
+
+    The walk goes level by level, so it needs no recursion and no stack.
+    """
+    level = [value]
+    for _ in range(limit + 1):
+        level = [
+            child
+            for node in level
+            for child in (
+                node.values()
+                if type(node) is dict
+                else node if type(node) is list else ()
+            )
+        ]
+    return bool(level)
 
 
 def _json_shaped(value: Any, ancestors: Optional[set] = None) -> bool:
