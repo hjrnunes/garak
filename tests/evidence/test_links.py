@@ -102,6 +102,18 @@ def test_release_after_loss_keeps_the_loss():
     assert seam.summary()["released"] is False, "the summary recorded the release"
 
 
+def test_release_after_an_observed_expiry_keeps_the_loss():
+    """A binding read as expired is the link's first end, so a later release cannot unsay it."""
+    bound = [True]
+    seam = link(bound=lambda: bound[0])
+    seam.beat(0.0)
+    bound[0] = False
+    assert seam.state(1.0) == "lost", "an expired binding read as live"
+    seam.release()
+    assert seam.state(2.0) == "lost", "a release erased an observed expiry"
+    assert seam.summary()["released"] is False, "the summary recorded the release"
+
+
 def test_loss_after_release_is_ignored():
     """A release before the loss keeps the link released."""
     seam = link()

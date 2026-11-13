@@ -34,9 +34,10 @@ class CaptureLink:
     release; ``lose(reason)`` the stream ending without one. ``state(now)``
     reads the binding. A link's first end stands: a release after a loss, or a
     loss after a release, is ignored. An expired ``bound()`` is a loss while
-    the link was not released, and a beat older than ``stall_after`` is a
-    stall. A link with no ``bound()`` predicate is bound for as long as it was
-    not released.
+    the link was not released, and the loss stays once ``state()`` has read it,
+    so a later release does not unsay it. A beat older than ``stall_after`` is
+    a stall. A link with no ``bound()`` predicate is bound for as long as it
+    was not released.
 
     ``bound()`` must answer without blocking, because the seal calls it. A
     predicate that raises ``OSError`` or ``RuntimeError`` cannot confirm the
@@ -86,6 +87,7 @@ class CaptureLink:
             if self._lost is not None:
                 return LOST
             if self.bound is not None and not self._is_bound():
+                self._lost = "binding not confirmed"
                 return LOST
             if self.stall_after is not None:
                 moment = now if now is not None else _monotonic()
