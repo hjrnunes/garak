@@ -83,6 +83,13 @@ def test_an_older_beat_arriving_late_does_not_move_the_beat_back():
     assert seam.state(11.0) == "live", "a late, older beat hid the newer one"
 
 
+def test_a_first_beat_below_zero_counts():
+    """A monotonic clock may read below zero, and the first beat on it is a beat."""
+    seam = link(stall_after=0.5)
+    seam.beat(-10.0)
+    assert seam.state(-9.0) == "stalled", "a beat below zero was read as zero"
+
+
 def test_released_link_ignores_loss_and_stall():
     """An acknowledged release ends the link cleanly, before any later loss."""
     seam = link(stall_after=1.0, bound=lambda: False)

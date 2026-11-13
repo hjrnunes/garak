@@ -48,7 +48,7 @@ class CaptureLink:
     name: str
     stall_after: float | None = None
     bound: Callable[[], bool] | None = None
-    _last_beat: float = 0.0
+    _last_beat: float = float("-inf")
     _released: bool = False
     _lost: str | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
