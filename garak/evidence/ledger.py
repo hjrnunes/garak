@@ -30,7 +30,11 @@ class Receipt(NamedTuple):
 
 
 class CallLedger:
-    """Append-only calls of one evaluation with constant-time ID lookup."""
+    """Append-only calls of one evaluation with constant-time ID lookup.
+
+    The stamp and turn callbacks run under the writer lock so that timestamps
+    follow list order. The lock is reentrant, so a callback may read the ledger.
+    """
 
     def __init__(
         self,
@@ -47,7 +51,7 @@ class CallLedger:
         self._encoded_by_id: dict[str, str] = {}
         self._start_encoded_by_id: dict[str, str] = {}
         self._unfinished: dict[str, None] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     def __len__(self) -> int:
         """Return the number of distinct recorded calls."""

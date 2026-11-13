@@ -1,5 +1,6 @@
 """Idempotent intake and channel-bound provenance."""
 
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -33,6 +34,25 @@ def test_identical_replay_keeps_first_record():
         "first",
     ), "replay changed metadata"
     assert len(ledger) == 1, "replay changed ledger size"
+
+
+def test_clock_that_reads_the_ledger_does_not_stop_intake():
+    """The ledger stamps under its lock, so a stamp that reads it must not wait on itself."""
+    seen = {}
+
+    def clock():
+        if "ledger" in seen:
+            len(seen["ledger"])
+        return "t"
+
+    ledger = seen["ledger"] = CallLedger(clock=clock)
+    writer = threading.Thread(
+        target=lambda: intake(ledger.channel("host"), call_id="one"), daemon=True
+    )
+    writer.start()
+    writer.join(2.0)
+    assert not writer.is_alive(), "intake waited on its own lock"
+    assert len(ledger) == 1, "the call did not reach the ledger"
 
 
 @pytest.mark.parametrize(
