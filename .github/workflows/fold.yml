@@ -104,3 +104,6 @@ jobs:
       - name: Test the extras
         if: env.FOLD_EXTRAS_TESTS != ''
         run: python -m pytest ${FOLD_EXTRAS_TESTS}
+      - name: Test the extras in the plugin-wide files
+        if: env.FOLD_EXTRAS_TESTS != ''
+        run: python -m pytest tests/plugins/test_plugin_load.py tests/detectors/test_detectors.py tests/probes/test_probes.py -k "midojo or toolcall or rubric or injection"
