@@ -75,6 +75,14 @@ def test_stalled_link_is_stalled():
     assert seam.state(7.0) == "live", "a fresh beat did not clear the stall"
 
 
+def test_an_older_beat_arriving_late_does_not_move_the_beat_back():
+    """Frames on two threads can record their beats out of order; the newest stands."""
+    seam = link(stall_after=5.0)
+    seam.beat(10.0)
+    seam.beat(1.0)
+    assert seam.state(11.0) == "live", "a late, older beat hid the newer one"
+
+
 def test_released_link_ignores_loss_and_stall():
     """An acknowledged release ends the link cleanly, before any later loss."""
     seam = link(stall_after=1.0, bound=lambda: False)

@@ -53,9 +53,11 @@ class CaptureLink:
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def beat(self, at: float | None = None) -> None:
-        """Record a frame or a ping crossing the link."""
+        """Record a frame or a ping crossing the link; an older beat never replaces a newer one."""
         with self._lock:
-            self._last_beat = at if at is not None else _monotonic()
+            self._last_beat = max(
+                self._last_beat, at if at is not None else _monotonic()
+            )
 
     def release(self) -> None:
         """Record the peer's acknowledged release: the link is done and clean.
