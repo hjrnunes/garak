@@ -165,11 +165,16 @@ def _record_problem(data: Any) -> str | None:
         value = data.get(name)
         if value is None and optional:
             continue
-        # bool is an int to Python, not to a status code
-        if not isinstance(value, kinds) or (kinds == (int,) and type(value) is bool):
+        # bool is an int to Python, not to a status code; a subclass of str may compare
+        # equal to text it does not spell, so replay would trust what it did not check
+        if (
+            not isinstance(value, kinds)
+            or (kinds == (int,) and type(value) is bool)
+            or (kinds == text and type(value) is not str)
+        ):
             return f"judgement record {name} is not valid"
     verdict = data.get("verdict")
-    if verdict is not None and verdict not in VERDICTS:
+    if verdict is not None and (type(verdict) is not str or verdict not in VERDICTS):
         return "judgement record verdict is not valid"
     if not _request_is_the_one_named(data["request_id"], data["request"]):
         return "judgement record request is not the request its request_id names"

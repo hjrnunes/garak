@@ -425,6 +425,23 @@ def test_a_record_with_no_verdict_and_no_failure_is_unresolved():
 # --- the record ---------------------------------------------------------------------------
 
 
+class Says(str):
+    """Text that spells one thing and compares equal to another (to anything, with no ``says``)."""
+
+    def __new__(cls, spelled, *says):
+        self = super().__new__(cls, spelled)
+        self.says = says
+        return self
+
+    def __eq__(self, other):
+        return not self.says or other == self.says[0]
+
+    def __ne__(self, other):
+        return not self == other
+
+    __hash__ = str.__hash__
+
+
 def test_a_record_dumps_its_fields_in_order_as_a_copy():
     kept = record(verdict="supported", details={"prompt_version": "p"})
     data = kept.to_json()
@@ -463,12 +480,22 @@ def test_a_record_dumps_its_fields_in_order_as_a_copy():
         ({"details": "text"}, "details is not valid"),
         ({"failure": 7}, "failure is not valid"),
         ({"extra": 1}, "1 field"),
+        ({"verdict": Says("contradicted", "supported")}, "verdict is not valid"),
+        ({"model": Says("other", "judge-1")}, "model is not valid"),
+        ({"request_id": Says("sha256:0")}, "request_id is not valid"),
     ],
 )
 def test_a_record_that_is_not_one_is_refused(change, problem):
     data = {**record().to_json(), **change}
     with pytest.raises(ValueError, match=problem):
         JudgeRecord.from_json(data)
+
+
+def test_a_replay_refuses_text_that_compares_equal_to_what_it_does_not_spell():
+    """A subclass of str reads differently when it is checked and when it is used."""
+    data = {**recorded().to_json(), "model": Says("other", MODEL)}
+    with pytest.raises(ValueError, match="model is not valid"):
+        RecordedJudge([data], model=MODEL, prompt_version=PROMPT)
 
 
 def test_a_record_with_a_missing_field_is_refused():
