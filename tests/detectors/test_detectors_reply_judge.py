@@ -491,10 +491,34 @@ def test_a_record_that_is_not_one_is_refused(change, problem):
         JudgeRecord.from_json(data)
 
 
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"request": {**REQUEST, "claim": "another", "id": Says("sha256:0")}},
+        {"details": {"prompt_version": "p", 1: "extra"}},
+        {"details": {"prompt_version": "p", "nested": {2: "extra"}}},
+        {"details": {"prompt_version": "p", "score": float("nan")}},
+        {"details": {"prompt_version": "p", "score": float("inf")}},
+        {"details": {"prompt_version": Says("other", "p")}},
+        {"details": {"prompt_version": "p", "kept": (1, 2)}},
+    ],
+)
+def test_a_record_whose_request_or_details_are_not_plain_json_is_refused(change):
+    data = {**record().to_json(), **change}
+    with pytest.raises(ValueError, match="request or details is not JSON data"):
+        JudgeRecord.from_json(data)
+
+
 def test_a_replay_refuses_text_that_compares_equal_to_what_it_does_not_spell():
     """A subclass of str reads differently when it is checked and when it is used."""
     data = {**recorded().to_json(), "model": Says("other", MODEL)}
     with pytest.raises(ValueError, match="model is not valid"):
+        RecordedJudge([data], model=MODEL, prompt_version=PROMPT)
+    data = {
+        **recorded().to_json(),
+        "details": {"prompt_version": Says("other", PROMPT)},
+    }
+    with pytest.raises(ValueError, match="not JSON data"):
         RecordedJudge([data], model=MODEL, prompt_version=PROMPT)
 
 

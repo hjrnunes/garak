@@ -142,6 +142,24 @@ class JudgeRecord:
         return cls(**kept)
 
 
+def _plain_json(value: Any) -> bool:
+    """Whether ``value`` is JSON data of exact types: objects with text keys, lists, finite numbers, no subclass."""
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if type(item) is dict:
+            if any(type(key) is not str for key in item):
+                return False
+            pending.extend(item.values())
+        elif type(item) is list:
+            pending.extend(item)
+        elif type(item) is float and not math.isfinite(item):
+            return False
+        elif item is not None and type(item) not in (str, int, float, bool):
+            return False
+    return True
+
+
 def _record_problem(data: Any) -> str | None:
     if not isinstance(data, Mapping):
         return "a judgement record must be an object"
@@ -176,6 +194,8 @@ def _record_problem(data: Any) -> str | None:
     verdict = data.get("verdict")
     if verdict is not None and (type(verdict) is not str or verdict not in VERDICTS):
         return "judgement record verdict is not valid"
+    if not _plain_json(data["request"]) or not _plain_json(data.get("details")):
+        return "judgement record request or details is not JSON data"
     if not _request_is_the_one_named(data["request_id"], data["request"]):
         return "judgement record request is not the request its request_id names"
     # A request that holds no reply was never asked (it is ``{}``, the schema and
