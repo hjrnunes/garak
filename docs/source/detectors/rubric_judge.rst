@@ -11,6 +11,9 @@ message content or a tool result. It writes ``rubric_judge_results`` in output
 order; each record contains ``verdict``, ``evidence_refs``, ``reason``,
 ``prompt_version``, ``request``, ``raw_response``, ``model`` and ``prompt``.
 Supported scores 1.0, contradicted scores 0.0, and unresolved scores ``None``.
+The replay probes ``injection.IndirectInjection`` and
+``injection.SequentialInjection`` read a rubric from each entry of their source
+and set it in those notes.
 
 Install the ``midojo`` extra for the shared judge rules. Choose a backend with
 ``backend`` in the detector's configuration:
