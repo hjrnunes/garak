@@ -220,7 +220,7 @@ follow:
    "Authentication or permission error text", "exception, logs", "scrubbed"
    "Bad-request or non-retryable error text and body", "logs, error note, report", "scrubbed"
    "Exception type and status code", "error note, trace error", "non-secret by construction"
-   "Retryable error body and its cause", "the exception's cause, in memory; the error note once ``max_retries`` is spent", "in memory only while the call retries, and no handler logs it; the error note holds the body scrubbed, as for a rejection"
+   "Retryable error body and its cause", "the exception's cause, in memory; the error note once ``max_retries`` is spent", "in memory only while the call retries, and no handler logs it; the error note holds the body scrubbed, as for a rejection; a credential that a caller's own ``httpx.Auth`` adds as a request is sent is scrubbed from the note but not from httpx's own log line, which no configuration file can cause"
    "JSON decode failure", "exception log", "non-secret by construction"
    "Response ID and model", "output notes, report", "scrubbed"
    "Response usage, including unknown fields and keys", "output notes, report", "scrubbed"
