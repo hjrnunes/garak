@@ -392,6 +392,11 @@ def test_probe_prompt_translation(classname, mocker):
     if classname == "probes.midojo.InjectionSpecProbe":
         pytest.skip("Injection spec turns require a configured live interceptor")
 
+    if classname == "probes.injection.SequentialInjection":
+        pytest.skip(
+            "Each turn is built from the previous reply, so there are no prompts"
+        )
+
     if probe_instance.lang != "en" or classname == "probes.tap.PAIR":
         pytest.skip("Probe does not engage with language provision")
 
