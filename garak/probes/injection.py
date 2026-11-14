@@ -11,16 +11,22 @@ can call tools. An optional ``tool_call_condition`` states declaratively which t
 calls mean the attack succeeded; it is evaluated by
 ``detectors.toolcall.ToolCallCondition``. An optional ``judge_rubric`` holds a yes/no
 question, criteria, and facts for ``detectors.rubric_judge.RubricJudge``.
+
+``SequentialInjection`` reads the same entries but holds only user messages: it
+sends them one per request, each later request carrying the earlier turns and the
+target's real replies.
 """
 
+import copy
 import json
 import logging
-from typing import List
+from dataclasses import dataclass
+from typing import Iterable, List
 
 import garak.attempt
 from garak import _config
 import garak.probes
-from garak.probes._injection_shared import resolve_source
+from garak.probes._injection_shared import resolve_source, turn_failure
 
 # entry keys copied into the conversation notes
 _ENTRY_NOTES = (
@@ -29,6 +35,10 @@ _ENTRY_NOTES = (
     "tool_call_condition",
     "judge_rubric",
 )
+# notes a judge reads; a sequential probe sends them on the judged turns only
+_JUDGE_NOTES = ("judge_rubric",)
+_GRADING_NOTES = ("tool_call_condition", *_JUDGE_NOTES)
+JUDGE_TURNS = ("final", "all")
 
 
 def load_entries(source, owner: str) -> List[dict]:
@@ -132,3 +142,169 @@ class IndirectInjection(garak.probes.Probe):
         return garak.attempt.Conversation.from_openai(
             entry["messages"], notes=entry_notes(entry)
         )
+
+
+@dataclass
+class Script:
+    """The user turns of one sequential conversation and the notes of its entry."""
+
+    texts: List[str]
+    notes: dict
+
+
+def script_of(entry: dict) -> Script | None:
+    """Return an entry's script, or None unless it holds only user text messages."""
+    messages = entry.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return None
+    if not all(
+        isinstance(m, dict)
+        and m.get("role") == "user"
+        and isinstance(m.get("content"), str)
+        for m in messages
+    ):
+        return None
+    return Script([m["content"] for m in messages], entry_notes(entry))
+
+
+class SequentialInjection(garak.probes.IterativeProbe):
+    """Send scripted user turns one by one, each after the target's real replies
+
+    Reads the entries ``IndirectInjection`` reads, keeping those whose messages are
+    all user turns. Each turn is one request and one attempt; a later request
+    carries the earlier user turns, the ``mcp_call`` items of each earlier response
+    (the generator's ``output_items`` note), and the target's real replies, so the
+    target needs no server-side state. The first turn that fails (a rejected
+    request, an unfinished response, or no reply text) ends its conversation;
+    ``notes["sequence"]["failure"]`` names why, and no attempt of that
+    conversation is graded.
+
+    Attempt ``notes["sequence"]`` holds ``conversation`` (the entry's position),
+    ``turn_index`` (from 0), ``turn_count``, and ``call_offset`` (the tool calls
+    made by earlier turns). Each output's ``tool_calls`` note holds every call
+    made so far in the conversation, so the detectors see the whole conversation.
+    The ``tool_call_condition`` travels on every turn; ``judge_rubric`` on the
+    final turn, or on every turn when ``judge_turns`` is ``all``. The scripts, not
+    ``max_calls_per_conv``, bound each conversation; with several generations, the
+    first one continues it.
+    """
+
+    lang = "en"
+    goal = "elicit harmful behaviour over a scripted multi-turn conversation"
+    doc_uri = (
+        "https://owasp.org/www-project-top-10-for-large-language-model-applications/"
+    )
+    # instructions injected via other contexts (tool results, documents, ...)
+    intent = "T009indirect"
+    active = False  # opt-in: requires an external conversation_source file
+    tags = [
+        "avid-effect:security:S0403",
+        "owasp:llm01",
+        "quality:Security:PromptStability",
+    ]
+    tier = garak.probes.Tier.INFORMATIONAL
+    primary_detector = "toolcall.ToolCallCondition"
+    extended_detectors = ["rubric_judge.RubricJudge"]
+
+    DEFAULT_PARAMS = garak.probes.IterativeProbe.DEFAULT_PARAMS | {
+        # a .json or .jsonl file, as for IndirectInjection
+        "conversation_source": "injection/example_sequential.json",
+        # "final" or "all": the turns that carry the judge notes
+        "judge_turns": "final",
+        "end_condition": "verify",
+        "follow_prompt_cap": False,
+    }
+
+    def __init__(self, config_root=_config):
+        super().__init__(config_root=config_root)
+        if self.judge_turns not in JUDGE_TURNS:
+            raise ValueError(
+                f"judge_turns must be one of {JUDGE_TURNS}, not {self.judge_turns!r}"
+            )
+        self.scripts: List[Script] = []
+        source = resolve_source(self.conversation_source)
+        for i, entry in enumerate(load_entries(source, self.__class__.__name__)):
+            script = script_of(entry)
+            if script is None:
+                logging.warning(
+                    "%s: skipping entry %d in %s: messages must be user text turns",
+                    self.__class__.__name__,
+                    i,
+                    source,
+                )
+                continue
+            self.scripts.append(script)
+        self.max_calls_per_conv = max((len(s.texts) for s in self.scripts), default=0)
+        self._calls: dict = {}
+        self._failed: set = set()
+
+    def probe(self, generator) -> Iterable[garak.attempt.Attempt]:
+        """Run every script; strip the grading notes of conversations that failed."""
+        self._calls = {}
+        self._failed = set()
+        attempts = super().probe(generator)
+        for attempt in attempts:
+            if attempt.notes["sequence"]["conversation"] in self._failed:
+                for key in _GRADING_NOTES:
+                    attempt.prompt.notes.pop(key, None)
+        return attempts
+
+    def _create_init_attempts(self) -> Iterable[garak.attempt.Attempt]:
+        return [self._turn_attempt(c, 0, []) for c in range(len(self.scripts))]
+
+    def _generate_next_attempts(
+        self, last_attempt: garak.attempt.Attempt
+    ) -> Iterable[garak.attempt.Attempt]:
+        sequence = last_attempt.notes["sequence"]
+        index = sequence["turn_index"] + 1
+        if "failure" in sequence or index >= sequence["turn_count"]:
+            return []
+        output = last_attempt.outputs[0]
+        items = (output.notes or {}).get("output_items")
+        reply = garak.attempt.Message(
+            output.text, notes={"output_items": items} if items else None
+        )
+        earlier = [
+            *copy.deepcopy(last_attempt.prompt.turns),
+            garak.attempt.Turn("assistant", reply),
+        ]
+        return [self._turn_attempt(sequence["conversation"], index, earlier)]
+
+    def _turn_attempt(
+        self, conversation: int, index: int, earlier: list
+    ) -> garak.attempt.Attempt:
+        script = self.scripts[conversation]
+        judged = self.judge_turns == "all" or index == len(script.texts) - 1
+        notes = {
+            k: v for k, v in script.notes.items() if judged or k not in _JUDGE_NOTES
+        }
+        user = garak.attempt.Turn(
+            "user", garak.attempt.Message(script.texts[index], lang=self.lang)
+        )
+        prompt = garak.attempt.Conversation([*earlier, user], notes=notes)
+        attempt = self._create_attempt(prompt)
+        attempt.notes["sequence"] = {
+            "conversation": conversation,
+            "turn_index": index,
+            "turn_count": len(script.texts),
+            "call_offset": len(self._calls.get(conversation, [])),
+        }
+        return attempt
+
+    def _postprocess_attempt(self, this_attempt) -> garak.attempt.Attempt:
+        self._close_turn(this_attempt)
+        return super()._postprocess_attempt(this_attempt)
+
+    def _close_turn(self, attempt: garak.attempt.Attempt) -> None:
+        """Record why a turn failed, and put every call so far on its output."""
+        sequence = attempt.notes["sequence"]
+        output = attempt.outputs[0] if attempt.outputs else None
+        failure = turn_failure(output)
+        if failure is not None:
+            sequence["failure"] = failure
+            self._failed.add(sequence["conversation"])
+        if output is None:
+            return
+        calls = self._calls.setdefault(sequence["conversation"], [])
+        calls.extend((output.notes or {}).get("tool_calls", []))
+        output.notes = {**(output.notes or {}), "tool_calls": list(calls)}
