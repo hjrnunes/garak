@@ -333,8 +333,10 @@ class SequentialInjection(garak.probes.IterativeProbe):
         if failure is not None:
             sequence["failure"] = failure
             self._failed.add(sequence["conversation"])
-        if output is None:
-            return
-        calls = self._calls.setdefault(sequence["conversation"], [])
-        calls.extend((output.notes or {}).get("tool_calls", []))
-        output.notes = {**(output.notes or {}), "tool_calls": list(calls)}
+        earlier = self._calls.get(sequence["conversation"], [])
+        for each in attempt.outputs:
+            if each is not None:
+                own = (each.notes or {}).get("tool_calls", [])
+                each.notes = {**(each.notes or {}), "tool_calls": [*earlier, *own]}
+        if output is not None:
+            self._calls[sequence["conversation"]] = list(output.notes["tool_calls"])

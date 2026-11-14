@@ -33,7 +33,8 @@ class ScriptedTarget:
 
     def generate(self, prompt, generations_this_call=1):
         self.prompts.append(prompt)
-        return [self.replies.pop(0)]
+        reply = self.replies.pop(0)
+        return reply if isinstance(reply, list) else [reply]
 
     def clear_history(self):
         pass
@@ -168,6 +169,20 @@ def test_the_first_failed_turn_ends_the_conversation(tmp_path, report, failed, n
             "tool_call_condition" not in attempt.prompt.notes
             and "judge_rubric" not in attempt.prompt.notes
         ), "a failed conversation is not graded"
+
+
+def test_every_generation_of_a_turn_carries_the_earlier_calls(tmp_path, report):
+    call = _call("issue_refund", "fc_1")
+    probe = _probe(tmp_path, _entry("a", "b"))
+    probe.generations = 2
+    attempts, _ = _run(
+        probe, [[_reply("1", [call]), _reply("1b")], [_reply("2"), _reply("2b")]]
+    )
+
+    assert [
+        [c["name"] for c in output.notes["tool_calls"]]
+        for output in attempts[1].outputs
+    ] == [["issue_refund"]] * 2, "each generation of a later turn continues the first"
 
 
 @pytest.mark.parametrize("silent_turn", [0, 1], ids=["first_turn", "final_turn"])
