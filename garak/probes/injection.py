@@ -88,12 +88,14 @@ def entry_notes(entry: dict) -> dict:
 
 
 def _not_finished(output: garak.attempt.Message | None) -> bool:
-    """Tell whether an output is a rejected request or an unfinished response.
+    """Tell whether an output is missing, a rejected request or an unfinished response.
 
     A target that writes no response status, such as a chat completions target,
     has not failed by that.
     """
-    notes = (output.notes or {}) if output is not None else {}
+    if output is None:
+        return True
+    notes = output.notes or {}
     return (
         isinstance(notes.get("error"), dict)
         or notes.get("response_status", "completed") != "completed"

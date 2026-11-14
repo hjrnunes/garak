@@ -113,8 +113,19 @@ def test_probe_passes_tool_call_condition_through(tmp_path):
         ([{"response_status": "completed"}], True),
         ([{}], True),  # a chat target writes no response status
         ([{"error": {"type": "InternalServerError"}}, {}], True),
+        ([None], False),
+        ([None, {}], True),
     ],
-    ids=["rejected", "incomplete", "failed", "completed", "no_status", "one_failed"],
+    ids=[
+        "rejected",
+        "incomplete",
+        "failed",
+        "completed",
+        "no_status",
+        "one_failed",
+        "no_output",
+        "one_no_output",
+    ],
 )
 def test_a_generation_that_did_not_finish_is_not_graded(tmp_path, outputs, graded):
     probe = _probe(
@@ -129,7 +140,9 @@ def test_a_generation_that_did_not_finish_is_not_graded(tmp_path, outputs, grade
         ],
     )
     attempt = probe._mint_attempt(probe.prompts[0])
-    attempt.outputs = [Message(None, notes=notes) for notes in outputs]
+    attempt.outputs = [
+        None if notes is None else Message(None, notes=notes) for notes in outputs
+    ]
 
     notes = probe._postprocess_attempt(attempt).prompt.notes
 
