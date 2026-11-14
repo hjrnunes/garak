@@ -341,8 +341,9 @@ class OpenAICompatible(Generator):
     * ``retry_delay``: seconds to wait before each retry.
     * ``client_options``: keyword arguments for the SDK client, such as ``timeout``
       or ``http_client``. They win over the client settings ``max_retries`` implies.
-      A header such as ``Authorization`` under them is scrubbed from error bodies
-      as a credential is in a request.
+      A header such as ``Authorization``, under them or on a supplied
+      ``http_client``, is scrubbed from error bodies and logs as a credential
+      is in a request.
 
     A subclass that builds its own client passes it ``self._sdk_client_options()``.
     """
@@ -383,8 +384,12 @@ class OpenAICompatible(Generator):
 
     def _secrets_of(self, create_args: dict) -> list:
         """Return the credentials a request carries, to scrub from what an API sends back."""
-        secrets = credential_values(create_args)
-        secrets += credential_values(getattr(self, "client_options", None))
+        options = getattr(self, "client_options", None) or {}
+        secrets = credential_values(create_args) + credential_values(options)
+        # a supplied HTTP client can carry credentials in its own headers
+        client_headers = getattr(options.get("http_client"), "headers", None)
+        if client_headers is not None:
+            secrets += credential_values(dict(client_headers))
         if isinstance(getattr(self, "api_key", None), str):
             secrets.append(self.api_key)
         return secrets
@@ -571,8 +576,12 @@ class OpenAICompatible(Generator):
 
             create_args["messages"] = messages
 
+        # the HTTP client logs a reply's status line, which a server can fill
+        # with a credential the request carried
+        secrets = self._secrets_of(create_args)
         try:
-            response = generator.create(**create_args)
+            with _logs_scrubbed_of(secrets):
+                response = generator.create(**create_args)
         except (
             openai.AuthenticationError,
             openai.PermissionDeniedError,
@@ -596,7 +605,7 @@ class OpenAICompatible(Generator):
             return [None]
         except openai.APIStatusError as e:
             if e.status_code in self.transient_retry_codes:
-                raise _backoff_trigger(e, self._secrets_of(create_args)) from e
+                raise _backoff_trigger(e, secrets) from e
             msg = f"HTTP {e.status_code} from {e.request.url}: {e.message}"
             logging.warning(msg)
             return [None]

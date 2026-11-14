@@ -4,6 +4,7 @@
 """``client_options`` reach the SDK client the OpenAI generators build."""
 
 import json
+import logging
 
 import httpx
 import pytest
@@ -105,19 +106,41 @@ def test_a_supplied_http_client_carries_the_requests():
     ], "the request went through the supplied client"
 
 
-def test_a_credential_in_client_options_is_scrubbed_from_a_failed_generation():
-    generator = _build(
-        OpenAICompatible,
-        max_retries=0,
-        client_options={"default_headers": {"Authorization": HEADER_CREDENTIAL}},
-    )
+# generator class and request path, for each way a request reaches the API
+FLAVOURS = {
+    "chat": (OpenAICompatible, "/chat/completions"),
+    "responses": (OpenAIResponsesGenerator, "/responses"),
+}
+# client options that put a credential in the headers of every request
+CREDENTIAL_OPTIONS = {
+    "default_headers": lambda: {
+        "default_headers": {"Authorization": HEADER_CREDENTIAL}
+    },
+    "http_client": lambda: {
+        "http_client": httpx.Client(headers={"x-api-key": HEADER_CREDENTIAL})
+    },
+}
+
+
+def _fail_once(flavour, client_options, reply):
+    klass, path = FLAVOURS[flavour]
+    generator = _build(klass, max_retries=0, client_options=client_options)
+    with respx.mock(base_url=URI) as router:
+        route = router.post(path).mock(return_value=reply)
+        output = generator._call_model(Conversation([Turn("user", Message("hi"))]))
+    sent = route.calls[0].request.headers
+    assert HEADER_CREDENTIAL in " ".join(sent.values()), "the request carried it"
+    return output
+
+
+@pytest.mark.parametrize("flavour", FLAVOURS)
+@pytest.mark.parametrize("option", CREDENTIAL_OPTIONS)
+def test_a_client_credential_is_scrubbed_from_a_failed_generation(flavour, option):
     echo = {"error": {"message": f"unavailable for {HEADER_CREDENTIAL}"}}
 
-    with respx.mock(base_url=URI) as router:
-        router.post("/chat/completions").mock(
-            return_value=httpx.Response(503, json=echo)
-        )
-        output = generator._call_model(Conversation([Turn("user", Message("hi"))]))
+    output = _fail_once(
+        flavour, CREDENTIAL_OPTIONS[option](), httpx.Response(503, json=echo)
+    )
 
     error = output[0].notes["error"]
     assert "unavailable" in error["body"], "the reason is kept"
@@ -125,3 +148,20 @@ def test_a_credential_in_client_options_is_scrubbed_from_a_failed_generation():
     assert HEADER_CREDENTIAL not in json.dumps(
         output[0].notes
     ), "the note holds no secret"
+
+
+@pytest.mark.parametrize("flavour", FLAVOURS)
+@pytest.mark.parametrize("option", CREDENTIAL_OPTIONS)
+def test_a_client_credential_an_http_reply_echoes_stays_out_of_the_log(
+    flavour, option, caplog
+):
+    reply = httpx.Response(
+        503,
+        json={"error": {"message": "unavailable"}},
+        extensions={"reason_phrase": HEADER_CREDENTIAL.encode()},
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        _fail_once(flavour, CREDENTIAL_OPTIONS[option](), reply)
+
+    assert HEADER_CREDENTIAL not in caplog.text, "the HTTP status line is scrubbed"
