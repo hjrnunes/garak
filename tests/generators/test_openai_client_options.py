@@ -151,6 +151,29 @@ def test_a_client_credential_is_scrubbed_from_a_failed_generation(flavour, optio
 
 
 @pytest.mark.parametrize("flavour", FLAVOURS)
+def test_a_credential_added_as_the_request_is_sent_is_scrubbed_from_a_failed_generation(
+    flavour,
+):
+    class AddsCredential(httpx.Auth):
+        def auth_flow(self, request):
+            request.headers["x-api-key"] = HEADER_CREDENTIAL
+            yield request
+
+    client = httpx.Client(auth=AddsCredential())
+    assert "x-api-key" not in client.headers, "the client holds no such header"
+    echo = {"error": {"message": f"unavailable for {HEADER_CREDENTIAL}"}}
+
+    output = _fail_once(
+        flavour, {"http_client": client}, httpx.Response(503, json=echo)
+    )
+
+    assert HEADER_CREDENTIAL not in json.dumps(
+        output[0].notes
+    ), "the note holds no secret the request was sent with"
+    assert cli.REDACTED in output[0].notes["error"]["body"], "and the gap is marked"
+
+
+@pytest.mark.parametrize("flavour", FLAVOURS)
 @pytest.mark.parametrize("option", CREDENTIAL_OPTIONS)
 def test_a_client_credential_an_http_reply_echoes_stays_out_of_the_log(
     flavour, option, caplog

@@ -247,10 +247,14 @@ def _failed_generation(error: openai.APIStatusError, secrets=()) -> Message:
 
     The output has no text. Its ``error`` note names the error type and, when
     the API sent a response, its status code and body text as received, apart
-    from any of ``secrets`` the body echoes.
+    from any of ``secrets`` the body echoes, and from any credential header the
+    failed request carried, whoever added it.
     """
 
     note = {"type": type(error).__name__}
+    sent = getattr(getattr(error, "request", None), "headers", None)
+    if sent is not None:
+        secrets = [*secrets, *credential_values(dict(sent))]
     response = getattr(error, "response", None)
     if response is not None:
         note["status_code"] = response.status_code
@@ -343,7 +347,9 @@ class OpenAICompatible(Generator):
       or ``http_client``. They win over the client settings ``max_retries`` implies.
       A header such as ``Authorization``, under them or on a supplied
       ``http_client``, is scrubbed from error bodies and logs as a credential
-      is in a request.
+      is in a request. A credential an ``httpx.Auth`` object of that client adds
+      as the request is sent is scrubbed from error bodies only, because httpx
+      logs the reply before the call raises an error.
 
     A subclass that builds its own client passes it ``self._sdk_client_options()``.
     """
