@@ -170,6 +170,36 @@ def test_the_first_failed_turn_ends_the_conversation(tmp_path, report, failed, n
         ), "a failed conversation is not graded"
 
 
+@pytest.mark.parametrize("silent_turn", [0, 1], ids=["first_turn", "final_turn"])
+def test_a_reply_that_only_called_tools_is_not_a_failed_turn(
+    tmp_path, report, silent_turn
+):
+    call = _call("get_orders", "fc_1")
+    probe = _probe(
+        tmp_path,
+        _entry("a", "b", tool_call_condition=CONDITION, judge_rubric=RUBRIC),
+        judge_turns="all",
+    )
+    replies = [_reply("done"), _reply("done")]
+    replies[silent_turn] = _reply(None, [call])
+    attempts, target = _run(probe, replies)
+
+    assert len(target.prompts) == 2, "the conversation goes on"
+    assert not any(
+        "failure" in a.notes["sequence"] for a in attempts
+    ), "a turn that called a tool and said nothing finished its work"
+    assert all(
+        "tool_call_condition" in a.prompt.notes and "judge_rubric" in a.prompt.notes
+        for a in attempts
+    ), "the conversation is graded"
+    if silent_turn == 0:
+        assert OpenAIResponsesGenerator._build_input(target.prompts[1]) == [
+            {"role": "user", "content": "a"},
+            call,
+            {"role": "user", "content": "b"},
+        ], "the next request resends the call and no empty message"
+
+
 @pytest.mark.parametrize(
     "judge_turns, judged", [("final", [False, False, True]), ("all", [True] * 3)]
 )

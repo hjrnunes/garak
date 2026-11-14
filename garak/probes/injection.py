@@ -38,6 +38,8 @@ _ENTRY_NOTES = (
 # notes a judge reads; a sequential probe sends them on the judged turns only
 _JUDGE_NOTES = ("judge_rubric",)
 _GRADING_NOTES = ("tool_call_condition", *_JUDGE_NOTES)
+# the failure a finished response without reply text gets from turn_failure
+_EMPTY_REPLY = "EmptyReply"
 JUDGE_TURNS = ("final", "all")
 
 
@@ -175,9 +177,10 @@ class SequentialInjection(garak.probes.IterativeProbe):
     carries the earlier user turns, the ``mcp_call`` items of each earlier response
     (the generator's ``output_items`` note), and the target's real replies, so the
     target needs no server-side state. The first turn that fails (a rejected
-    request, an unfinished response, or no reply text) ends its conversation;
-    ``notes["sequence"]["failure"]`` names why, and no attempt of that
-    conversation is graded.
+    request, an unfinished response, or no reply text and no tool call) ends its
+    conversation; ``notes["sequence"]["failure"]`` names why, and no attempt of
+    that conversation is graded. A reply that called a tool and said nothing is
+    not a failure, and the next request resends its calls.
 
     Attempt ``notes["sequence"]`` holds ``conversation`` (the entry's position),
     ``turn_index`` (from 0), ``turn_count``, and ``call_offset`` (the tool calls
@@ -300,6 +303,8 @@ class SequentialInjection(garak.probes.IterativeProbe):
         sequence = attempt.notes["sequence"]
         output = attempt.outputs[0] if attempt.outputs else None
         failure = turn_failure(output)
+        if failure == _EMPTY_REPLY and (output.notes or {}).get("tool_calls"):
+            failure = None
         if failure is not None:
             sequence["failure"] = failure
             self._failed.add(sequence["conversation"])
