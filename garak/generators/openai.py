@@ -14,11 +14,13 @@ Sources:
 import collections
 import contextlib
 import copy
+import functools
 import inspect
 import json
 import logging
 import re
 import threading
+import time
 from typing import List, Union
 
 import httpx
@@ -258,8 +260,88 @@ def _failed_generation(error: openai.APIStatusError, secrets=()) -> Message:
     return Message(None, notes={"error": note})
 
 
+# the errors a retry covers, under backoff and under ``max_retries``
+_TRANSIENT_ERRORS = (
+    openai.RateLimitError,
+    openai.InternalServerError,
+    openai.APITimeoutError,
+    openai.APIConnectionError,
+    garak.exception.GeneratorBackoffTrigger,
+)
+
+
+def _backoff_trigger(error, secrets=()) -> garak.exception.GeneratorBackoffTrigger:
+    """Return the exception that asks for a retry after ``error``.
+
+    It has no message and carries the failed generation, with its body scrubbed
+    of ``secrets``, that a call with bounded retries returns once none is left.
+    """
+
+    trigger = garak.exception.GeneratorBackoffTrigger()
+    trigger.failed_generation = _failed_generation(error, secrets)
+    return trigger
+
+
+def _spent_retries(error, generations: int) -> List[Message]:
+    """Return the failed generations a call gives when its retries are spent."""
+
+    failed = getattr(error, "failed_generation", None)
+    if failed is None:
+        # an error with no scrubbed body keeps its type and nothing else
+        failed = Message(None, notes={"error": {"type": type(error).__name__}})
+    return [copy.deepcopy(failed) for _ in range(generations)]
+
+
+def _retrying(call):
+    """Decorate a ``_call_model`` with the retry policy its generator sets.
+
+    Without ``max_retries``, a transient error retries under Fibonacci backoff
+    with no limit on attempts. With it, the call retries at most that many
+    times, ``retry_delay`` seconds apart, and returns the last failure as a
+    failed generation once they are spent. Any other error ends the call.
+    """
+
+    unbounded = backoff.on_exception(backoff.fibo, _TRANSIENT_ERRORS, max_value=70)(
+        call
+    )
+
+    @functools.wraps(call)
+    def retrying(self, prompt, generations_this_call=1):
+        # a generator built without its configuration has no ``max_retries``
+        max_retries = getattr(self, "max_retries", None)
+        if max_retries is None:
+            return unbounded(self, prompt, generations_this_call)
+        retries = 0
+        while True:
+            try:
+                return call(self, prompt, generations_this_call)
+            except _TRANSIENT_ERRORS as error:
+                if retries >= max_retries:
+                    return _spent_retries(error, generations_this_call)
+                logging.debug(
+                    "%s: retry %d of %d after %s",
+                    self.fullname,
+                    retries + 1,
+                    max_retries,
+                    type(error).__name__,
+                )
+            retries += 1
+            time.sleep(self.retry_delay)
+
+    return retrying
+
+
 class OpenAICompatible(Generator):
-    """Generator base class for OpenAI compatible text2text restful API. Implements shared initialization and execution methods."""
+    """Generator base class for OpenAI compatible text2text restful API. Implements shared initialization and execution methods.
+
+    * ``max_retries``: retry a failed call at most this many times, with one
+      request per attempt, and return the last failure as a failed generation
+      once they are spent. Without it, a transient error retries under backoff
+      with no limit on attempts, and the SDK client adds retries of its own.
+    * ``retry_delay``: seconds to wait before each retry.
+
+    A subclass that builds its own client passes it ``self._sdk_client_options()``.
+    """
 
     ENV_VAR = "OpenAICompatible_API_KEY".upper()  # Placeholder override when extending
 
@@ -280,10 +362,23 @@ class OpenAICompatible(Generator):
         "retry_json": True,
         "extra_params": {},
         "transient_retry_codes": [408, 429, 502, 503, 504],
+        "max_retries": None,
+        "retry_delay": 1.0,
     }
 
     _unsafe_attributes = ["client", "generator"]
     URI_CONNECT_TIMEOUT = 5
+
+    def _sdk_client_options(self) -> dict:
+        # once this generator owns the retries, the SDK must not add its own
+        return {} if getattr(self, "max_retries", None) is None else {"max_retries": 0}
+
+    def _secrets_of(self, create_args: dict) -> list:
+        """Return the credentials a request carries, to scrub from what an API sends back."""
+        secrets = credential_values(create_args)
+        if isinstance(getattr(self, "api_key", None), str):
+            secrets.append(self.api_key)
+        return secrets
 
     def close(self):
         client = getattr(self, "client", None)
@@ -304,7 +399,9 @@ class OpenAICompatible(Generator):
     def _load_unsafe(self):
         # When extending `OpenAICompatible` this method is a likely location for target application specific
         # customization and must populate self.generator with an openai api compliant object
-        self.client = openai.OpenAI(base_url=self.uri, api_key=self.api_key)
+        self.client = openai.OpenAI(
+            base_url=self.uri, api_key=self.api_key, **self._sdk_client_options()
+        )
         if self.name in ("", None):
             raise ValueError(
                 f"{self.generator_family_name} requires model name to be set, e.g. --target_name org/private-model-name"
@@ -407,17 +504,7 @@ class OpenAICompatible(Generator):
         return turn_list
 
     # noinspection PyArgumentList
-    @backoff.on_exception(
-        backoff.fibo,
-        (
-            openai.RateLimitError,
-            openai.InternalServerError,
-            openai.APITimeoutError,
-            openai.APIConnectionError,
-            garak.exception.GeneratorBackoffTrigger,
-        ),
-        max_value=70,
-    )
+    @_retrying
     def _call_model(
         self, prompt: Union[Conversation, List[dict]], generations_this_call: int = 1
     ) -> List[Union[Message, None]]:
@@ -500,14 +587,14 @@ class OpenAICompatible(Generator):
             return [None]
         except openai.APIStatusError as e:
             if e.status_code in self.transient_retry_codes:
-                raise garak.exception.GeneratorBackoffTrigger from e
+                raise _backoff_trigger(e, self._secrets_of(create_args)) from e
             msg = f"HTTP {e.status_code} from {e.request.url}: {e.message}"
             logging.warning(msg)
             return [None]
         except json.decoder.JSONDecodeError as e:
             logging.exception(e)
             if self.retry_json:
-                raise garak.exception.GeneratorBackoffTrigger from e
+                raise _backoff_trigger(e) from e
             else:
                 raise e
 
@@ -558,7 +645,7 @@ class OpenAIGenerator(OpenAICompatible):
     }
 
     def _load_unsafe(self):
-        self.client = openai.OpenAI(api_key=self.api_key)
+        self.client = openai.OpenAI(api_key=self.api_key, **self._sdk_client_options())
 
         if self.name == "":
             openai_model_list = sorted([m.id for m in self.client.models.list().data])
@@ -612,6 +699,8 @@ class OpenAIReasoningGenerator(OpenAIGenerator):
         "suppressed_params": set(["n", "temperature", "max_tokens", "stop"]),
         "retry_json": True,
         "max_completion_tokens": 1500,
+        "max_retries": None,
+        "retry_delay": 1.0,
     }
 
 
@@ -630,7 +719,8 @@ class OpenAIResponsesGenerator(OpenAICompatible):
     A request the API rejects yields a :class:`Message` with no text whose
     ``error`` note holds the error type, status code and response body. A
     rejected credential stops the run with a :class:`garak.exception.GarakException`,
-    and rate limits and server errors are retried.
+    and rate limits and server errors are retried. With ``max_retries`` set, the
+    failure that follows the last retry yields the same kind of :class:`Message`.
     Every response that comes back yields one :class:`Message`, even when it has
     no text. Its notes hold the response's tool calls in ``tool_calls``, its
     ``mcp_call`` items, as the API sent them, in ``output_items`` (a later turn
@@ -673,7 +763,7 @@ class OpenAIResponsesGenerator(OpenAICompatible):
         kwargs = {"api_key": getattr(self, "api_key", None)}
         if getattr(self, "uri", None):
             kwargs["base_url"] = self.uri
-        self.client = openai.OpenAI(**kwargs)
+        self.client = openai.OpenAI(**kwargs, **self._sdk_client_options())
         self.generator = self.client.responses
 
     @staticmethod
@@ -725,17 +815,7 @@ class OpenAIResponsesGenerator(OpenAICompatible):
             return {**entry["function"], **flat}
         return entry
 
-    @backoff.on_exception(
-        backoff.fibo,
-        (
-            openai.RateLimitError,
-            openai.InternalServerError,
-            openai.APITimeoutError,
-            openai.APIConnectionError,
-            garak.exception.GeneratorBackoffTrigger,
-        ),
-        max_value=70,
-    )
+    @_retrying
     def _call_model(
         self, prompt: Union[Conversation, List[dict]], generations_this_call: int = 1
     ) -> List[Union[Message, None]]:
@@ -781,9 +861,7 @@ class OpenAIResponsesGenerator(OpenAICompatible):
         # an API can answer a rejected request by echoing it, so what comes back
         # in an error is scrubbed of the credentials the request carried; the
         # prompt itself is never logged, as its notes can hold tool credentials
-        secrets = credential_values(create_args)
-        if isinstance(getattr(self, "api_key", None), str):
-            secrets.append(self.api_key)
+        secrets = self._secrets_of(create_args)
 
         try:
             with _logs_scrubbed_of(secrets):
@@ -809,7 +887,7 @@ class OpenAIResponsesGenerator(OpenAICompatible):
                 isinstance(e, (openai.RateLimitError, openai.InternalServerError))
                 or e.status_code in self.transient_retry_codes
             ):
-                raise garak.exception.GeneratorBackoffTrigger from e
+                raise _backoff_trigger(e, secrets) from e
             # the request URL is the one the client reached after any redirect,
             # and a server chooses where it redirects to
             logging.warning(
@@ -821,7 +899,7 @@ class OpenAIResponsesGenerator(OpenAICompatible):
             return [_failed_generation(e, secrets)]
         except json.decoder.JSONDecodeError as e:
             logging.exception(e)
-            raise garak.exception.GeneratorBackoffTrigger from e
+            raise _backoff_trigger(e) from e
 
         text_parts = []
         reasoning_parts = []

@@ -39,7 +39,9 @@ class GroqChat(OpenAICompatible):
     generator_family_name = "Groq"
 
     def _load_unsafe(self):
-        self.client = openai.OpenAI(base_url=self.uri, api_key=self.api_key)
+        self.client = openai.OpenAI(
+            base_url=self.uri, api_key=self.api_key, **self._sdk_client_options()
+        )
         if self.name in ("", None):
             raise ValueError(
                 "Groq API requires model name to be set, e.g. --target_name llama-3.1-8b-instant \nCurrent models:\n"

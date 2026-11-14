@@ -88,7 +88,10 @@ class AzureOpenAIGenerator(OpenAICompatible):
             self.target_name = openai_model_mapping[self.target_name]
 
         self.client = openai.AzureOpenAI(
-            azure_endpoint=self.uri, api_key=self.api_key, api_version=self.api_version
+            azure_endpoint=self.uri,
+            api_key=self.api_key,
+            api_version=self.api_version,
+            **self._sdk_client_options(),
         )
 
         if self.name == "":

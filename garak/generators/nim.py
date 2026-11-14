@@ -54,7 +54,9 @@ class NVOpenAIChat(OpenAICompatible):
     timeout = 60
 
     def _load_unsafe(self):
-        self.client = openai.OpenAI(base_url=self.uri, api_key=self.api_key)
+        self.client = openai.OpenAI(
+            base_url=self.uri, api_key=self.api_key, **self._sdk_client_options()
+        )
         if self.name in ("", None):
             raise ValueError(
                 "NIMs require model name to be set, e.g. --target_name mistralai/mistral-8x7b-instruct-v0.1\nCurrent models:\n"
@@ -132,7 +134,9 @@ class NVOpenAICompletion(NVOpenAIChat):
     """
 
     def _load_unsafe(self):
-        self.client = openai.OpenAI(base_url=self.uri, api_key=self.api_key)
+        self.client = openai.OpenAI(
+            base_url=self.uri, api_key=self.api_key, **self._sdk_client_options()
+        )
         self.generator = self.client.completions
 
 
