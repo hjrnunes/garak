@@ -339,6 +339,10 @@ class OpenAICompatible(Generator):
       once they are spent. Without it, a transient error retries under backoff
       with no limit on attempts, and the SDK client adds retries of its own.
     * ``retry_delay``: seconds to wait before each retry.
+    * ``client_options``: keyword arguments for the SDK client, such as ``timeout``
+      or ``http_client``. They win over the client settings ``max_retries`` implies.
+      A header such as ``Authorization`` under them is scrubbed from error bodies
+      as a credential is in a request.
 
     A subclass that builds its own client passes it ``self._sdk_client_options()``.
     """
@@ -364,6 +368,7 @@ class OpenAICompatible(Generator):
         "transient_retry_codes": [408, 429, 502, 503, 504],
         "max_retries": None,
         "retry_delay": 1.0,
+        "client_options": {},
     }
 
     _unsafe_attributes = ["client", "generator"]
@@ -371,11 +376,15 @@ class OpenAICompatible(Generator):
 
     def _sdk_client_options(self) -> dict:
         # once this generator owns the retries, the SDK must not add its own
-        return {} if getattr(self, "max_retries", None) is None else {"max_retries": 0}
+        owned_retries = (
+            {} if getattr(self, "max_retries", None) is None else {"max_retries": 0}
+        )
+        return owned_retries | (getattr(self, "client_options", None) or {})
 
     def _secrets_of(self, create_args: dict) -> list:
         """Return the credentials a request carries, to scrub from what an API sends back."""
         secrets = credential_values(create_args)
+        secrets += credential_values(getattr(self, "client_options", None))
         if isinstance(getattr(self, "api_key", None), str):
             secrets.append(self.api_key)
         return secrets
@@ -701,6 +710,7 @@ class OpenAIReasoningGenerator(OpenAIGenerator):
         "max_completion_tokens": 1500,
         "max_retries": None,
         "retry_delay": 1.0,
+        "client_options": {},
     }
 
 
