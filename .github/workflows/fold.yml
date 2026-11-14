@@ -26,7 +26,7 @@ env:
   # pyproject extras that the fork adds beyond requirements.txt, comma separated
   FOLD_EXTRAS: "midojo,midojo-mim"
   # tests that need those extras, space separated
-  FOLD_EXTRAS_TESTS: "tests/evidence tests/injectors tests/environments tests/test_coordinator.py tests/detectors/test_detectors_midojo.py tests/detectors/test_detectors_midojo_utility.py tests/detectors/test_detectors_midojo_baseline.py tests/detectors/test_detectors_grading*.py tests/detectors/test_detectors_reply_judge*.py tests/detectors/test_detectors_rubric_judge.py tests/probes/test_probe_midojo*.py"
+  FOLD_EXTRAS_TESTS: "tests/evidence tests/injectors tests/environments tests/test_coordinator.py tests/detectors/test_detectors_midojo.py tests/detectors/test_detectors_midojo_utility.py tests/detectors/test_detectors_midojo_baseline.py tests/detectors/test_detectors_grading*.py tests/detectors/test_detectors_reply_judge*.py tests/detectors/test_detectors_rubric_judge.py tests/probes/test_probe_midojo*.py tests/probes/test_probe_injection*.py"
   # pip requirement specifiers, space separated, that pin the source of an extra no index serves; both packages live in subdirectories of one MiDojo commit
   FOLD_EXTRA_SOURCES: "midojo-spec@git+https://github.com/hjrnunes/midojo.git@466d24c9a7bd9c4dbff541f87ed576eb8b09bae7#subdirectory=packages/midojo-spec midojo-mim@git+https://github.com/hjrnunes/midojo.git@466d24c9a7bd9c4dbff541f87ed576eb8b09bae7#subdirectory=packages/midojo-mim"
 
