@@ -211,8 +211,10 @@ class SequentialInjection(garak.probes.IterativeProbe):
     ``turn_index`` (from 0), ``turn_count``, and ``call_offset`` (the tool calls
     made by earlier turns). Each output's ``tool_calls`` note holds every call
     made so far in the conversation, so the detectors see the whole conversation.
-    The ``tool_call_condition`` travels on every turn; ``judge_rubric`` on the
-    final turn, or on every turn when ``judge_turns`` is ``all``. The scripts, not
+    A conversation that ends without a failure gets the ``tool_call_condition``
+    on every turn and the ``judge_rubric`` on the final turn, or on every turn
+    when ``judge_turns`` is ``all``, after the run; no report line written during
+    the run holds them. The scripts, not
     ``max_calls_per_conv``, bound each conversation; with several generations, the
     first one continues it.
     """
@@ -267,14 +269,29 @@ class SequentialInjection(garak.probes.IterativeProbe):
         self._failed: set = set()
 
     def probe(self, generator) -> Iterable[garak.attempt.Attempt]:
-        """Run every script; strip the grading notes of conversations that failed."""
+        """Run every script, then add the grading notes to conversations that did not fail
+
+        A failure is only known after the turns before it were written to the
+        report, so no attempt carries a grading note while the run writes.
+        """
         self._calls = {}
         self._failed = set()
         attempts = super().probe(generator)
         for attempt in attempts:
-            if attempt.notes["sequence"]["conversation"] in self._failed:
-                for key in _GRADING_NOTES:
-                    attempt.prompt.notes.pop(key, None)
+            sequence = attempt.notes["sequence"]
+            if sequence["conversation"] not in self._failed:
+                script = self.scripts[sequence["conversation"]]
+                judged = (
+                    self.judge_turns == "all"
+                    or sequence["turn_index"] == len(script.texts) - 1
+                )
+                attempt.prompt.notes.update(
+                    {
+                        k: v
+                        for k, v in script.notes.items()
+                        if k in _GRADING_NOTES and (judged or k not in _JUDGE_NOTES)
+                    }
+                )
         return attempts
 
     def _create_init_attempts(self) -> Iterable[garak.attempt.Attempt]:
@@ -302,10 +319,7 @@ class SequentialInjection(garak.probes.IterativeProbe):
         self, conversation: int, index: int, earlier: list
     ) -> garak.attempt.Attempt:
         script = self.scripts[conversation]
-        judged = self.judge_turns == "all" or index == len(script.texts) - 1
-        notes = {
-            k: v for k, v in script.notes.items() if judged or k not in _JUDGE_NOTES
-        }
+        notes = {k: v for k, v in script.notes.items() if k not in _GRADING_NOTES}
         user = garak.attempt.Turn(
             "user", garak.attempt.Message(script.texts[index], lang=self.lang)
         )

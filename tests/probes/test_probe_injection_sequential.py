@@ -164,11 +164,14 @@ def test_the_first_failed_turn_ends_the_conversation(tmp_path, report, failed, n
     assert len(target.prompts) == 2, "no request after the failed turn"
     assert attempts[1].notes["sequence"]["failure"] == name
     assert "failure" not in attempts[0].notes["sequence"]
-    for attempt in attempts:
+    report.seek(0)
+    rows = [json.loads(line) for line in report.read().splitlines()]
+    for notes in [a.prompt.notes for a in attempts] + [
+        r["prompt"]["notes"] for r in rows
+    ]:
         assert (
-            "tool_call_condition" not in attempt.prompt.notes
-            and "judge_rubric" not in attempt.prompt.notes
-        ), "a failed conversation is not graded"
+            "tool_call_condition" not in notes and "judge_rubric" not in notes
+        ), "a failed conversation is not graded, and no report line holds its grading notes"
 
 
 def test_every_generation_of_a_turn_carries_the_earlier_calls(tmp_path, report):
