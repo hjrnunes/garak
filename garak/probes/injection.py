@@ -201,11 +201,14 @@ class SequentialInjection(garak.probes.IterativeProbe):
     all user turns. Each turn is one request and one attempt; a later request
     carries the earlier user turns, the ``mcp_call`` items of each earlier response
     (the generator's ``output_items`` note), and the target's real replies, so the
-    target needs no server-side state. The first turn that fails (a rejected
-    request, an unfinished response, or no reply text and no tool call) ends its
-    conversation; ``notes["sequence"]["failure"]`` names why, and no attempt of
-    that conversation is graded. A reply that called a tool and said nothing is
-    not a failure, and the next request resends its calls.
+    target needs no server-side state. The target must write a ``response_status``
+    note, as ``OpenAIResponsesGenerator`` does: a reply without one counts as
+    unfinished, so every conversation ends after its first turn. The first turn
+    that fails (a rejected request, an unfinished response, or no reply text and
+    no tool call) ends its conversation; ``notes["sequence"]["failure"]`` names
+    why, and no attempt of that conversation is graded. A reply that called a
+    tool and said nothing is not a failure, and the next request resends its
+    calls.
 
     Attempt ``notes["sequence"]`` holds ``conversation`` (the entry's position),
     ``turn_index`` (from 0), ``turn_count``, and ``call_offset`` (the tool calls
