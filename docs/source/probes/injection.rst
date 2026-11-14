@@ -12,7 +12,9 @@ Each conversation is loaded from a JSON/JSONL source and may carry an optional
 ``detectors.toolcall.ToolCallCondition`` (the primary detector) evaluates it
 deterministically. An optional ``judge_rubric`` (a yes/no ``question`` with
 ``criteria``, ``facts``, and ``runtime_facts``) is answered by
-``detectors.rubric_judge.RubricJudge``, an extended detector.
+``detectors.rubric_judge.RubricJudge``, an extended detector. An attempt whose
+request the target rejected, or whose response did not finish, keeps its error
+note and loses the condition and the rubric, so no detector gives it a verdict.
 
 ``SequentialInjection`` reads the same entries when their messages are all user
 turns. It sends one user turn per request, as an ``IterativeProbe``: each later

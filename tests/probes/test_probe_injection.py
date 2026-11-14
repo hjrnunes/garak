@@ -104,6 +104,39 @@ def test_probe_passes_tool_call_condition_through(tmp_path):
     ), "entries without a condition add no note"
 
 
+@pytest.mark.parametrize(
+    "outputs, graded",
+    [
+        ([{"error": {"type": "InternalServerError"}}], False),
+        ([{"response_status": "incomplete"}], False),
+        ([{"response_status": "failed"}], False),
+        ([{"response_status": "completed"}], True),
+        ([{}], True),  # a chat target writes no response status
+        ([{"error": {"type": "InternalServerError"}}, {}], True),
+    ],
+    ids=["rejected", "incomplete", "failed", "completed", "no_status", "one_failed"],
+)
+def test_a_generation_that_did_not_finish_is_not_graded(tmp_path, outputs, graded):
+    probe = _probe(
+        tmp_path,
+        [
+            {
+                "messages": [{"role": "user", "content": "a"}],
+                "tools": [{"type": "mcp", "server_label": "tools"}],
+                "tool_call_condition": {"comparisons": []},
+                "judge_rubric": {"question": "Did it?"},
+            }
+        ],
+    )
+    attempt = probe._mint_attempt(probe.prompts[0])
+    attempt.outputs = [Message(None, notes=notes) for notes in outputs]
+
+    notes = probe._postprocess_attempt(attempt).prompt.notes
+
+    assert ("tool_call_condition" in notes, "judge_rubric" in notes) == (graded,) * 2
+    assert "tools" in notes, "only the grading notes go"
+
+
 def test_shipped_condition_is_scored_by_detector():
     probe = garak._plugins.load_plugin("probes.injection.IndirectInjection")
     conv = probe.prompts[0]

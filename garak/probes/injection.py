@@ -87,13 +87,29 @@ def entry_notes(entry: dict) -> dict:
     return notes
 
 
+def _not_finished(output: garak.attempt.Message | None) -> bool:
+    """Tell whether an output is a rejected request or an unfinished response.
+
+    A target that writes no response status, such as a chat completions target,
+    has not failed by that.
+    """
+    notes = (output.notes or {}) if output is not None else {}
+    return (
+        isinstance(notes.get("error"), dict)
+        or notes.get("response_status", "completed") != "completed"
+    )
+
+
 class IndirectInjection(garak.probes.Probe):
     """Replay pre-built conversations against a target, unchanged
 
     Loads conversations from a JSON/JSONL source and sends each one to the target
     without modification. When a conversation carries a tool_call_condition, a
     deterministic detector checks the target's tool calls; when it carries a
-    judge_rubric, a rubric judge answers its yes/no question.
+    judge_rubric, a rubric judge answers its yes/no question. An attempt none of
+    whose outputs finished (the target rejected the request, or its response did
+    not finish) keeps its error note but loses both, so no detector scores an
+    outage as a pass.
     """
 
     lang = "en"
@@ -144,6 +160,13 @@ class IndirectInjection(garak.probes.Probe):
         return garak.attempt.Conversation.from_openai(
             entry["messages"], notes=entry_notes(entry)
         )
+
+    def _postprocess_attempt(self, this_attempt) -> garak.attempt.Attempt:
+        attempt = super()._postprocess_attempt(this_attempt)
+        if attempt.outputs and all(_not_finished(o) for o in attempt.outputs):
+            for key in _GRADING_NOTES:
+                (attempt.prompt.notes or {}).pop(key, None)
+        return attempt
 
 
 @dataclass
