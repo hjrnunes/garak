@@ -241,6 +241,11 @@ def test_judge_turns_selects_the_judged_turns(tmp_path, report, judge_turns, jud
     assert all(
         a.prompt.notes["tool_call_condition"] == CONDITION for a in attempts
     ), "the tool-call condition costs no request, so every turn carries it"
+    attempts[0].prompt.notes["tool_call_condition"]["any"].clear()
+    assert (
+        attempts[1].prompt.notes["tool_call_condition"] == CONDITION
+        and probe.scripts[0].notes["tool_call_condition"] == CONDITION
+    ), "each attempt holds its own copy of the grading notes"
 
 
 def test_unknown_judge_turns_is_refused(tmp_path):

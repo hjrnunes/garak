@@ -286,11 +286,13 @@ class SequentialInjection(garak.probes.IterativeProbe):
                     or sequence["turn_index"] == len(script.texts) - 1
                 )
                 attempt.prompt.notes.update(
-                    {
-                        k: v
-                        for k, v in script.notes.items()
-                        if k in _GRADING_NOTES and (judged or k not in _JUDGE_NOTES)
-                    }
+                    copy.deepcopy(
+                        {
+                            k: v
+                            for k, v in script.notes.items()
+                            if k in _GRADING_NOTES and (judged or k not in _JUDGE_NOTES)
+                        }
+                    )
                 )
         return attempts
 
