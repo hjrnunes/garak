@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import httpx
 import openai
 import pytest
+import respx
 
 pytest.importorskip("midojo_spec.rubric_judge")
 from midojo_spec import judge as shared_judge
@@ -1522,3 +1523,80 @@ def test_native_reentry_flag_clears_after_guard_failure(monkeypatch, interrupt):
     assert judge.detect(built) == [1.0], "next call on the same thread can score"
     assert len(created) == 2, "each judgement reaches create at most once"
     assert resource.create == original_create, "successful call restores create"
+
+
+JUDGE_URI = "http://judge-endpoint.test/v1"
+JUDGE_REPLY = {
+    "id": "chatcmpl-judge",
+    "object": "chat.completion",
+    "created": 0,
+    "model": MODEL,
+    "choices": [
+        {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {"role": "assistant", "content": YES},
+        }
+    ],
+}
+
+
+def served_judge(**generator_settings):
+    """Load a native judge whose generator is a real client with no network."""
+    return configured(
+        "native",
+        detector_model_type="openai.OpenAICompatible",
+        detector_model_name=MODEL,
+        detector_model_config={
+            "uri": JUDGE_URI,
+            "api_key": "sentinel-judge-api-key-must-not-be-kept",
+            **generator_settings,
+        },
+    )
+
+
+@pytest.fixture
+def judge_network(monkeypatch):
+    monkeypatch.setattr("garak.generators.openai.time.sleep", lambda seconds: None)
+    monkeypatch.setattr(OpenAICompatible, "_validate_uri_connectivity", lambda s: None)
+
+
+@pytest.fixture
+def judge_endpoint(judge_network):
+    with respx.mock(base_url=JUDGE_URI) as router:
+        yield router.post("/chat/completions")
+
+
+@pytest.mark.parametrize("max_retries", [None, 0, 2])
+def test_native_judge_client_keeps_its_timeout_and_has_no_sdk_retries(
+    judge_network, max_retries
+):
+    judge = served_judge(max_retries=max_retries, client_options={"timeout": 7.5})
+    client = judge.evaluation_generator.client
+    assert client.timeout == 7.5, "the configured timeout survives the judge's setup"
+    assert client.max_retries == 0, "the SDK adds no request of its own"
+
+
+@pytest.mark.parametrize("max_retries", [None, 0, 2])
+@pytest.mark.parametrize(
+    "failure, label",
+    [
+        (
+            httpx.Response(503, json={"error": {"message": "unavailable"}}),
+            "InternalServerError",
+        ),
+        (httpx.ReadTimeout("slow"), "APITimeoutError"),
+    ],
+    ids=["server_error", "timeout"],
+)
+def test_native_judge_sends_one_request_and_names_the_error_when_it_fails(
+    judge_endpoint, max_retries, failure, label
+):
+    judge_endpoint.mock(side_effect=[failure, httpx.Response(200, json=JUDGE_REPLY)])
+    judge = served_judge(max_retries=max_retries)
+    built = attempt()
+    assert judge.detect(built) == [None], "a failed request cannot score"
+    assert judge_endpoint.call_count == 1, "the judge never asks twice"
+    assert built.notes[detector.RESULTS_NOTE][0]["reason"] == (
+        f"judge_failed:{label}"
+    ), "the record names the SDK error whether or not the generator bounds retries"

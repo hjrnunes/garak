@@ -507,7 +507,15 @@ class RubricJudge(ModelAsJudge):
             raise self.rules.JudgeCallError(label) from None
         if blocked:
             raise self.rules.JudgeCallError(first_error or "GarakException")
-        return responses[0].text if responses and responses[0] else None
+        if not responses or not responses[0]:
+            return None
+        # a generator with bounded retries answers a failed request with a
+        # failed generation, which names the error as a blocked retry does
+        error = (responses[0].notes or {}).get("error")
+        if responses[0].text is None and isinstance(error, dict):
+            if error.get("type") in _CALL_ERRORS:
+                raise self.rules.JudgeCallError(error["type"])
+        return responses[0].text
 
     def _post(self, sent):
         token = os.environ.get(self.service_token_env)

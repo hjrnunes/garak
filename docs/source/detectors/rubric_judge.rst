@@ -21,7 +21,9 @@ Install the ``midojo`` extra for the shared judge rules. Choose a backend with
   generator, but allows at most one chat-completions request, even if that
   generator retries. The SDK has no retries. A transient failure can incur
   one built-in backoff sleep of at most one second before a second request
-  is blocked. Only the shared judge request body reaches the provider, not
+  is blocked. A failed request leaves the verdict unresolved with
+  ``judge_failed:`` and the error type as the reason, also when the generator
+  sets ``max_retries``. Only the shared judge request body reaches the provider, not
   optional generator sampling settings. Configure provider credentials
   through the generator, not the rubric.
   Native judgements in one process run one at a time: the module-wide guard
